@@ -1,35 +1,85 @@
 use super::binary::{BinWriter, CfbDoc, add_coord_param};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ir::SymbolIr;
-use crate::util::{altium_section_key, unique_id};
+use crate::util::{unique_altium_section_key, unique_id};
+use std::collections::HashSet;
 use std::path::Path;
 
 const BLUE_BGR: i32 = 0x00FF0000;
 const RED_BGR: i32 = 0x000000FF;
 
 pub fn write(path: &Path, symbol: &SymbolIr) -> Result<()> {
-    let key = altium_section_key(&symbol.name);
-    let mut cfb = CfbDoc::create(path)?;
+    write_many(path, &[symbol])
+}
 
-    cfb.stream("FileHeader", &file_header(&key))?;
+pub fn write_many(path: &Path, symbols: &[&SymbolIr]) -> Result<()> {
+    if symbols.is_empty() {
+        return Err(Error::Altium("SchLib 没有元件".into()));
+    }
+    let mut used = HashSet::new();
+    let keys: Vec<String> = symbols
+        .iter()
+        .map(|s| unique_altium_section_key(&s.name, &mut used))
+        .collect();
+    let mut cfb = CfbDoc::create(path)?;
+    cfb.stream("FileHeader", &file_header_many(&keys))?;
     cfb.stream("Storage", &empty_storage())?;
-    cfb.storage(&key)?;
-    cfb.stream(&format!("{key}/Data"), &component_data(symbol, &key))?;
+
+    let key_pairs: Vec<(String, String)> = symbols
+        .iter()
+        .zip(keys.iter())
+        .filter(|(sym, key)| sym.name != **key)
+        .map(|(sym, key)| (sym.name.clone(), key.clone()))
+        .collect();
+    if !key_pairs.is_empty() {
+        cfb.stream("SectionKeys", &section_keys_bytes(&key_pairs))?;
+    }
+
+    for (sym, key) in symbols.iter().zip(keys.iter()) {
+        cfb.storage(key)?;
+        cfb.stream(&format!("{key}/Data"), &component_data(sym, key))?;
+    }
     cfb.finish()
 }
 
-fn file_header(name: &str) -> Vec<u8> {
+fn file_header_many(names: &[String]) -> Vec<u8> {
     let mut w = BinWriter::new();
     let uid = unique_id();
-    let raw = format!(
+    let n = names.len();
+    let mut raw = format!(
         "|HEADER=Protel for Windows - Schematic Library Editor Binary File Version 5.0\
-         |WEIGHT=1|MINORVERSION=2|UNIQUEID={uid}|FONTIDCOUNT=1|FONTNAME1=Times New Roman|SIZE1=10\
+         |WEIGHT={n}|MINORVERSION=2|UNIQUEID={uid}|FONTIDCOUNT=1|FONTNAME1=Times New Roman|SIZE1=10\
          |USEMBCS=T|ISBOC=T|SHEETSTYLE=9|SYSTEMFONT=1|BORDERON=T|DISPLAY_UNIT=0\
-         |COMPCOUNT=1|LIBREF0={name}|PARTCOUNT0=2"
+         |COMPCOUNT={n}"
     );
+    for (i, name) in names.iter().enumerate() {
+        raw.push_str(&format!("|LIBREF{i}={name}|PARTCOUNT{i}=2"));
+    }
     w.write_params_raw(&raw);
-    w.write_i32(1);
-    w.write_string_block(name);
+    w.write_i32(n as i32);
+    for name in names {
+        w.write_string_block(name);
+    }
+    w.into_vec()
+}
+
+fn section_keys_bytes(pairs: &[(String, String)]) -> Vec<u8> {
+    let mut w = BinWriter::new();
+    let mut pairs_out: Vec<(&str, String)> = vec![("KeyCount", pairs.len().to_string())];
+    let owned: Vec<(String, String)> = pairs
+        .iter()
+        .enumerate()
+        .flat_map(|(i, (name, key))| {
+            [
+                (format!("LibRef{i}"), name.clone()),
+                (format!("SectionKey{i}"), key.clone()),
+            ]
+        })
+        .collect();
+    for (k, v) in &owned {
+        pairs_out.push((k.as_str(), v.clone()));
+    }
+    w.write_params(&pairs_out);
     w.into_vec()
 }
 

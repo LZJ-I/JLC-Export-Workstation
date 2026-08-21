@@ -10,12 +10,20 @@ pub fn write_schlib(path: &Path, symbol: &SymbolIr) -> Result<()> {
     schlib::write(path, symbol)
 }
 
+pub fn write_schlib_many(path: &Path, symbols: &[&SymbolIr]) -> Result<()> {
+    schlib::write_many(path, symbols)
+}
+
 pub fn write_pcblib(path: &Path, footprint: &FootprintIr) -> Result<()> {
     pcblib::write(path, footprint)
 }
 
 pub fn write_pcblib_with_step(path: &Path, footprint: &FootprintIr, step: Option<&[u8]>) -> Result<()> {
     pcblib::write_with_step(path, footprint, step)
+}
+
+pub fn write_pcblib_library(path: &Path, parts: &[pcblib::PcbLibPart<'_>]) -> Result<()> {
+    pcblib::write_library(path, parts)
 }
 
 #[cfg(test)]
@@ -274,6 +282,101 @@ mod tests {
         let text = String::from_utf8_lossy(&uid);
         assert!(text.contains("Pad"));
         assert!(text.matches("Region").count() >= 2);
+    }
+
+    fn sample_symbol(name: &str) -> SymbolIr {
+        SymbolIr {
+            name: name.into(),
+            description: "test".into(),
+            meta: Default::default(),
+            pins: vec![IrPin {
+                number: "1".into(),
+                name: "1".into(),
+                x: 0.0,
+                y: 5.08,
+                length: 2.54,
+                rotation: 270.0,
+                pin_type: String::new(),
+            }],
+            rects: vec![IrRect {
+                x1: -1.0,
+                y1: -2.54,
+                x2: 1.0,
+                y2: 2.54,
+            }],
+            polys: vec![],
+            ellipses: vec![],
+        }
+    }
+
+    fn sample_fp(name: &str) -> FootprintIr {
+        FootprintIr {
+            name: name.into(),
+            description: name.into(),
+            meta: Default::default(),
+            pads: vec![IrPad {
+                designator: "1".into(),
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                hole: 0.0,
+                hole_slot: 0.0,
+                hole_shape: "ROUND".into(),
+                rotation: 0.0,
+                layer: 1,
+                shape: "RECT".into(),
+                polygon: None,
+            }],
+            tracks: vec![],
+            circles: vec![],
+            arcs: vec![],
+            regions: vec![],
+        }
+    }
+
+    #[test]
+    fn writes_merged_schlib_and_pcblib() {
+        let dir = std::env::temp_dir().join("lceda-test-merge");
+        let _ = std::fs::create_dir_all(&dir);
+        let a = sample_symbol("AAA");
+        let b = sample_symbol("BBB");
+        let sch = dir.join("lceda.SchLib");
+        write_schlib_many(&sch, &[&a, &b]).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&sch).unwrap()).unwrap();
+        assert!(cfb.exists("AAA/Data"));
+        assert!(cfb.exists("BBB/Data"));
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        let text = String::from_utf8_lossy(&hdr);
+        assert!(text.contains("COMPCOUNT=2"));
+        assert!(text.contains("LIBREF0=AAA"));
+        assert!(text.contains("LIBREF1=BBB"));
+
+        let fa = sample_fp("FPA");
+        let fb = sample_fp("FPB");
+        let pcb = dir.join("lceda.PcbLib");
+        write_pcblib_library(
+            &pcb,
+            &[
+                pcblib::PcbLibPart {
+                    fp: &fa,
+                    step: None,
+                },
+                pcblib::PcbLibPart {
+                    fp: &fb,
+                    step: None,
+                },
+            ],
+        )
+        .unwrap();
+        let cfb = cfb::CompoundFile::open(std::fs::File::open(&pcb).unwrap()).unwrap();
+        assert!(cfb.exists("FPA/Data"));
+        assert!(cfb.exists("FPB/Data"));
+        let mut lib = Vec::new();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&pcb).unwrap()).unwrap();
+        cfb.open_stream("Library/Data").unwrap().read_to_end(&mut lib).unwrap();
+        assert!(String::from_utf8_lossy(&lib).contains("WEIGHT=2"));
     }
 }
 

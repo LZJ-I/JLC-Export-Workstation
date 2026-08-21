@@ -142,6 +142,7 @@ struct App {
     shot_requested: bool,
     shot_settle: u32,
     ad_embed_3d: bool,
+    batch_merge: bool,
 }
 
 impl App {
@@ -195,6 +196,7 @@ impl App {
             shot_requested: false,
             shot_settle: 0,
             ad_embed_3d: prefs.ad_embed_3d,
+            batch_merge: prefs.batch_merge,
         }
     }
 
@@ -344,6 +346,14 @@ impl App {
                 let before = self.ad_embed_3d;
                 ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
                 if self.ad_embed_3d != before {
+                    self.persist_prefs();
+                }
+            }
+            if self.batch_opts.ad || self.batch_opts.kicad {
+                ui.add_space(4.0);
+                let before = self.batch_merge;
+                ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
+                if self.batch_merge != before {
                     self.persist_prefs();
                 }
             }
@@ -1245,7 +1255,7 @@ impl App {
     fn persist_prefs(&self) {
         crate::prefs::save(&crate::prefs::Prefs {
             ad_embed_3d: self.ad_embed_3d,
-            batch_merge: crate::prefs::load().batch_merge,
+            batch_merge: self.batch_merge,
         });
     }
 
@@ -1263,6 +1273,7 @@ impl App {
         }
         let mut req = self.batch_opts.request(out_dir.clone());
         req.ad_embed_3d = self.ad_embed_3d;
+        req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("batch", move || {
             let text = std::fs::read_to_string(&file)

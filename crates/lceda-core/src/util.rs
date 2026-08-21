@@ -38,6 +38,23 @@ pub fn part_stem(mpn: &str, lcsc: Option<&str>, manufacturer: &str) -> String {
     }
 }
 
+/// Unique name; suffixes `_2`, `_3` on collision.
+pub fn unique_name(name: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let base = name.trim();
+    let base = if base.is_empty() { "component" } else { base };
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("{base}_{index}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
 /// Unique 31-char CFB storage name; suffixes `_2`, `_3` on collision.
 pub fn unique_altium_section_key(name: &str, used: &mut std::collections::HashSet<String>) -> String {
     let base = altium_section_key(name);

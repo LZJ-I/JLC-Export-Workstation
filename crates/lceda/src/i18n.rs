@@ -72,6 +72,8 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "batch_title") => "Batch export",
         (Lang::Zh, "batch_hint") => "勾选要写出的类型，再选文本列表。",
         (Lang::En, "batch_hint") => "Tick the formats to write, then pick the list file.",
+        (Lang::Zh, "batch_merge") => "合并到一个库",
+        (Lang::En, "batch_merge") => "Merge into one library",
         (Lang::Zh, "batch_start") => "选择文件…",
         (Lang::En, "batch_start") => "Choose file…",
         (Lang::Zh, "batch_cancel") => "取消",

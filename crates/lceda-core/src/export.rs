@@ -7,8 +7,9 @@ use crate::kicad;
 use crate::mesh;
 use crate::pads;
 use crate::models::{DownloadPaths, SearchItem};
-use crate::util::{ensure_parent, looks_like_step, sanitize_filename};
+use crate::util::{ensure_parent, looks_like_step, sanitize_filename, unique_name};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -56,12 +57,25 @@ impl ExportRequest {
 }
 
 pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> Result<DownloadPaths> {
+    Ok(export_part(client, item, req)?.paths)
+}
+
+struct PartExport {
+    paths: DownloadPaths,
+    symbol: Option<SymbolIr>,
+    footprint: Option<FootprintIr>,
+    step: Option<Vec<u8>>,
+}
+
+fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> Result<PartExport> {
     let folder_name = item.export_stem();
     let base = sanitize_filename(item.name());
     let part_dir = req.out_dir.join(&folder_name);
     let mut out = DownloadPaths::default();
     let want_other = req.step || req.obj || req.any_library();
     let mut step_bytes: Option<Vec<u8>> = None;
+    let mut symbol_ir = None;
+    let mut footprint_ir = None;
 
     if req.step {
         if item.model_uuid.is_none() {
@@ -137,14 +151,16 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
         if !item.has_symbol_or_footprint() {
             return Err(Error::NoSymbolOrFootprint);
         }
-        let (symbol_json, footprint_json, symbol_ir, footprint_ir) =
+        let (symbol_json, footprint_json, fetched_sym, fetched_fp) =
             fetch_sources(client, item, &part_dir, &base, req.force)?;
+        symbol_ir = fetched_sym;
+        footprint_ir = fetched_fp;
         if req.source_json || req.ad || req.kicad || req.pads {
             out.symbol_json = symbol_json;
             out.footprint_json = footprint_json;
         }
 
-        if req.ad {
+        if req.ad && !req.merge {
             if let Err(e) = export_altium(
                 &mut out,
                 &part_dir,
@@ -159,7 +175,7 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
                 eprintln!("{e}");
             }
         }
-        if req.kicad {
+        if req.kicad && !req.merge {
             let step = out.step.clone();
             export_kicad(
                 &mut out,
@@ -185,7 +201,12 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
         return Err(Error::msg("没有写出任何文件"));
     }
     out.folder = Some(part_dir);
-    Ok(out)
+    Ok(PartExport {
+        paths: out,
+        symbol: symbol_ir,
+        footprint: footprint_ir,
+        step: step_bytes,
+    })
 }
 
 pub fn export_batch(
@@ -193,16 +214,170 @@ pub fn export_batch(
     keywords: &[String],
     req: &ExportRequest,
 ) -> Vec<(String, Result<DownloadPaths>)> {
+    let merge_libs = req.merge && (req.ad || req.kicad);
     let mut rows = Vec::new();
+    let mut collected = Vec::new();
     for kw in keywords {
         let kw = kw.trim();
         if kw.is_empty() {
             continue;
         }
-        let result = client.select(kw, 1).and_then(|item| export(client, &item, req));
-        rows.push((kw.to_string(), result));
+        if merge_libs {
+            let result = client.select(kw, 1).and_then(|item| export_part(client, &item, req));
+            match result {
+                Ok(part) => {
+                    rows.push((kw.to_string(), Ok(part.paths.clone())));
+                    collected.push(part);
+                }
+                Err(e) => rows.push((kw.to_string(), Err(e))),
+            }
+        } else {
+            let result = client.select(kw, 1).and_then(|item| export(client, &item, req));
+            rows.push((kw.to_string(), result));
+        }
+    }
+    if merge_libs && !collected.is_empty() {
+        uniquify_collected(&mut collected);
+        match write_merged_libraries(req, &collected) {
+            Ok(merged) => {
+                let mut idx = 0;
+                for (_, result) in &mut rows {
+                    if result.is_ok() {
+                        let mut paths = collected[idx].paths.clone();
+                        if req.ad {
+                            paths.schlib = merged.schlib.clone();
+                            paths.pcblib = merged.pcblib.clone();
+                        }
+                        if req.kicad {
+                            paths.kicad_sym = merged.kicad_sym.clone();
+                            paths.kicad_mod = merged.kicad_mod.clone();
+                        }
+                        *result = Ok(paths);
+                        idx += 1;
+                    }
+                }
+            }
+            Err(e) => rows.push((req.merge_name.clone(), Err(e))),
+        }
     }
     rows
+}
+
+fn uniquify_collected(parts: &mut [PartExport]) {
+    let mut used_sym = HashSet::new();
+    let mut used_fp = HashSet::new();
+    for part in parts.iter_mut() {
+        if let Some(sym) = &mut part.symbol {
+            sym.name = unique_name(&sym.name, &mut used_sym);
+        }
+        if let Some(fp) = &mut part.footprint {
+            fp.name = unique_name(&fp.name, &mut used_fp);
+            if let Some(sym) = &mut part.symbol {
+                sym.meta.footprint_lib = fp.name.clone();
+            }
+        }
+    }
+}
+
+fn write_merged_libraries(req: &ExportRequest, parts: &[PartExport]) -> Result<DownloadPaths> {
+    let name = if req.merge_name.trim().is_empty() {
+        "lceda"
+    } else {
+        req.merge_name.trim()
+    };
+    let name = sanitize_filename(name);
+    let mut out = DownloadPaths::default();
+    let mut ad_err: Option<String> = None;
+
+    if req.ad {
+        let symbols: Vec<&SymbolIr> = parts.iter().filter_map(|p| p.symbol.as_ref()).collect();
+        if !symbols.is_empty() {
+            let sch = req.out_dir.join(format!("{name}.SchLib"));
+            match altium::write_schlib_many(&sch, &symbols) {
+                Ok(()) if sch.exists() && sch.metadata().map(|m| m.len()).unwrap_or(0) > 64 => {
+                    out.schlib = Some(sch);
+                }
+                Ok(()) => ad_err = Some("SchLib 写出后文件为空".into()),
+                Err(e) => ad_err = Some(e.to_string()),
+            }
+        }
+        let pcblib_parts: Vec<altium::pcblib::PcbLibPart<'_>> = parts
+            .iter()
+            .filter_map(|p| {
+                p.footprint.as_ref().map(|fp| altium::pcblib::PcbLibPart {
+                    fp,
+                    step: p.step.as_deref(),
+                })
+            })
+            .collect();
+        if !pcblib_parts.is_empty() {
+            let pcb = req.out_dir.join(format!("{name}.PcbLib"));
+            match altium::write_pcblib_library(&pcb, &pcblib_parts) {
+                Ok(()) if pcb.exists() && pcb.metadata().map(|m| m.len()).unwrap_or(0) > 64 => {
+                    out.pcblib = Some(pcb);
+                }
+                Ok(()) => {
+                    ad_err.get_or_insert("PcbLib 写出后文件为空".into());
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    ad_err = Some(match ad_err {
+                        Some(prev) => format!("{prev}; {msg}"),
+                        None => msg,
+                    });
+                }
+            }
+        }
+        if req.ad && out.schlib.is_none() && out.pcblib.is_none() {
+            return Err(Error::Altium(ad_err.unwrap_or_else(|| {
+                "未能生成合并 SchLib/PcbLib".into()
+            })));
+        }
+    }
+
+    if req.kicad {
+        let mut symbols: Vec<SymbolIr> = parts.iter().filter_map(|p| p.symbol.clone()).collect();
+        let pretty = kicad::pretty_dir(&req.out_dir, &name);
+        let shapes = req.out_dir.join(format!("{name}.3dshapes"));
+        for part in parts {
+            let Some(fp) = part.footprint.as_ref() else {
+                continue;
+            };
+            let mut step_rel = None;
+            if let Some(bytes) = part.step.as_ref() {
+                fs::create_dir_all(&shapes)?;
+                let dest = shapes.join(format!("{}.step", sanitize_filename(&fp.name)));
+                fs::write(&dest, bytes)?;
+                step_rel = Some(format!("../{name}.3dshapes/{}.step", sanitize_filename(&fp.name)));
+            } else if let Some(src) = part.paths.step.as_ref() {
+                fs::create_dir_all(&shapes)?;
+                let dest = shapes.join(format!("{}.step", sanitize_filename(&fp.name)));
+                if src != dest.as_path() {
+                    let _ = fs::copy(src, &dest);
+                }
+                step_rel = Some(format!("../{name}.3dshapes/{}.step", sanitize_filename(&fp.name)));
+            }
+            let path = pretty.join(format!("{}.kicad_mod", sanitize_filename(&fp.name)));
+            kicad::write_footprint_mod(&path, fp, step_rel.as_deref())?;
+            out.kicad_mod = Some(path);
+        }
+        for sym in &mut symbols {
+            if !sym.meta.footprint_lib.is_empty() {
+                let fp = sanitize_filename(&sym.meta.footprint_lib);
+                sym.meta.footprint_lib = format!("{name}:{fp}");
+            }
+        }
+        if !symbols.is_empty() {
+            let path = req.out_dir.join(format!("{name}.kicad_sym"));
+            kicad::write_symbol_lib_many(&path, &symbols)?;
+            out.kicad_sym = Some(path);
+        }
+        if out.kicad_sym.is_none() && out.kicad_mod.is_none() {
+            return Err(Error::msg("未能生成合并 KiCad 库"));
+        }
+    }
+
+    Ok(out)
 }
 
 fn export_altium(

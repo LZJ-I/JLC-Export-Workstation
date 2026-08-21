@@ -8,8 +8,12 @@ use std::fs;
 use std::path::Path;
 
 pub fn write_symbol_lib(path: &Path, symbol: &SymbolIr) -> Result<()> {
+    write_symbol_lib_many(path, std::slice::from_ref(symbol))
+}
+
+pub fn write_symbol_lib_many(path: &Path, symbols: &[SymbolIr]) -> Result<()> {
     ensure_parent(path)?;
-    fs::write(path, symbol_lib_text(symbol))?;
+    fs::write(path, symbol_lib_text_many(symbols))?;
     Ok(())
 }
 
@@ -23,12 +27,21 @@ pub fn pretty_dir(out_dir: &Path, base: &str) -> std::path::PathBuf {
     out_dir.join(format!("{}.pretty", sanitize_filename(base)))
 }
 
-fn symbol_lib_text(symbol: &SymbolIr) -> String {
-    let name = ident(&symbol.name);
+fn symbol_lib_text_many(symbols: &[SymbolIr]) -> String {
     let mut out = String::new();
     out.push_str("(kicad_symbol_lib\n");
     out.push_str("  (version 20241209)\n");
     out.push_str("  (generator \"lceda-assistant\")\n");
+    for symbol in symbols {
+        out.push_str(&symbol_entry(symbol));
+    }
+    out.push_str(")\n");
+    out
+}
+
+fn symbol_entry(symbol: &SymbolIr) -> String {
+    let name = ident(&symbol.name);
+    let mut out = String::new();
     out.push_str(&format!("  (symbol {name}\n"));
     out.push_str("    (exclude_from_sim no)\n    (in_bom yes)\n    (on_board yes)\n");
     push_prop(&mut out, "Reference", &guess_ref(symbol), 0.0, 5.08);
@@ -106,7 +119,7 @@ fn symbol_lib_text(symbol: &SymbolIr) -> String {
             quoted(&pin.number)
         ));
     }
-    out.push_str("    )\n  )\n)\n");
+    out.push_str("    )\n  )\n");
     out
 }
 
@@ -426,11 +439,30 @@ mod tests {
             polys: vec![],
             ellipses: vec![],
         };
-        let text = symbol_lib_text(&symbol);
+        let text = symbol_lib_text_many(std::slice::from_ref(&symbol));
         assert!(text.contains("(kicad_symbol_lib"));
         assert!(text.contains("LCSC"));
         assert!(text.contains("C2040"));
         assert!(text.contains("passive"));
+    }
+
+    #[test]
+    fn merged_symbol_lib_contains_two_entries() {
+        let a = SymbolIr {
+            name: "AAA".into(),
+            description: String::new(),
+            meta: PartMeta::default(),
+            pins: vec![],
+            rects: vec![],
+            polys: vec![],
+            ellipses: vec![],
+        };
+        let mut b = a.clone();
+        b.name = "BBB".into();
+        let text = symbol_lib_text_many(&[a, b]);
+        assert!(text.contains("(symbol \"AAA\""));
+        assert!(text.contains("(symbol \"BBB\""));
+        assert_eq!(text.matches("(kicad_symbol_lib").count(), 1);
     }
 
     #[test]

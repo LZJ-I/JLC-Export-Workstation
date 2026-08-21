@@ -80,6 +80,9 @@ pub enum Cmd {
         /// 不把 STEP 嵌入 PcbLib（默认嵌入）
         #[arg(long = "no-ad-3d")]
         no_ad_3d: bool,
+        /// 将本次批量的 AD/KiCad 合成一个库（不追加已有文件）
+        #[arg(long)]
+        merge: bool,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -157,6 +160,7 @@ pub fn run() -> Result<i32> {
             datasheet,
             source,
             no_ad_3d,
+            merge,
             output,
             force,
         }) => {
@@ -167,7 +171,8 @@ pub fn run() -> Result<i32> {
                 println!("empty list");
                 return Ok(1);
             }
-            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, !no_ad_3d, output, force);
+            let mut req = build_req(step, obj, ad, kicad, pads, datasheet, source, !no_ad_3d, output, force);
+            req.merge = merge;
             let client = LcedaClient::new();
             let mut failed = 0;
             for (kw, result) in export::export_batch(&client, &ids, &req) {
