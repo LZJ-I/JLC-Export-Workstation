@@ -16,6 +16,8 @@ pub struct UpdateInfo {
     pub version: String,
     pub zip_url: Option<String>,
     pub page_url: String,
+    /// GitHub Release 描述（markdown 原文，可能为空）。
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,7 +88,17 @@ pub fn check_for_update() -> CheckResult {
         version,
         zip_url,
         page_url: via_proxy(RELEASES_URL),
+        notes: release_notes(&json),
     })
+}
+
+fn release_notes(json: &Value) -> String {
+    json.get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .replace('\r', "")
+        .trim()
+        .to_string()
 }
 
 pub fn download_and_apply(info: &UpdateInfo, progress: Option<ProgressHandle>) -> Result<(), String> {
@@ -279,5 +291,13 @@ mod tests {
         let p = via_proxy(u);
         assert!(p.starts_with(PROXY));
         assert_eq!(via_proxy(&p), p);
+    }
+
+    #[test]
+    fn release_notes_trim_and_normalize() {
+        let json = serde_json::json!({ "body": "\r\n- 修复导出\r\n- 更新文档\n  " });
+        assert_eq!(release_notes(&json), "- 修复导出\n- 更新文档");
+        let empty = serde_json::json!({ "body": null });
+        assert!(release_notes(&empty).is_empty());
     }
 }

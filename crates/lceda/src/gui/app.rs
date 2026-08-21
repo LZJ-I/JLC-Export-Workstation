@@ -387,12 +387,39 @@ impl App {
         let body = i18n::t(self.lang, "update_body")
             .replace("{cur}", update::current_version())
             .replace("{new}", &info.version);
-        let width = 400.0;
-        fit_window(i18n::t(self.lang, "update_title"), "lceda_update_fit", width).show(
-            ctx,
-            |ui| {
+        let notes = info.notes.trim();
+        let width = if notes.is_empty() { 400.0 } else { 440.0 };
+        let tall = notes.lines().count() > 8 || notes.chars().count() > 240;
+        fit_window(i18n::t(self.lang, "update_title"), "lceda_update_fit", width)
+            .max_height(if tall { 420.0 } else { 800.0 })
+            .show(ctx, |ui| {
                 ui.set_width(width - 8.0);
                 ui.add(egui::Label::new(egui::RichText::new(body).color(LABEL)).wrap());
+                if !notes.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t(self.lang, "update_notes"))
+                            .color(SECONDARY)
+                            .size(12.0),
+                    );
+                    ui.add_space(4.0);
+                    let add_notes = |ui: &mut egui::Ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(notes).color(LABEL).size(13.0))
+                                .wrap()
+                                .halign(egui::Align::Min),
+                        );
+                    };
+                    if tall {
+                        egui::ScrollArea::vertical()
+                            .id_salt("update_notes")
+                            .max_height(220.0)
+                            .auto_shrink([false, true])
+                            .show(ui, add_notes);
+                    } else {
+                        add_notes(ui);
+                    }
+                }
                 if downloading {
                     ui.add_space(8.0);
                     let (label, fraction, indeterminate) = self

@@ -162,6 +162,8 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "update_title") => "Update available",
         (Lang::Zh, "update_body") => "当前 {cur}，可更新到 {new}。下载并替换后会自动重启。",
         (Lang::En, "update_body") => "You have {cur}. Version {new} is available. The app will restart after updating.",
+        (Lang::Zh, "update_notes") => "更新说明",
+        (Lang::En, "update_notes") => "Release notes",
         (Lang::Zh, "update_now") => "立即更新",
         (Lang::En, "update_now") => "Update now",
         (Lang::Zh, "update_later") => "以后再说",
