@@ -494,5 +494,25 @@ mod tests {
         assert!(text.contains("(footprint"));
         assert!(text.contains("smd"));
         assert!(text.contains("\"1\""));
+        assert!(!text.contains("(model "));
+    }
+
+    #[test]
+    fn footprint_mod_model_block_matches_npnp_sexp() {
+        let fp = FootprintIr {
+            name: "R0402".into(),
+            description: "0402".into(),
+            meta: PartMeta::default(),
+            pads: vec![],
+            tracks: vec![],
+            circles: vec![],
+            arcs: vec![],
+            regions: vec![],
+        };
+        let text = footprint_mod_text(&fp, Some("../R0402.3dshapes/R0402.step"));
+        assert!(text.contains("  (model \"../R0402.3dshapes/R0402.step\"\n"));
+        assert!(text.contains("    (offset (xyz 0 0 0))\n"));
+        assert!(text.contains("    (scale (xyz 1 1 1))\n"));
+        assert!(text.contains("    (rotate (xyz 0 0 0))\n"));
     }
 }

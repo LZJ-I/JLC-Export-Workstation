@@ -33,13 +33,15 @@ cargo build --release -p lceda --target x86_64-pc-windows-msvc
 3. 用右侧按钮下载或导出：
    - **下载 STEP / OBJ**：三维模型
    - **导出 AD 库**：`.SchLib` / `.PcbLib`（同时保留 EasyEDA JSON）
-   - **导出 KiCad**：`.kicad_sym` 与 `.pretty`
+   - **导出 KiCad**：`.kicad_sym` 与 `.pretty`（有模型时写入 `.3dshapes` 并在封装中引用）
    - **导出 PADS**：`.c` 原理图 Decal、`.d` PCB Decal、`.p` Part Type（经典 Logic / Layout；Professional / Xpedition 不能当 Central Library）
    - **数据手册**：PDF。立创给的经常是 HTML 页，程序会从页面里取出真正的 PDF
    - **打开立创页**：国内站商品页（`item.szlcsc.com`）
    - **批量文件…**：先勾选要写出的类型，再选一个文本文件，每行一个编号或关键字
 
 按钮变灰表示当前器件没有对应资源；再点一下会弹出说明，不会建空文件夹。
+
+右上角 **设置** 里可开关：导出 AD 时是否把 STEP 嵌入 PcbLib、导出 KiCad 时是否写入 `.3dshapes`。两项默认开启；器件没有 3D 时跳过，不失败。
 
 导出 AD / KiCad / PADS 时会同时留下 EasyEDA JSON，供对照，不必单独再导一遍。
 
@@ -61,6 +63,8 @@ C2040
 ```bash
 lceda search C2040
 lceda get C2040 --step --ad --kicad --pads -o ./out
+lceda get C2040 --kicad --no-kicad-3d -o ./out
+lceda get C2040 --ad --no-ad-3d -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out

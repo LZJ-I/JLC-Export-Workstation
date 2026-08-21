@@ -55,6 +55,9 @@ pub enum Cmd {
         /// 不把 STEP 嵌入 PcbLib（默认嵌入）
         #[arg(long = "no-ad-3d")]
         no_ad_3d: bool,
+        /// 不把 STEP 写入 KiCad .3dshapes（默认写入）
+        #[arg(long = "no-kicad-3d")]
+        no_kicad_3d: bool,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -80,6 +83,9 @@ pub enum Cmd {
         /// 不把 STEP 嵌入 PcbLib（默认嵌入）
         #[arg(long = "no-ad-3d")]
         no_ad_3d: bool,
+        /// 不把 STEP 写入 KiCad .3dshapes（默认写入）
+        #[arg(long = "no-kicad-3d")]
+        no_kicad_3d: bool,
         /// 将本次批量的 AD/KiCad 合成一个库（不追加已有文件）
         #[arg(long)]
         merge: bool,
@@ -140,12 +146,25 @@ pub fn run() -> Result<i32> {
             datasheet,
             source,
             no_ad_3d,
+            no_kicad_3d,
             output,
             force,
         }) => {
             let client = LcedaClient::new();
             let item = client.select(&keyword, index)?;
-            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, !no_ad_3d, output, force);
+            let req = build_req(
+                step,
+                obj,
+                ad,
+                kicad,
+                pads,
+                datasheet,
+                source,
+                !no_ad_3d,
+                !no_kicad_3d,
+                output,
+                force,
+            );
             let paths = export::export(&client, &item, &req).context("export failed")?;
             print_paths(&paths);
             Ok(0)
@@ -160,6 +179,7 @@ pub fn run() -> Result<i32> {
             datasheet,
             source,
             no_ad_3d,
+            no_kicad_3d,
             merge,
             output,
             force,
@@ -171,7 +191,19 @@ pub fn run() -> Result<i32> {
                 println!("empty list");
                 return Ok(1);
             }
-            let mut req = build_req(step, obj, ad, kicad, pads, datasheet, source, !no_ad_3d, output, force);
+            let mut req = build_req(
+                step,
+                obj,
+                ad,
+                kicad,
+                pads,
+                datasheet,
+                source,
+                !no_ad_3d,
+                !no_kicad_3d,
+                output,
+                force,
+            );
             req.merge = merge;
             let client = LcedaClient::new();
             let mut failed = 0;
@@ -201,6 +233,7 @@ fn build_req(
     datasheet: bool,
     source: bool,
     ad_embed_3d: bool,
+    kicad_attach_3d: bool,
     output: PathBuf,
     force: bool,
 ) -> ExportRequest {
@@ -215,6 +248,7 @@ fn build_req(
         force,
         out_dir: output,
         ad_embed_3d,
+        kicad_attach_3d,
         merge: false,
         merge_name: "lceda".into(),
     };

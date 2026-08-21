@@ -33,13 +33,15 @@ Each part gets a subfolder named `MPN_LCSC_Manufacturer`. Files inside use the M
 3. Use the buttons on the right:
    - **Download STEP / OBJ**: 3D models
    - **Export Altium**: `.SchLib` / `.PcbLib` (EasyEDA JSON is kept too)
-   - **Export KiCad**: `.kicad_sym` and `.pretty`
+   - **Export KiCad**: `.kicad_sym` and `.pretty` (writes `.3dshapes` and a footprint model ref when a STEP exists)
    - **Export PADS**: `.c` schematic decal, `.d` PCB decal, `.p` part type (classic Logic / Layout; not PADS Professional / Xpedition Central Library)
    - **Datasheet**: PDF. LCSC often gives an HTML page; the app pulls the real PDF from it
    - **Open LCSC**: Chinese product page (`item.szlcsc.com`)
    - **Batch file…**: tick the formats you want, then pick a text file, one id or keyword per line
 
 Dimmed buttons mean this part has no matching asset. Click anyway for a notice; no empty folder is created.
+
+**Settings** (top right) controls whether Altium export embeds STEP in the PcbLib and whether KiCad export writes `.3dshapes`. Both default on; a missing model is skipped, not a failure.
 
 Exporting Altium / KiCad / PADS also keeps EasyEDA JSON for inspection.
 
@@ -61,6 +63,8 @@ No arguments opens the GUI.
 ```bash
 lceda search C2040
 lceda get C2040 --step --ad --kicad --pads -o ./out
+lceda get C2040 --kicad --no-kicad-3d -o ./out
+lceda get C2040 --ad --no-ad-3d -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out

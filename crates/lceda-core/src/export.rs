@@ -26,6 +26,8 @@ pub struct ExportRequest {
     pub out_dir: PathBuf,
     /// Embed STEP into PcbLib when a 3D model exists.
     pub ad_embed_3d: bool,
+    /// Write STEP into `{name}.3dshapes` and reference it from the KiCad footprint.
+    pub kicad_attach_3d: bool,
     /// Batch: write one combined library instead of per-part folders for AD/KiCad.
     pub merge: bool,
     pub merge_name: String,
@@ -44,6 +46,7 @@ impl Default for ExportRequest {
             force: false,
             out_dir: PathBuf::from("."),
             ad_embed_3d: true,
+            kicad_attach_3d: true,
             merge: false,
             merge_name: "lceda".into(),
         }
@@ -53,6 +56,11 @@ impl Default for ExportRequest {
 impl ExportRequest {
     pub fn any_library(&self) -> bool {
         self.ad || self.kicad || self.pads || self.source_json
+    }
+
+    fn wants_library_step(&self, item: &SearchItem) -> bool {
+        item.model_uuid.is_some()
+            && ((self.ad && self.ad_embed_3d) || (self.kicad && self.kicad_attach_3d))
     }
 }
 
@@ -98,11 +106,11 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             }
         }
         out.step = Some(path);
-    } else if req.ad && req.ad_embed_3d && item.model_uuid.is_some() {
+    } else if req.wants_library_step(item) {
         match client.download_step_bytes(item) {
             Ok(bytes) if looks_like_step(&bytes) => step_bytes = Some(bytes),
-            Ok(_) => eprintln!("STEP 不是有效模型，PcbLib 将不含 3D"),
-            Err(e) => eprintln!("下载 STEP 失败，PcbLib 将不含 3D: {e}"),
+            Ok(_) => eprintln!("STEP 不是有效模型，库导出将不含 3D"),
+            Err(e) => eprintln!("下载 STEP 失败，库导出将不含 3D: {e}"),
         }
     }
 
@@ -176,14 +184,14 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             }
         }
         if req.kicad && !req.merge {
-            let step = out.step.clone();
             export_kicad(
                 &mut out,
                 &part_dir,
                 &base,
                 symbol_ir.as_ref(),
                 footprint_ir.as_ref(),
-                step.as_deref(),
+                step_bytes.as_deref(),
+                req.kicad_attach_3d,
             )?;
         }
         if req.pads {
@@ -343,19 +351,18 @@ fn write_merged_libraries(req: &ExportRequest, parts: &[PartExport]) -> Result<D
             let Some(fp) = part.footprint.as_ref() else {
                 continue;
             };
+            let step_name = format!("{}.step", sanitize_filename(&fp.name));
             let mut step_rel = None;
-            if let Some(bytes) = part.step.as_ref() {
-                fs::create_dir_all(&shapes)?;
-                let dest = shapes.join(format!("{}.step", sanitize_filename(&fp.name)));
-                fs::write(&dest, bytes)?;
-                step_rel = Some(format!("../{name}.3dshapes/{}.step", sanitize_filename(&fp.name)));
-            } else if let Some(src) = part.paths.step.as_ref() {
-                fs::create_dir_all(&shapes)?;
-                let dest = shapes.join(format!("{}.step", sanitize_filename(&fp.name)));
-                if src != dest.as_path() {
-                    let _ = fs::copy(src, &dest);
+            if req.kicad_attach_3d {
+                if let Some(bytes) = part.step.as_ref() {
+                    step_rel = write_kicad_step(&shapes, &name, &step_name, bytes)?;
+                } else if let Some(src) = part.paths.step.as_ref() {
+                    if let Ok(bytes) = fs::read(src) {
+                        if looks_like_step(&bytes) {
+                            step_rel = write_kicad_step(&shapes, &name, &step_name, &bytes)?;
+                        }
+                    }
                 }
-                step_rel = Some(format!("../{name}.3dshapes/{}.step", sanitize_filename(&fp.name)));
             }
             let path = pretty.join(format!("{}.kicad_mod", sanitize_filename(&fp.name)));
             kicad::write_footprint_mod(&path, fp, step_rel.as_deref())?;
@@ -431,24 +438,37 @@ fn export_altium(
     Ok(())
 }
 
+/// Place STEP beside the `.pretty` folder and return a path relative to the `.kicad_mod`.
+/// KiCad resolves non-`${}` model paths from the footprint file. npnp aliases
+/// `${lib}/name.3dshapes`, which needs extra 3D search-path config.
+fn write_kicad_step(
+    shapes: &Path,
+    lib_base: &str,
+    step_file: &str,
+    bytes: &[u8],
+) -> Result<Option<String>> {
+    fs::create_dir_all(shapes)?;
+    fs::write(shapes.join(step_file), bytes)?;
+    Ok(Some(format!("../{lib_base}.3dshapes/{step_file}")))
+}
+
 fn export_kicad(
     out: &mut DownloadPaths,
     out_dir: &Path,
     base: &str,
     symbol_ir: Option<&SymbolIr>,
     footprint_ir: Option<&FootprintIr>,
-    step: Option<&Path>,
+    step: Option<&[u8]>,
+    attach_3d: bool,
 ) -> Result<()> {
     let pretty = kicad::pretty_dir(out_dir, base);
     let mut step_rel = None;
-    if let Some(src) = step {
-        let shapes = out_dir.join(format!("{base}.3dshapes"));
-        fs::create_dir_all(&shapes)?;
-        let dest = shapes.join(format!("{base}.step"));
-        if src != dest.as_path() {
-            let _ = fs::copy(src, &dest);
+    if attach_3d {
+        if let Some(bytes) = step {
+            let shapes = out_dir.join(format!("{base}.3dshapes"));
+            let step_file = format!("{base}.step");
+            step_rel = write_kicad_step(&shapes, base, &step_file, bytes)?;
         }
-        step_rel = Some(format!("../{base}.3dshapes/{base}.step"));
     }
 
     if let Some(sym) = symbol_ir {
@@ -538,3 +558,151 @@ fn write_json(path: &Path, value: &Value, force: bool) -> Result<()> {
     fs::write(path, serde_json::to_vec_pretty(value)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{FootprintIr, IrPad};
+
+    fn sample_fp(name: &str) -> FootprintIr {
+        FootprintIr {
+            name: name.into(),
+            description: String::new(),
+            meta: Default::default(),
+            pads: vec![IrPad {
+                designator: "1".into(),
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                hole: 0.0,
+                hole_slot: 0.0,
+                hole_shape: "ROUND".into(),
+                rotation: 0.0,
+                layer: 1,
+                shape: "RECT".into(),
+                polygon: None,
+            }],
+            tracks: vec![],
+            circles: vec![],
+            arcs: vec![],
+            regions: vec![],
+        }
+    }
+
+    fn dummy_step() -> Vec<u8> {
+        b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n".to_vec()
+    }
+
+    #[test]
+    fn kicad_export_writes_3dshapes_and_npnp_style_model_block() {
+        let dir = std::env::temp_dir().join("lceda-test-kicad-3d");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fp = sample_fp("CHIP");
+        let mut out = DownloadPaths::default();
+        export_kicad(&mut out, &dir, "CHIP", None, Some(&fp), Some(&dummy_step()), true).unwrap();
+
+        let step = dir.join("CHIP.3dshapes").join("CHIP.step");
+        assert!(step.exists(), "STEP should sit in name.3dshapes like npnp");
+        assert!(looks_like_step(&std::fs::read(&step).unwrap()));
+        let mod_path = dir.join("CHIP.pretty").join("CHIP.kicad_mod");
+        let text = std::fs::read_to_string(&mod_path).unwrap();
+        assert!(
+            text.contains("(model \"../CHIP.3dshapes/CHIP.step\""),
+            "relative to .kicad_mod so KiCad opens a downloaded folder without extra 3D paths:\n{text}"
+        );
+        assert!(text.contains("(offset (xyz 0 0 0))"));
+        assert!(text.contains("(scale (xyz 1 1 1))"));
+        assert!(text.contains("(rotate (xyz 0 0 0))"));
+    }
+
+    #[test]
+    fn kicad_export_skips_3d_when_disabled() {
+        let dir = std::env::temp_dir().join("lceda-test-kicad-no3d");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fp = sample_fp("CHIP");
+        let mut out = DownloadPaths::default();
+        export_kicad(&mut out, &dir, "CHIP", None, Some(&fp), Some(&dummy_step()), false).unwrap();
+        assert!(!dir.join("CHIP.3dshapes").exists());
+        let text = std::fs::read_to_string(dir.join("CHIP.pretty").join("CHIP.kicad_mod")).unwrap();
+        assert!(!text.contains("(model "));
+    }
+
+    #[test]
+    fn kicad_export_without_step_still_writes_footprint() {
+        let dir = std::env::temp_dir().join("lceda-test-kicad-missing-step");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fp = sample_fp("CHIP");
+        let mut out = DownloadPaths::default();
+        export_kicad(&mut out, &dir, "CHIP", None, Some(&fp), None, true).unwrap();
+        assert!(!dir.join("CHIP.3dshapes").exists());
+        let text = std::fs::read_to_string(dir.join("CHIP.pretty").join("CHIP.kicad_mod")).unwrap();
+        assert!(!text.contains("(model "));
+        assert!(text.contains("(footprint"));
+    }
+
+    #[test]
+    fn merged_kicad_library_attaches_step_per_footprint() {
+        let dir = std::env::temp_dir().join("lceda-test-kicad-merge-3d");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let parts = vec![
+            PartExport {
+                paths: DownloadPaths::default(),
+                symbol: None,
+                footprint: Some(sample_fp("AAA")),
+                step: Some(dummy_step()),
+            },
+            PartExport {
+                paths: DownloadPaths::default(),
+                symbol: None,
+                footprint: Some(sample_fp("BBB")),
+                step: Some(dummy_step()),
+            },
+        ];
+        let req = ExportRequest {
+            kicad: true,
+            kicad_attach_3d: true,
+            merge: true,
+            merge_name: "lceda".into(),
+            out_dir: dir.clone(),
+            ..Default::default()
+        };
+        write_merged_libraries(&req, &parts).unwrap();
+        assert!(dir.join("lceda.3dshapes").join("AAA.step").exists());
+        assert!(dir.join("lceda.3dshapes").join("BBB.step").exists());
+        let aaa = std::fs::read_to_string(dir.join("lceda.pretty").join("AAA.kicad_mod")).unwrap();
+        assert!(aaa.contains("(model \"../lceda.3dshapes/AAA.step\""));
+        let bbb = std::fs::read_to_string(dir.join("lceda.pretty").join("BBB.kicad_mod")).unwrap();
+        assert!(bbb.contains("(model \"../lceda.3dshapes/BBB.step\""));
+    }
+
+    #[test]
+    fn merged_kicad_library_skips_3d_when_disabled() {
+        let dir = std::env::temp_dir().join("lceda-test-kicad-merge-no3d");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let parts = vec![PartExport {
+            paths: DownloadPaths::default(),
+            symbol: None,
+            footprint: Some(sample_fp("AAA")),
+            step: Some(dummy_step()),
+        }];
+        let req = ExportRequest {
+            kicad: true,
+            kicad_attach_3d: false,
+            merge: true,
+            merge_name: "lceda".into(),
+            out_dir: dir.clone(),
+            ..Default::default()
+        };
+        write_merged_libraries(&req, &parts).unwrap();
+        assert!(!dir.join("lceda.3dshapes").exists());
+        let aaa = std::fs::read_to_string(dir.join("lceda.pretty").join("AAA.kicad_mod")).unwrap();
+        assert!(!aaa.contains("(model "));
+    }
+}
+

@@ -68,6 +68,7 @@ impl BatchOpts {
             force: true,
             out_dir,
             ad_embed_3d: true,
+            kicad_attach_3d: true,
             merge: false,
             merge_name: "lceda".into(),
         }
@@ -127,6 +128,7 @@ struct App {
     zoom: f32,
     alert: Option<String>,
     show_about: bool,
+    show_settings: bool,
     show_batch: bool,
     batch_opts: BatchOpts,
     about_note: Option<String>,
@@ -142,6 +144,7 @@ struct App {
     shot_requested: bool,
     shot_settle: u32,
     ad_embed_3d: bool,
+    kicad_attach_3d: bool,
     batch_merge: bool,
 }
 
@@ -177,6 +180,7 @@ impl App {
             zoom: 1.0,
             alert: None,
             show_about: false,
+            show_settings: false,
             show_batch: false,
             batch_opts: BatchOpts::default(),
             about_note: None,
@@ -196,6 +200,7 @@ impl App {
             shot_requested: false,
             shot_settle: 0,
             ad_embed_3d: prefs.ad_embed_3d,
+            kicad_attach_3d: prefs.kicad_attach_3d,
             batch_merge: prefs.batch_merge,
         }
     }
@@ -313,6 +318,38 @@ impl App {
         }
     }
 
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut close = false;
+        let mut persist = false;
+        let lang = self.lang;
+        let width = 420.0;
+        fit_window(i18n::t(lang, "settings"), "lceda_settings_fit", width).show(ctx, |ui| {
+            ui.set_width(width - 8.0);
+            ui.label(egui::RichText::new(i18n::t(lang, "settings_3d_hint")).color(SECONDARY));
+            ui.add_space(8.0);
+            let before_ad = self.ad_embed_3d;
+            let before_kicad = self.kicad_attach_3d;
+            ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
+            ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
+            if self.ad_embed_3d != before_ad || self.kicad_attach_3d != before_kicad {
+                persist = true;
+            }
+            ui.add_space(10.0);
+            if dialog_ok_row(ui, i18n::t(lang, "ok")) {
+                close = true;
+            }
+        });
+        if persist {
+            self.persist_prefs();
+        }
+        if close {
+            self.show_settings = false;
+        }
+    }
+
     fn show_batch_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_batch {
             return;
@@ -341,14 +378,6 @@ impl App {
                     ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
                     ui.end_row();
                 });
-            if self.batch_opts.ad {
-                ui.add_space(4.0);
-                let before = self.ad_embed_3d;
-                ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
-                if self.ad_embed_3d != before {
-                    self.persist_prefs();
-                }
-            }
             if self.batch_opts.ad || self.batch_opts.kicad {
                 ui.add_space(4.0);
                 let before = self.batch_merge;
@@ -573,6 +602,11 @@ impl eframe::App for App {
                             self.show_about = true;
                             self.about_note = None;
                         }
+                        ui.add_space(6.0);
+                        if theme::pill_button(ui, i18n::t(self.lang, "settings"), true, false).clicked()
+                        {
+                            self.show_settings = true;
+                        }
                     });
                 });
             });
@@ -594,6 +628,7 @@ impl eframe::App for App {
             });
         self.show_alert(ctx);
         self.show_about(ctx);
+        self.show_settings(ctx);
         self.show_batch_dialog(ctx);
         self.show_update(ctx);
         self.tick_debug_shot(ctx);
@@ -1056,15 +1091,6 @@ impl App {
             pads = clicks[3].0;
             batch = clicks[3].1;
 
-            ui.add_space(2.0);
-            ui.add_enabled_ui(has3d, |ui| {
-                let before = self.ad_embed_3d;
-                ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
-                if self.ad_embed_3d != before {
-                    self.persist_prefs();
-                }
-            });
-
             ui.add_space(4.0);
             ui.label(egui::RichText::new(i18n::t(lang, "output")).strong().color(LABEL));
             let path_w = ui.available_width();
@@ -1244,6 +1270,7 @@ impl App {
         };
         mutate(&mut req);
         req.ad_embed_3d = self.ad_embed_3d;
+        req.kicad_attach_3d = self.kicad_attach_3d;
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("export", move || {
             let client = LcedaClient::new();
@@ -1255,6 +1282,7 @@ impl App {
     fn persist_prefs(&self) {
         crate::prefs::save(&crate::prefs::Prefs {
             ad_embed_3d: self.ad_embed_3d,
+            kicad_attach_3d: self.kicad_attach_3d,
             batch_merge: self.batch_merge,
         });
     }
@@ -1273,6 +1301,7 @@ impl App {
         }
         let mut req = self.batch_opts.request(out_dir.clone());
         req.ad_embed_3d = self.ad_embed_3d;
+        req.kicad_attach_3d = self.kicad_attach_3d;
         req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("batch", move || {
