@@ -186,8 +186,14 @@ fn export_altium(
 ) -> Result<()> {
     let mut ad_err: Option<String> = None;
     if let Some(sym) = symbol_ir {
+        let mut sym = sym.clone();
+        if let Some(fp) = footprint_ir {
+            if sym.meta.footprint_lib.trim().is_empty() {
+                sym.meta.footprint_lib = fp.name.clone();
+            }
+        }
         let sch = out_dir.join(format!("{base}.SchLib"));
-        match altium::write_schlib(&sch, sym) {
+        match altium::write_schlib(&sch, &sym) {
             Ok(()) if sch.exists() && sch.metadata().map(|m| m.len()).unwrap_or(0) > 64 => {
                 out.schlib = Some(sch);
             }

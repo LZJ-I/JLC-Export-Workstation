@@ -23,8 +23,9 @@ fn file_header(name: &str) -> Vec<u8> {
     let uid = unique_id();
     let raw = format!(
         "|HEADER=Protel for Windows - Schematic Library Editor Binary File Version 5.0\
-         |Weight=1|MinorVersion=2|UniqueID={uid}|FontIdCount=1|FontName1=Times New Roman|Size1=10\
-         |UseMBCS=T|IsBOC=T|SheetStyle=9|BorderOn=T|Display_Unit=0"
+         |WEIGHT=1|MINORVERSION=2|UNIQUEID={uid}|FONTIDCOUNT=1|FONTNAME1=Times New Roman|SIZE1=10\
+         |USEMBCS=T|ISBOC=T|SHEETSTYLE=9|SYSTEMFONT=1|BORDERON=T|DISPLAY_UNIT=0\
+         |COMPCOUNT=1|LIBREF0={name}|PARTCOUNT0=2"
     );
     w.write_params_raw(&raw);
     w.write_i32(1);
@@ -41,22 +42,29 @@ fn empty_storage() -> Vec<u8> {
 fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
     let mut w = BinWriter::new();
     let uid = unique_id();
-    w.write_params(&[
+    let mut header = vec![
         ("RECORD", "1".into()),
-        ("LibReference", libref.into()),
-        ("ComponentDescription", symbol.description.clone()),
-        ("PartCount", "1".into()),
-        ("DisplayModeCount", "1".into()),
-        ("IndexInSheet", "-1".into()),
-        ("OwnerPartId", "-1".into()),
-        ("CurrentPartId", "1".into()),
-        ("LibraryPath", "*".into()),
-        ("SourceLibraryName", "*".into()),
-        ("SheetPartFileName", "*".into()),
-        ("TargetFileName", "*".into()),
-        ("UniqueID", uid),
-        ("Color", BLUE_BGR.to_string()),
-    ]);
+        ("LIBREFERENCE", libref.into()),
+        ("COMPONENTDESCRIPTION", symbol.description.clone()),
+        ("PARTCOUNT", "2".into()),
+        ("DISPLAYMODECOUNT", "1".into()),
+        ("INDEXINSHEET", "-1".into()),
+        ("OWNERPARTID", "-1".into()),
+        ("CURRENTPARTID", "1".into()),
+        ("LIBRARYPATH", "*".into()),
+        ("SOURCELIBRARYNAME", "*".into()),
+        ("SHEETPARTFILENAME", "*".into()),
+        ("TARGETFILENAME", "*".into()),
+        ("UNIQUEID", uid),
+        ("AREACOLOR", "11599871".into()),
+        ("COLOR", BLUE_BGR.to_string()),
+        ("PARTIDLOCKED", "T".into()),
+        ("DESIGNITEMID", libref.into()),
+    ];
+    if !symbol.pins.is_empty() {
+        header.push(("ALLPINCOUNT", symbol.pins.len().to_string()));
+    }
+    w.write_params(&header);
 
     for pin in &symbol.pins {
         write_pin(&mut w, pin);
@@ -82,19 +90,18 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
         if poly.len() < 2 {
             continue;
         }
-        for win in poly.windows(2) {
-            let mut pairs = vec![
-                ("RECORD".into(), "13".into()),
-                ("OwnerPartId".into(), "1".into()),
-                ("LineWidth".into(), "1".into()),
-                ("Color".into(), BLUE_BGR.to_string()),
-            ];
-            add_coord_param(&mut pairs, "Location.X", win[0].0);
-            add_coord_param(&mut pairs, "Location.Y", win[0].1);
-            add_coord_param(&mut pairs, "Corner.X", win[1].0);
-            add_coord_param(&mut pairs, "Corner.Y", win[1].1);
-            write_named(&mut w, &pairs);
+        let mut pairs = vec![
+            ("RECORD".into(), "6".into()),
+            ("OWNERPARTID".into(), "1".into()),
+            ("LINEWIDTH".into(), "1".into()),
+            ("COLOR".into(), BLUE_BGR.to_string()),
+            ("LOCATIONCOUNT".into(), poly.len().to_string()),
+        ];
+        for (i, (x, y)) in poly.iter().enumerate() {
+            add_coord_param(&mut pairs, &format!("X{}", i + 1), *x);
+            add_coord_param(&mut pairs, &format!("Y{}", i + 1), *y);
         }
+        write_named(&mut w, &pairs);
     }
 
     for e in &symbol.ellipses {
@@ -114,8 +121,53 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
         write_named(&mut w, &pairs);
     }
 
-    w.write_params(&[("RECORD", "44".into())]);
+    w.write_params(&[
+        ("RECORD", "34".into()),
+        ("OWNERPARTID", "-1".into()),
+        ("COLOR", "8388608".into()),
+        ("FONTID", "1".into()),
+        ("TEXT", "U?".into()),
+        ("NAME", "Designator".into()),
+        ("READONLYSTATE", "1".into()),
+    ]);
+
+    write_footprint_implementation(&mut w, symbol);
     w.into_vec()
+}
+
+fn write_footprint_implementation(w: &mut BinWriter, symbol: &SymbolIr) {
+    w.write_params(&[("RECORD", "44".into())]);
+    let model = symbol.meta.footprint_lib.trim();
+    if model.is_empty() {
+        return;
+    }
+    w.write_params(&[
+        ("RECORD", "45".into()),
+        ("DESCRIPTION", "PCB footprint".into()),
+        ("MODELNAME", model.into()),
+        ("MODELTYPE", "PCBLIB".into()),
+        ("DATAFILECOUNT", "1".into()),
+        ("MODELDATAFILEKIND1", "PCBLib".into()),
+        ("ISCURRENT", "T".into()),
+        ("UNIQUEID", unique_id()),
+    ]);
+    w.write_params(&[("RECORD", "46".into())]);
+    let mut seen = std::collections::HashSet::new();
+    for pin in &symbol.pins {
+        let d = pin.number.trim();
+        if d.is_empty() || !seen.insert(d.to_ascii_lowercase()) {
+            continue;
+        }
+        w.write_params(&[
+            ("RECORD", "47".into()),
+            ("DESINTF", d.into()),
+            ("DESIMPCOUNT", "1".into()),
+            ("DESIMP0", d.into()),
+            ("ISTRIVIAL", "T".into()),
+            ("UNIQUEID", unique_id()),
+        ]);
+    }
+    w.write_params(&[("RECORD", "48".into())]);
 }
 
 fn write_named(w: &mut BinWriter, pairs: &[(String, String)]) {
@@ -156,9 +208,8 @@ fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin) {
 }
 
 fn pin_orient(rotation_deg: f64) -> u8 {
-    let a = crate::easyeda::normalize_angle(rotation_deg + 180.0);
-    let q = ((a / 90.0).round() as i32).rem_euclid(4) as u8;
-    q
+    let a = crate::easyeda::normalize_angle(rotation_deg);
+    ((a / 90.0).round() as i32).rem_euclid(4) as u8
 }
 
 fn dxp_num(mm: f64) -> i32 {

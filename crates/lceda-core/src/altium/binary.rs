@@ -115,6 +115,13 @@ impl BinWriter {
         buf[start as usize..start as usize + 4].copy_from_slice(&size.to_le_bytes());
     }
 
+    /// Length-prefixed block with raw payload. Pad SubRecord 2/4 must be `[0]`, not empty.
+    pub fn write_block_raw(&mut self, flags: u8, data: &[u8]) {
+        let size = ((flags as i32) << 24) | (data.len() as i32 & 0x00FF_FFFF);
+        self.write_i32(size);
+        self.write_bytes(data);
+    }
+
     pub fn write_string_block(&mut self, s: &str) {
         let owned = s.to_string();
         self.write_block(0, |w| w.write_pascal_short(&owned));

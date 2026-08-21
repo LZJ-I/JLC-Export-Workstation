@@ -1,11 +1,15 @@
-use super::binary::{
-    BinWriter, CfbDoc, encode_flags, from_mm, v7_layer_id, FLAG_SAVED, FLAG_UNLOCKED,
-};
+//! PcbLib 写出。图元布局对齐 [npnp](https://github.com/ref42/npnp) 已验证能被 AD 打开的 EasyEDA 导出，
+//! 容器结构对齐 [AltiumSharp](https://github.com/issus/AltiumSharp) 的 from-scratch PcbLib。
+
+use super::binary::{BinWriter, CfbDoc, encode_flags, from_mils, from_mm};
 use super::{hole_type_byte, pad_shape_byte, pcb_layer};
 use crate::error::Result;
 use crate::ir::{FootprintIr, IrPad};
-use crate::util::{altium_section_key, unique_id};
+use crate::util::altium_section_key;
 use std::path::Path;
+
+const DEFAULT_SOLDER_MASK_MIL: f64 = 1.969;
+const DEFAULT_CORNER_RADIUS: u8 = 25;
 
 pub fn write(path: &Path, fp: &FootprintIr) -> Result<()> {
     let key = altium_section_key(&fp.name);
@@ -21,20 +25,30 @@ pub fn write(path: &Path, fp: &FootprintIr) -> Result<()> {
     cfb.stream("Library/Models/Header", &i32_stream(0))?;
     cfb.stream("Library/Models/Data", &[])?;
 
-    cfb.storage("Library/LayerKindMapping")?;
-    cfb.stream("Library/LayerKindMapping/Header", &i32_stream(1))?;
-    cfb.stream("Library/LayerKindMapping/Data", &layer_kind_mapping())?;
-
     cfb.storage("Library/Textures")?;
     cfb.stream("Library/Textures/Header", &i32_stream(0))?;
     cfb.stream("Library/Textures/Data", &[])?;
 
+    cfb.storage("Library/ModelsNoEmbed")?;
+    cfb.stream("Library/ModelsNoEmbed/Header", &i32_stream(0))?;
+    cfb.stream("Library/ModelsNoEmbed/Data", &[])?;
+
     cfb.storage(&key)?;
-    let prim_count = fp.pads.len() + fp.tracks.len() + fp.circles.len() + fp.arcs.len() + fp.regions.len();
-    cfb.stream(&format!("{key}/Header"), &i32_stream(prim_count as i32))?;
+    let (data, names) = footprint_data(fp, &key);
+    cfb.stream(&format!("{key}/Header"), &i32_stream(names.len() as i32))?;
     cfb.stream(&format!("{key}/Parameters"), &footprint_params(fp, &key))?;
     cfb.stream(&format!("{key}/WideStrings"), &empty_params())?;
-    cfb.stream(&format!("{key}/Data"), &footprint_data(fp, &key))?;
+    cfb.stream(&format!("{key}/Data"), &data)?;
+
+    cfb.storage(&format!("{key}/UniqueIdPrimitiveInformation"))?;
+    cfb.stream(
+        &format!("{key}/UniqueIdPrimitiveInformation/Header"),
+        &i32_stream(names.len() as i32),
+    )?;
+    cfb.stream(
+        &format!("{key}/UniqueIdPrimitiveInformation/Data"),
+        &unique_id_primitive_information(&names),
+    )?;
 
     cfb.finish()
 }
@@ -44,14 +58,11 @@ fn i32_stream(v: i32) -> Vec<u8> {
 }
 
 fn file_header() -> Vec<u8> {
+    // npnp / 实测 AD 能打开的 PcbLib：FileHeader 只有版本 Pascal 串。
     let mut w = BinWriter::new();
     let version = "PCB 6.0 Binary Library File";
     w.write_i32(version.len() as i32);
     w.write_pascal_short(version);
-    w.write_f64(5.01);
-    let uid = unique_id();
-    w.write_i32(uid.len() as i32);
-    w.write_pascal_short(&uid);
     w.into_vec()
 }
 
@@ -66,23 +77,12 @@ fn library_data(name: &str) -> Vec<u8> {
     w.into_vec()
 }
 
-fn layer_kind_mapping() -> Vec<u8> {
-    let mut w = BinWriter::new();
-    let text = "1.0\0";
-    let bytes: Vec<u8> = text.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-    w.write_i32(bytes.len() as i32);
-    w.write_bytes(&bytes);
-    w.write_u32(0); // signature
-    w.write_u32(0); // count
-    w.into_vec()
-}
-
 fn footprint_params(fp: &FootprintIr, name: &str) -> Vec<u8> {
     let mut w = BinWriter::new();
     w.write_params(&[
         ("PATTERN", name.into()),
         ("HEIGHT", "0mil".into()),
-        ("DESCRIPTION", fp.description.clone()),
+        ("DESCRIPTION", altium_param(&fp.description)),
         ("ITEMGUID", "".into()),
         ("REVISIONGUID", "".into()),
     ]);
@@ -95,21 +95,40 @@ fn empty_params() -> Vec<u8> {
     w.into_vec()
 }
 
-fn footprint_data(fp: &FootprintIr, name: &str) -> Vec<u8> {
+fn unique_id_primitive_information(names: &[&str]) -> Vec<u8> {
+    let mut w = BinWriter::new();
+    for (index, object_name) in names.iter().enumerate() {
+        let mut pairs: Vec<(&str, String)> = Vec::new();
+        if index > 0 {
+            pairs.push(("PRIMITIVEINDEX", index.to_string()));
+        }
+        pairs.push(("PRIMITIVEOBJECTID", (*object_name).to_string()));
+        w.write_params(&pairs);
+    }
+    w.into_vec()
+}
+
+fn footprint_data(fp: &FootprintIr, name: &str) -> (Vec<u8>, Vec<&'static str>) {
     let mut w = BinWriter::new();
     w.write_string_block(name);
+    let mut names = Vec::new();
 
     for pad in &fp.pads {
         w.write_u8(2);
         write_pad(&mut w, pad);
+        names.push("Pad");
     }
 
     for track in &fp.tracks {
         let layer = pcb_layer(track.layer, 0.0);
         let width = from_mm(track.width.max(0.05));
         for win in track.points.windows(2) {
+            if nearly_same(win[0], win[1]) {
+                continue;
+            }
             w.write_u8(4);
             write_track(&mut w, layer, win[0], win[1], width);
+            names.push("Track");
         }
     }
 
@@ -126,6 +145,7 @@ fn footprint_data(fp: &FootprintIr, name: &str) -> Vec<u8> {
             360.0,
             from_mm(c.width.max(0.05)),
         );
+        names.push("Arc");
     }
 
     for a in &fp.arcs {
@@ -141,26 +161,50 @@ fn footprint_data(fp: &FootprintIr, name: &str) -> Vec<u8> {
             a.end,
             from_mm(a.width.max(0.05)),
         );
+        names.push("Arc");
     }
 
     for r in &fp.regions {
         if r.points.len() < 3 {
             continue;
         }
+        let layer = pcb_layer(r.layer, 0.0);
         w.write_u8(11);
-        write_region(&mut w, pcb_layer(r.layer, 0.0), &r.points);
+        write_region(&mut w, layer, &closed_outline(&r.points));
+        names.push("Region");
     }
 
-    w.into_vec()
+    (w.into_vec(), names)
+}
+
+fn closed_outline(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut pts = points.to_vec();
+    if let (Some(&first), Some(&last)) = (pts.first(), pts.last()) {
+        if !nearly_same(first, last) {
+            pts.push(first);
+        }
+    }
+    pts
+}
+
+fn nearly_same(a: (f64, f64), b: (f64, f64)) -> bool {
+    (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+}
+
+fn altium_param(s: &str) -> String {
+    s.replace(['|', '\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(200)
+        .collect()
 }
 
 fn write_common(w: &mut BinWriter, layer: u8) {
     w.write_u8(layer);
     w.write_u16(encode_flags());
-    w.write_u16(0xFFFF); // net
-    w.write_u16(0xFFFF); // polygon
-    w.write_u16(0xFFFF); // component
-    w.write_u32(0xFFFF_FFFF);
+    w.write_bytes(&[0xFF; 10]);
 }
 
 fn write_track(w: &mut BinWriter, layer: u8, start: (f64, f64), end: (f64, f64), width: i32) {
@@ -169,12 +213,8 @@ fn write_track(w: &mut BinWriter, layer: u8, start: (f64, f64), end: (f64, f64),
         w.write_coord_point(from_mm(start.0), from_mm(start.1));
         w.write_coord_point(from_mm(end.0), from_mm(end.1));
         w.write_coord(width);
-        w.write_i16(0);
-        w.write_coord(0);
-        w.write_i16(0);
-        w.write_u32(v7_layer_id(layer));
+        w.write_u16(0);
         w.write_u8(0);
-        w.write_bytes(&[0, 0, 0]);
     });
 }
 
@@ -195,63 +235,59 @@ fn write_arc(
         w.write_f64(start);
         w.write_f64(end);
         w.write_coord(width);
-        w.write_i16(0);
-        w.write_coord(0);
-        w.write_u8(0);
-        w.write_u32(v7_layer_id(layer));
-        w.write_u8(0);
-        w.write_bytes(&[0, 0, 0]);
     });
 }
 
 fn write_region(w: &mut BinWriter, layer: u8, points: &[(f64, f64)]) {
     w.write_block(0, |w| {
-        write_common_region(w, layer);
+        write_common(w, layer);
+        w.write_u32(0);
         w.write_u8(0);
-        w.write_u16(0);
-        w.write_u8(0);
-        w.write_u8(0);
-        let layer_name = match layer {
-            1 => "TOP",
-            32 => "BOTTOM",
-            33 => "TOPOVERLAY",
-            34 => "BOTTOMOVERLAY",
-            74 => "MULTILAYER",
-            _ => "TOPOVERLAY",
-        };
-        w.write_params_raw(&format!(
-            "V7_LAYER={layer_name}|NAME=|KIND=0|SUBPOLYINDEX=0|UNIONINDEX=0|ARCRESOLUTION=0.5mil|ISSHAPEBASED=FALSE|CAVITYHEIGHT=0mil"
-        ));
+        w.write_params(&[("V7_LAYER", v7_layer_name(layer).into())]);
         w.write_u32(points.len() as u32);
-        for (x, y) in points {
-            w.write_f64(from_mm(*x) as f64);
-            w.write_f64(from_mm(*y) as f64);
+        for &(x, y) in points {
+            w.write_f64(from_mm(x) as f64);
+            w.write_f64(from_mm(y) as f64);
         }
     });
 }
 
-fn write_common_region(w: &mut BinWriter, layer: u8) {
-    w.write_u8(layer);
-    w.write_u16(encode_flags());
-    w.write_u16(0xFFFF);
-    w.write_u16(0); // polygon index 0 for regions
-    w.write_u16(0xFFFF);
-    w.write_u32(0xFFFF_FFFF);
+fn v7_layer_name(layer: u8) -> &'static str {
+    match layer {
+        1 => "TOP",
+        32 => "BOTTOM",
+        33 => "TOPOVERLAY",
+        34 => "BOTTOMOVERLAY",
+        35 => "TOPPASTE",
+        36 => "BOTTOMPASTE",
+        37 => "TOPSOLDER",
+        38 => "BOTTOMSOLDER",
+        56 => "KEEPOUT",
+        57 => "MECHANICAL1",
+        58 => "MECHANICAL2",
+        61 => "MECHANICAL5",
+        62 => "MECHANICAL6",
+        74 => "MULTILAYER",
+        _ => "TOPOVERLAY",
+    }
 }
 
 fn write_pad(w: &mut BinWriter, pad: &IrPad) {
     let layer = pcb_layer(pad.layer, pad.hole);
     let shape = pad_shape_byte(&pad.shape, pad.width, pad.height);
-    w.write_string_block(&pad.designator);
-    w.write_string_block("");
-    w.write_string_block("|&|0");
-    w.write_block(0, |_| {}); // empty subrecord 4
-
+    let hole_type = hole_type_byte(&pad.hole_shape);
     let size_x = from_mm(pad.width);
     let size_y = from_mm(pad.height);
     let hole = from_mm(pad.hole);
     let loc_x = from_mm(pad.x);
     let loc_y = from_mm(pad.y);
+    let rotation = crate::easyeda::normalize_angle(pad.rotation);
+    let solder = from_mils(DEFAULT_SOLDER_MASK_MIL);
+
+    w.write_string_block(&pad.designator);
+    w.write_block_raw(0, &[0]);
+    w.write_string_block("|&|0");
+    w.write_block_raw(0, &[0]);
 
     w.write_block(0, |w| {
         write_common(w, layer);
@@ -263,12 +299,29 @@ fn write_pad(w: &mut BinWriter, pad: &IrPad) {
         w.write_u8(shape);
         w.write_u8(shape);
         w.write_u8(shape);
-        w.write_f64(crate::easyeda::normalize_angle(pad.rotation));
+        w.write_f64(rotation);
         w.write_bool(true);
-        w.write_bytes(&pad_extended_tail(pad, layer));
+        w.write_u8(0);
+        w.write_u8(0); // mode simple
+        w.write_u8(0); // plane connect
+        w.write_coord(0); // relief air gap
+        w.write_coord(from_mils(10.0));
+        w.write_i16(4);
+        w.write_coord(from_mils(10.0));
+        w.write_coord(from_mils(20.0));
+        w.write_i32(0);
+        w.write_coord(0); // paste expansion
+        w.write_coord(solder);
+        w.write_bytes(&[0; 7]);
+        w.write_u8(0); // paste mode
+        w.write_u8(2); // solder mode = manual (non-zero expansion)
+        w.write_u8(0); // drill type
+        w.write_i16(0);
+        w.write_i32(0);
+        w.write_i16(0); // jumper
+        w.write_i16(0);
     });
 
-    // size/shape block for hole type
     w.write_block(0, |w| {
         for _ in 0..29 {
             w.write_i32(size_x);
@@ -280,53 +333,24 @@ fn write_pad(w: &mut BinWriter, pad: &IrPad) {
             w.write_u8(shape);
         }
         w.write_u8(0);
-        w.write_u8(hole_type_byte(&pad.hole_shape));
+        w.write_u8(hole_type);
         w.write_i32(from_mm(pad.hole_slot));
-        w.write_f64(0.0);
+        w.write_f64(if hole_type == 2 { rotation } else { 0.0 });
         for _ in 0..32 {
             w.write_i32(0);
         }
         for _ in 0..32 {
             w.write_i32(0);
         }
-        w.write_u8(if shape == 9 { 1 } else { 0 });
-        for _ in 0..32 {
+        let rounded = shape == 9;
+        w.write_bool(rounded);
+        w.write_u8(shape);
+        for _ in 0..30 {
             w.write_u8(shape);
         }
+        w.write_u8(shape);
         for _ in 0..32 {
-            w.write_u8(50);
+            w.write_u8(if rounded { DEFAULT_CORNER_RADIUS } else { 50 });
         }
     });
-}
-
-fn pad_extended_tail(pad: &IrPad, layer: u8) -> Vec<u8> {
-    let mut ext = PAD_TAIL.to_vec();
-    put_i32(&mut ext, 114 - 61, v7_layer_id(layer) as i32);
-    put_i32(&mut ext, 90 - 61, from_mm(0.0));
-    let _ = pad;
-    ext
-}
-
-fn put_i32(buf: &mut [u8], off: usize, v: i32) {
-    if off + 4 <= buf.len() {
-        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    }
-}
-
-/// Canonical 141-byte pad SubRecord-5 tail (offsets 61-201) from AltiumSharp.
-const PAD_TAIL: [u8; 141] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA0, 0x86, 0x01, 0x00, 0x04, 0x00, 0xA0, 0x86, 0x01,
-    0x00, 0x40, 0x0D, 0x03, 0x00, 0x40, 0x0D, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x9C, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x40, 0x9C, 0x00, 0x00,
-    0x00, 0x64, 0x9A, 0x92, 0x26, 0x10, 0xC7, 0xE4, 0x41, 0xA3, 0x2B, 0x29, 0x17, 0xA5, 0x35, 0x2E,
-    0x67, 0x7F, 0xAB, 0x21, 0x20, 0xC3, 0x0B, 0x32, 0x47, 0xAD, 0xCE, 0x6C, 0xB7, 0xB8, 0xC9, 0x7E,
-    0x68, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x01, 0x1A,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
-#[allow(dead_code)]
-fn _flags() -> u16 {
-    FLAG_UNLOCKED | FLAG_SAVED
 }
