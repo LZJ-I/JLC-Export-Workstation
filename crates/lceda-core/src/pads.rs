@@ -728,6 +728,7 @@ mod tests {
                 rotation: 0.0,
                 layer: 1,
                 shape: "RECT".into(),
+                polygon: None,
             }],
             tracks: vec![],
             circles: vec![],
@@ -803,6 +804,7 @@ mod tests {
             rotation: 0.0,
             layer: 1,
             shape: "RECT".into(),
+            polygon: None,
         });
         let text = pcb_library(&[&fp]);
         let mut n1 = None;

@@ -82,6 +82,7 @@ mod tests {
                     rotation: 0.0,
                     layer: 1,
                     shape: "RECT".into(),
+                    polygon: None,
                 },
                 IrPad {
                     designator: "2".into(),
@@ -95,6 +96,7 @@ mod tests {
                     rotation: 0.0,
                     layer: 1,
                     shape: "RECT".into(),
+                    polygon: None,
                 },
             ],
             tracks: vec![],
@@ -133,6 +135,7 @@ mod tests {
                     rotation: 0.0,
                     layer: 1,
                     shape: "RECT".into(),
+                    polygon: None,
                 },
                 IrPad {
                     designator: "2".into(),
@@ -146,6 +149,7 @@ mod tests {
                     rotation: 0.0,
                     layer: 1,
                     shape: "RECT".into(),
+                    polygon: None,
                 },
             ],
             tracks: vec![IrTrack {
@@ -200,6 +204,7 @@ mod tests {
                 rotation: 0.0,
                 layer: 1,
                 shape: "RECT".into(),
+                polygon: None,
             }],
             tracks: vec![],
             circles: vec![],
@@ -225,6 +230,50 @@ mod tests {
         let mut count = Vec::new();
         cfb.open_stream("BODY/Header").unwrap().read_to_end(&mut count).unwrap();
         assert_eq!(i32::from_le_bytes(count.try_into().unwrap()), 2); // pad + body
+    }
+
+    #[test]
+    fn pcblib_custom_poly_pad_adds_copper_and_mask_regions() {
+        let dir = std::env::temp_dir().join("lceda-test-pcb-poly");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("POLY.PcbLib");
+        let fp = FootprintIr {
+            name: "POLY".into(),
+            description: "custom".into(),
+            meta: Default::default(),
+            pads: vec![IrPad {
+                designator: "1".into(),
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 1.2,
+                hole: 0.0,
+                hole_slot: 0.0,
+                hole_shape: "ROUND".into(),
+                rotation: 0.0,
+                layer: 1,
+                shape: "POLY".into(),
+                polygon: Some(vec![(0.0, 0.0), (2.0, 0.0), (1.0, 1.2)]),
+            }],
+            tracks: vec![],
+            circles: vec![],
+            arcs: vec![],
+            regions: vec![],
+        };
+        write_pcblib(&path, &fp).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut hdr = Vec::new();
+        cfb.open_stream("POLY/Header").unwrap().read_to_end(&mut hdr).unwrap();
+        // hotspot pad + copper region + top solder mask
+        assert_eq!(i32::from_le_bytes(hdr.try_into().unwrap()), 3);
+        let mut uid = Vec::new();
+        cfb.open_stream("POLY/UniqueIdPrimitiveInformation/Data")
+            .unwrap()
+            .read_to_end(&mut uid)
+            .unwrap();
+        let text = String::from_utf8_lossy(&uid);
+        assert!(text.contains("Pad"));
+        assert!(text.matches("Region").count() >= 2);
     }
 }
 

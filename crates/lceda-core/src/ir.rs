@@ -99,6 +99,16 @@ pub struct IrPad {
     pub rotation: f64,
     pub layer: i32,
     pub shape: String,
+    /// Absolute outline in mm; set for irregular POLY pads.
+    pub polygon: Option<Vec<(f64, f64)>>,
+}
+
+impl IrPad {
+    pub fn is_custom_poly(&self) -> bool {
+        self.hole <= 1e-6
+            && self.shape.eq_ignore_ascii_case("POLY")
+            && self.polygon.as_ref().is_some_and(|p| p.len() >= 3)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +221,11 @@ pub fn footprint_ir(name: &str, description: &str, src: EasyedaFootprint, meta: 
                 rotation: p.rotation,
                 layer: p.layer,
                 shape: p.shape,
+                polygon: p.polygon.map(|pts| {
+                    pts.into_iter()
+                        .map(|(x, y)| (x * FOOTPRINT_UNIT_MM, y * FOOTPRINT_UNIT_MM))
+                        .collect()
+                }),
             })
             .collect(),
         tracks: src

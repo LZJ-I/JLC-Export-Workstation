@@ -63,6 +63,7 @@ pub struct FootprintPad {
     pub rotation: f64,
     pub layer: i32,
     pub shape: String,
+    pub polygon: Option<Vec<(f64, f64)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -248,7 +249,7 @@ pub fn parse_footprint(value: &Value) -> Result<EasyedaFootprint> {
                     rotation = get_f64(row, 14);
                 }
                 let (hole_shape, hole, hole_slot) = parse_hole(row.get(9));
-                let (shape, width, height) = parse_pad_shape(row.get(10));
+                let (shape, width, height, polygon) = parse_pad_shape(row.get(10));
                 fp.pads.push(FootprintPad {
                     designator,
                     x,
@@ -261,6 +262,7 @@ pub fn parse_footprint(value: &Value) -> Result<EasyedaFootprint> {
                     rotation: if rotation.is_nan() { 0.0 } else { rotation },
                     layer,
                     shape,
+                    polygon,
                 });
             }
             "POLY" => {
@@ -404,9 +406,9 @@ fn parse_hole(el: Option<&Value>) -> (String, f64, f64) {
     }
 }
 
-fn parse_pad_shape(el: Option<&Value>) -> (String, f64, f64) {
+fn parse_pad_shape(el: Option<&Value>) -> (String, f64, f64, Option<Vec<(f64, f64)>>) {
     let Some(Value::Array(arr)) = el else {
-        return ("ROUND".into(), 10.0, 10.0);
+        return ("ROUND".into(), 10.0, 10.0, None);
     };
     let shape = arr.first().and_then(Value::as_str).unwrap_or("ROUND").to_string();
     if shape.eq_ignore_ascii_case("POLY") {
@@ -417,15 +419,54 @@ fn parse_pad_shape(el: Option<&Value>) -> (String, f64, f64) {
                 let max_x = pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
                 let min_y = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
                 let max_y = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
-                return (shape, (max_x - min_x).max(10.0), (max_y - min_y).max(10.0));
+                let width = (max_x - min_x).max(10.0);
+                let height = (max_y - min_y).max(10.0);
+                if is_axis_aligned_rect(&pts) {
+                    return ("RECT".into(), width, height, None);
+                }
+                return (shape, width, height, Some(pts));
             }
         }
-        (shape, 10.0, 10.0)
+        (shape, 10.0, 10.0, None)
     } else {
         let w = arr.get(1).map(json_f64).unwrap_or(10.0);
         let h = arr.get(2).map(json_f64).unwrap_or(w);
-        (shape, w, h)
+        (shape, w, h, None)
     }
+}
+
+fn is_axis_aligned_rect(pts: &[(f64, f64)]) -> bool {
+    let mut unique: Vec<(f64, f64)> = Vec::new();
+    for &p in pts {
+        if unique.iter().any(|&q| (p.0 - q.0).abs() < 1e-4 && (p.1 - q.1).abs() < 1e-4) {
+            continue;
+        }
+        unique.push(p);
+    }
+    if unique.len() != 4 {
+        return false;
+    }
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    for &(x, y) in &unique {
+        if !xs.iter().any(|v| (x - v).abs() < 1e-4) {
+            xs.push(x);
+        }
+        if !ys.iter().any(|v| (y - v).abs() < 1e-4) {
+            ys.push(y);
+        }
+    }
+    if xs.len() != 2 || ys.len() != 2 {
+        return false;
+    }
+    for &x in &xs {
+        for &y in &ys {
+            if !unique.iter().any(|p| (p.0 - x).abs() < 1e-4 && (p.1 - y).abs() < 1e-4) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn try_circle_shape(shape: &Value) -> Option<(f64, f64, f64)> {
@@ -574,5 +615,26 @@ mod tests {
         assert_eq!(sym.pins.len(), 1);
         assert_eq!(sym.pins[0].number, "1");
         assert_eq!(sym.pins[0].name, "VCC");
+    }
+
+    #[test]
+    fn poly_pad_axis_aligned_becomes_rect() {
+        let ds = r#"["DOCTYPE","FOOTPRINT","1.0"]
+["PAD","e1",0,"",1,"1",0,0,0,null,["POLY",[-10,-5,"L",10,-5,10,5,-10,5,-10,-5]],[],0,0,0,1]
+"#;
+        let fp = parse_footprint(&json!({"result": {"dataStr": ds}})).unwrap();
+        assert_eq!(fp.pads.len(), 1);
+        assert_eq!(fp.pads[0].shape, "RECT");
+        assert!(fp.pads[0].polygon.is_none());
+    }
+
+    #[test]
+    fn poly_pad_keeps_irregular_outline() {
+        let ds = r#"["DOCTYPE","FOOTPRINT","1.0"]
+["PAD","e1",0,"",1,"1",0,0,0,null,["POLY",[0,0,"L",20,0,10,12]],[],0,0,0,1]
+"#;
+        let fp = parse_footprint(&json!({"result": {"dataStr": ds}})).unwrap();
+        assert_eq!(fp.pads[0].shape, "POLY");
+        assert_eq!(fp.pads[0].polygon.as_ref().map(Vec::len), Some(3));
     }
 }

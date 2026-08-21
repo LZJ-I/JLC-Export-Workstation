@@ -225,6 +225,20 @@ fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec
         w.write_u8(2);
         write_pad(&mut w, pad);
         names.push("Pad");
+        if pad.is_custom_poly() {
+            if let Some(pts) = pad.polygon.as_ref() {
+                let outline = closed_outline(pts);
+                let copper = pcb_layer(pad.layer, pad.hole);
+                w.write_u8(11);
+                write_region(&mut w, copper, &outline);
+                names.push("Region");
+                for layer in mask_layers(pad) {
+                    w.write_u8(11);
+                    write_region(&mut w, layer, &outline);
+                    names.push("Region");
+                }
+            }
+        }
     }
 
     for track in &fp.tracks {
@@ -387,16 +401,27 @@ fn v7_layer_name(layer: u8) -> &'static str {
 }
 
 fn write_pad(w: &mut BinWriter, pad: &IrPad) {
+    let custom = pad.is_custom_poly();
     let layer = pcb_layer(pad.layer, pad.hole);
-    let shape = pad_shape_byte(&pad.shape, pad.width, pad.height);
+    let (width, height, shape_name, rotation) = if custom {
+        const HOTSPOT_MM: f64 = 2.3792 * 0.0254;
+        (HOTSPOT_MM, HOTSPOT_MM, "ROUND", 0.0)
+    } else {
+        (
+            pad.width,
+            pad.height,
+            pad.shape.as_str(),
+            crate::easyeda::normalize_angle(pad.rotation),
+        )
+    };
+    let shape = pad_shape_byte(shape_name, width, height);
     let hole_type = hole_type_byte(&pad.hole_shape);
-    let size_x = from_mm(pad.width);
-    let size_y = from_mm(pad.height);
+    let size_x = from_mm(width);
+    let size_y = from_mm(height);
     let hole = from_mm(pad.hole);
     let loc_x = from_mm(pad.x);
     let loc_y = from_mm(pad.y);
-    let rotation = crate::easyeda::normalize_angle(pad.rotation);
-    let solder = from_mils(DEFAULT_SOLDER_MASK_MIL);
+    let solder = if custom { 0 } else { from_mils(DEFAULT_SOLDER_MASK_MIL) };
 
     w.write_string_block(&pad.designator);
     w.write_block_raw(0, &[0]);
@@ -469,6 +494,16 @@ fn write_pad(w: &mut BinWriter, pad: &IrPad) {
     });
 }
 
+fn mask_layers(pad: &IrPad) -> Vec<u8> {
+    if pad.layer == 12 || pad.hole > 1e-6 {
+        vec![37, 38]
+    } else if pad.layer == 2 {
+        vec![38]
+    } else {
+        vec![37]
+    }
+}
+
 fn write_component_body(w: &mut BinWriter, body: &BodyInfo) {
     w.write_block(0, |w| {
         write_common(w, 57); // MECHANICAL1
@@ -534,6 +569,11 @@ fn body_outline(fp: &FootprintIr) -> Vec<(i32, i32)> {
             let hy = pad.height.abs() / 2.0;
             add(pad.x - hx, pad.y - hy);
             add(pad.x + hx, pad.y + hy);
+            if let Some(pts) = &pad.polygon {
+                for &(x, y) in pts {
+                    add(x, y);
+                }
+            }
         }
         for t in &fp.tracks {
             for &(x, y) in &t.points {

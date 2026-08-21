@@ -213,6 +213,12 @@ fn footprint_mod_text(fp: &FootprintIr, step_rel: Option<&str>) -> String {
 }
 
 fn write_pad(out: &mut String, pad: &IrPad) {
+    if pad.is_custom_poly() {
+        if let Some(pts) = &pad.polygon {
+            write_custom_pad(out, pad, pts);
+            return;
+        }
+    }
     let thru = pad.hole > 1e-6;
     let kind = if thru { "thru_hole" } else { "smd" };
     let shape = pad_shape(&pad.shape, pad.width, pad.height);
@@ -251,6 +257,30 @@ fn write_pad(out: &mut String, pad: &IrPad) {
         out.push_str(" (roundrect_rratio 0.25)");
     }
     out.push_str(")\n");
+}
+
+fn write_custom_pad(out: &mut String, pad: &IrPad, pts: &[(f64, f64)]) {
+    let layers = if pad.layer == 2 {
+        "\"B.Cu\" \"B.Paste\" \"B.Mask\""
+    } else {
+        "\"F.Cu\" \"F.Paste\" \"F.Mask\""
+    };
+    write!(
+        out,
+        "  (pad {} smd custom (at {} {} {}) (size {} {}) (layers {layers})\n",
+        quoted(&pad.designator),
+        n(pad.x),
+        n(pad.y),
+        snap_angle(pad.rotation),
+        n(pad.width.max(0.1)),
+        n(pad.height.max(0.1))
+    )
+    .unwrap();
+    out.push_str("    (options (clearance outline) (anchor circle))\n    (primitives\n      (gr_poly\n        (pts");
+    for &(x, y) in pts {
+        out.push_str(&format!(" (xy {} {})", n(x - pad.x), n(y - pad.y)));
+    }
+    out.push_str(")\n        (width 0) (fill yes)\n      )\n    )\n  )\n");
 }
 
 fn pad_shape(shape: &str, w: f64, h: f64) -> &'static str {
@@ -421,6 +451,7 @@ mod tests {
                 rotation: 0.0,
                 layer: 1,
                 shape: "RECT".into(),
+                polygon: None,
             }],
             tracks: vec![],
             circles: vec![],
