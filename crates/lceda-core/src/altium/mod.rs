@@ -14,6 +14,10 @@ pub fn write_pcblib(path: &Path, footprint: &FootprintIr) -> Result<()> {
     pcblib::write(path, footprint)
 }
 
+pub fn write_pcblib_with_step(path: &Path, footprint: &FootprintIr, step: Option<&[u8]>) -> Result<()> {
+    pcblib::write_with_step(path, footprint, step)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +177,54 @@ mod tests {
         assert!(uid_text.contains("Region"), "courtyard/copper pours must be Region records");
         assert!(cfb.exists("IND/UniqueIdPrimitiveInformation/Data"));
         assert!(path.metadata().unwrap().len() > 64);
+    }
+
+    #[test]
+    fn pcblib_embeds_step_as_component_body() {
+        let dir = std::env::temp_dir().join("lceda-test-pcb-step");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("BODY.PcbLib");
+        let fp = FootprintIr {
+            name: "BODY".into(),
+            description: "with 3d".into(),
+            meta: Default::default(),
+            pads: vec![IrPad {
+                designator: "1".into(),
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                hole: 0.0,
+                hole_slot: 0.0,
+                hole_shape: "ROUND".into(),
+                rotation: 0.0,
+                layer: 1,
+                shape: "RECT".into(),
+            }],
+            tracks: vec![],
+            circles: vec![],
+            arcs: vec![],
+            regions: vec![],
+        };
+        let step = b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n";
+        write_pcblib_with_step(&path, &fp, Some(step)).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut hdr = Vec::new();
+        cfb.open_stream("Library/Models/Header")
+            .unwrap()
+            .read_to_end(&mut hdr)
+            .unwrap();
+        assert_eq!(i32::from_le_bytes(hdr.try_into().unwrap()), 1);
+        assert!(cfb.exists("Library/Models/0"));
+        let mut uid = Vec::new();
+        cfb.open_stream("BODY/UniqueIdPrimitiveInformation/Data")
+            .unwrap()
+            .read_to_end(&mut uid)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&uid).contains("ComponentBody"));
+        let mut count = Vec::new();
+        cfb.open_stream("BODY/Header").unwrap().read_to_end(&mut count).unwrap();
+        assert_eq!(i32::from_le_bytes(count.try_into().unwrap()), 2); // pad + body
     }
 }
 

@@ -38,6 +38,25 @@ pub fn part_stem(mpn: &str, lcsc: Option<&str>, manufacturer: &str) -> String {
     }
 }
 
+/// Unique 31-char CFB storage name; suffixes `_2`, `_3` on collision.
+pub fn unique_altium_section_key(name: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let base = altium_section_key(name);
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut index = 2usize;
+    loop {
+        let suffix = format!("_{index}");
+        let max_len = 31usize.saturating_sub(suffix.len());
+        let prefix: String = base.chars().take(max_len.max(1)).collect();
+        let candidate = format!("{prefix}{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
 /// Altium compound storage names are 31 chars, ASCII-ish.
 pub fn altium_section_key(name: &str) -> String {
     let ascii: String = name

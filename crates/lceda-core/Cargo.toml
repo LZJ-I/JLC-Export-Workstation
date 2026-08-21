@@ -8,6 +8,7 @@ description = "立创 / LCSC 器件搜索、3D 下载与 Altium / KiCad / PADS �
 [dependencies]
 cfb.workspace = true
 encoding_rs.workspace = true
+flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

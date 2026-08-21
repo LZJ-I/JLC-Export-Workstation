@@ -14,6 +14,7 @@ lceda-core = { path = "crates/lceda-core" }
 anyhow = "1"
 cfb = "0.10"
 clap = { version = "4", features = ["derive"] }
+flate2 = "1"
 encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 serde = { version = "1", features = ["derive"] }

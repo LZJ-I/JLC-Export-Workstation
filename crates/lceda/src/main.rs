@@ -3,6 +3,7 @@
 mod cli;
 mod gui;
 mod i18n;
+mod prefs;
 mod update;
 
 fn main() {

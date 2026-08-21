@@ -67,6 +67,9 @@ impl BatchOpts {
             source_json: self.source || self.ad || self.kicad || self.pads,
             force: true,
             out_dir,
+            ad_embed_3d: true,
+            merge: false,
+            merge_name: "lceda".into(),
         }
     }
 }
@@ -138,6 +141,7 @@ struct App {
     shot_path: Option<PathBuf>,
     shot_requested: bool,
     shot_settle: u32,
+    ad_embed_3d: bool,
 }
 
 impl App {
@@ -152,6 +156,7 @@ impl App {
             GpuPreview::new(ctx.as_ref()).map(|g| Arc::new(egui::mutex::Mutex::new(g)))
         });
         let skip_update = env::var("LCEDA_SHOT").is_ok();
+        let prefs = crate::prefs::load();
         Self {
             lang,
             keyword: String::new(),
@@ -189,6 +194,7 @@ impl App {
             shot_path: env::var("LCEDA_SHOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
             shot_requested: false,
             shot_settle: 0,
+            ad_embed_3d: prefs.ad_embed_3d,
         }
     }
 
@@ -333,6 +339,14 @@ impl App {
                     ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
                     ui.end_row();
                 });
+            if self.batch_opts.ad {
+                ui.add_space(4.0);
+                let before = self.ad_embed_3d;
+                ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
+                if self.ad_embed_3d != before {
+                    self.persist_prefs();
+                }
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1032,6 +1046,15 @@ impl App {
             pads = clicks[3].0;
             batch = clicks[3].1;
 
+            ui.add_space(2.0);
+            ui.add_enabled_ui(has3d, |ui| {
+                let before = self.ad_embed_3d;
+                ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
+                if self.ad_embed_3d != before {
+                    self.persist_prefs();
+                }
+            });
+
             ui.add_space(4.0);
             ui.label(egui::RichText::new(i18n::t(lang, "output")).strong().color(LABEL));
             let path_w = ui.available_width();
@@ -1210,12 +1233,20 @@ impl App {
             ..Default::default()
         };
         mutate(&mut req);
+        req.ad_embed_3d = self.ad_embed_3d;
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("export", move || {
             let client = LcedaClient::new();
             let paths = export(&client, &item, &req)?;
             Ok(format_paths(&paths, &out_dir))
         }));
+    }
+
+    fn persist_prefs(&self) {
+        crate::prefs::save(&crate::prefs::Prefs {
+            ad_embed_3d: self.ad_embed_3d,
+            batch_merge: crate::prefs::load().batch_merge,
+        });
     }
 
     fn start_batch(&mut self) -> bool {
@@ -1230,7 +1261,8 @@ impl App {
             self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
             return false;
         }
-        let req = self.batch_opts.request(out_dir.clone());
+        let mut req = self.batch_opts.request(out_dir.clone());
+        req.ad_embed_3d = self.ad_embed_3d;
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("batch", move || {
             let text = std::fs::read_to_string(&file)

@@ -23,6 +23,11 @@ pub struct ExportRequest {
     pub source_json: bool,
     pub force: bool,
     pub out_dir: PathBuf,
+    /// Embed STEP into PcbLib when a 3D model exists.
+    pub ad_embed_3d: bool,
+    /// Batch: write one combined library instead of per-part folders for AD/KiCad.
+    pub merge: bool,
+    pub merge_name: String,
 }
 
 impl Default for ExportRequest {
@@ -37,6 +42,9 @@ impl Default for ExportRequest {
             source_json: false,
             force: false,
             out_dir: PathBuf::from("."),
+            ad_embed_3d: true,
+            merge: false,
+            merge_name: "lceda".into(),
         }
     }
 }
@@ -53,6 +61,7 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
     let part_dir = req.out_dir.join(&folder_name);
     let mut out = DownloadPaths::default();
     let want_other = req.step || req.obj || req.any_library();
+    let mut step_bytes: Option<Vec<u8>> = None;
 
     if req.step {
         if item.model_uuid.is_none() {
@@ -65,9 +74,22 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
                 return Err(Error::msg("下载的 STEP 不是有效模型（可能是接口错误页）"));
             }
             ensure_parent(&path)?;
-            fs::write(&path, bytes)?;
+            fs::write(&path, &bytes)?;
+            step_bytes = Some(bytes);
+        } else {
+            if let Ok(bytes) = fs::read(&path) {
+                if looks_like_step(&bytes) {
+                    step_bytes = Some(bytes);
+                }
+            }
         }
         out.step = Some(path);
+    } else if req.ad && req.ad_embed_3d && item.model_uuid.is_some() {
+        match client.download_step_bytes(item) {
+            Ok(bytes) if looks_like_step(&bytes) => step_bytes = Some(bytes),
+            Ok(_) => eprintln!("STEP 不是有效模型，PcbLib 将不含 3D"),
+            Err(e) => eprintln!("下载 STEP 失败，PcbLib 将不含 3D: {e}"),
+        }
     }
 
     if req.obj {
@@ -123,8 +145,14 @@ pub fn export(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> R
         }
 
         if req.ad {
-            if let Err(e) = export_altium(&mut out, &part_dir, &base, symbol_ir.as_ref(), footprint_ir.as_ref())
-            {
+            if let Err(e) = export_altium(
+                &mut out,
+                &part_dir,
+                &base,
+                symbol_ir.as_ref(),
+                footprint_ir.as_ref(),
+                step_bytes.as_deref(),
+            ) {
                 if !req.kicad {
                     return Err(e);
                 }
@@ -183,6 +211,7 @@ fn export_altium(
     base: &str,
     symbol_ir: Option<&SymbolIr>,
     footprint_ir: Option<&FootprintIr>,
+    step: Option<&[u8]>,
 ) -> Result<()> {
     let mut ad_err: Option<String> = None;
     if let Some(sym) = symbol_ir {
@@ -203,7 +232,7 @@ fn export_altium(
     }
     if let Some(fp) = footprint_ir {
         let pcb = out_dir.join(format!("{base}.PcbLib"));
-        match altium::write_pcblib(&pcb, fp) {
+        match altium::write_pcblib_with_step(&pcb, fp, step) {
             Ok(()) if pcb.exists() && pcb.metadata().map(|m| m.len()).unwrap_or(0) > 64 => {
                 out.pcblib = Some(pcb);
             }

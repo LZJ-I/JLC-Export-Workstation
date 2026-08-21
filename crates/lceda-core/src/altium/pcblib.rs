@@ -3,27 +3,87 @@
 
 use super::binary::{BinWriter, CfbDoc, encode_flags, from_mils, from_mm};
 use super::{hole_type_byte, pad_shape_byte, pcb_layer};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ir::{FootprintIr, IrPad};
-use crate::util::altium_section_key;
+use crate::util::{looks_like_step, sanitize_filename, unique_altium_section_key};
+use std::collections::HashSet;
+use std::io::Write;
 use std::path::Path;
 
 const DEFAULT_SOLDER_MASK_MIL: f64 = 1.969;
 const DEFAULT_CORNER_RADIUS: u8 = 25;
+const DEFAULT_BODY_HEIGHT_MM: f64 = 1.0;
+
+pub struct PcbLibPart<'a> {
+    pub fp: &'a FootprintIr,
+    pub step: Option<&'a [u8]>,
+}
 
 pub fn write(path: &Path, fp: &FootprintIr) -> Result<()> {
-    let key = altium_section_key(&fp.name);
-    let mut cfb = CfbDoc::create(path)?;
+    write_library(path, &[PcbLibPart { fp, step: None }])
+}
 
+pub fn write_with_step(path: &Path, fp: &FootprintIr, step: Option<&[u8]>) -> Result<()> {
+    write_library(path, &[PcbLibPart { fp, step }])
+}
+
+pub fn write_library(path: &Path, parts: &[PcbLibPart<'_>]) -> Result<()> {
+    if parts.is_empty() {
+        return Err(Error::Altium("PcbLib 没有封装".into()));
+    }
+
+    let mut used = HashSet::new();
+    let keys: Vec<String> = parts
+        .iter()
+        .map(|p| unique_altium_section_key(&p.fp.name, &mut used))
+        .collect();
+
+    let mut models = Vec::new();
+    let mut bodies: Vec<Option<BodyInfo>> = Vec::with_capacity(parts.len());
+    for (index, part) in parts.iter().enumerate() {
+        match part.step {
+            Some(bytes) if looks_like_step(bytes) => {
+                let id = model_guid(&keys[index], index);
+                let name = step_model_name(&part.fp.name);
+                bodies.push(Some(BodyInfo {
+                    id: id.clone(),
+                    name: name.clone(),
+                    outline: body_outline(part.fp),
+                    height: from_mm(DEFAULT_BODY_HEIGHT_MM),
+                }));
+                models.push(EmbeddedModel {
+                    id,
+                    name,
+                    data: bytes.to_vec(),
+                });
+            }
+            _ => bodies.push(None),
+        }
+    }
+
+    let mut cfb = CfbDoc::create(path)?;
     cfb.stream("FileHeader", &file_header())?;
+
+    let key_pairs: Vec<(String, String)> = parts
+        .iter()
+        .zip(keys.iter())
+        .filter(|(part, key)| part.fp.name != **key)
+        .map(|(part, key)| (part.fp.name.clone(), key.clone()))
+        .collect();
+    if !key_pairs.is_empty() {
+        cfb.stream("SectionKeys", &section_keys_bytes(&key_pairs))?;
+    }
 
     cfb.storage("Library")?;
     cfb.stream("Library/Header", &i32_stream(1))?;
-    cfb.stream("Library/Data", &library_data(&key))?;
+    cfb.stream("Library/Data", &library_data(&keys))?;
 
     cfb.storage("Library/Models")?;
-    cfb.stream("Library/Models/Header", &i32_stream(0))?;
-    cfb.stream("Library/Models/Data", &[])?;
+    cfb.stream("Library/Models/Header", &i32_stream(models.len() as i32))?;
+    cfb.stream("Library/Models/Data", &models_data(&models))?;
+    for (index, model) in models.iter().enumerate() {
+        cfb.stream(&format!("Library/Models/{index}"), &zlib_store(&model.data)?)?;
+    }
 
     cfb.storage("Library/Textures")?;
     cfb.stream("Library/Textures/Header", &i32_stream(0))?;
@@ -33,24 +93,41 @@ pub fn write(path: &Path, fp: &FootprintIr) -> Result<()> {
     cfb.stream("Library/ModelsNoEmbed/Header", &i32_stream(0))?;
     cfb.stream("Library/ModelsNoEmbed/Data", &[])?;
 
-    cfb.storage(&key)?;
-    let (data, names) = footprint_data(fp, &key);
-    cfb.stream(&format!("{key}/Header"), &i32_stream(names.len() as i32))?;
-    cfb.stream(&format!("{key}/Parameters"), &footprint_params(fp, &key))?;
-    cfb.stream(&format!("{key}/WideStrings"), &empty_params())?;
-    cfb.stream(&format!("{key}/Data"), &data)?;
+    for (i, part) in parts.iter().enumerate() {
+        let key = &keys[i];
+        let height = bodies[i].as_ref().map(|b| b.height).unwrap_or(0);
+        let (data, names) = footprint_data(part.fp, key, bodies[i].as_ref());
+        cfb.storage(key)?;
+        cfb.stream(&format!("{key}/Header"), &i32_stream(names.len() as i32))?;
+        cfb.stream(&format!("{key}/Parameters"), &footprint_params(part.fp, key, height))?;
+        cfb.stream(&format!("{key}/WideStrings"), &empty_params())?;
+        cfb.stream(&format!("{key}/Data"), &data)?;
 
-    cfb.storage(&format!("{key}/UniqueIdPrimitiveInformation"))?;
-    cfb.stream(
-        &format!("{key}/UniqueIdPrimitiveInformation/Header"),
-        &i32_stream(names.len() as i32),
-    )?;
-    cfb.stream(
-        &format!("{key}/UniqueIdPrimitiveInformation/Data"),
-        &unique_id_primitive_information(&names),
-    )?;
+        cfb.storage(&format!("{key}/UniqueIdPrimitiveInformation"))?;
+        cfb.stream(
+            &format!("{key}/UniqueIdPrimitiveInformation/Header"),
+            &i32_stream(names.len() as i32),
+        )?;
+        cfb.stream(
+            &format!("{key}/UniqueIdPrimitiveInformation/Data"),
+            &unique_id_primitive_information(&names),
+        )?;
+    }
 
     cfb.finish()
+}
+
+struct EmbeddedModel {
+    id: String,
+    name: String,
+    data: Vec<u8>,
+}
+
+struct BodyInfo {
+    id: String,
+    name: String,
+    outline: Vec<(i32, i32)>,
+    height: i32,
 }
 
 fn i32_stream(v: i32) -> Vec<u8> {
@@ -66,22 +143,53 @@ fn file_header() -> Vec<u8> {
     w.into_vec()
 }
 
-fn library_data(name: &str) -> Vec<u8> {
+fn library_data(names: &[String]) -> Vec<u8> {
     let mut w = BinWriter::new();
     w.write_params(&[
         ("HEADER", "PCB 6.0 Binary Library File".into()),
-        ("WEIGHT", "1".into()),
+        ("WEIGHT", names.len().to_string()),
     ]);
-    w.write_u32(1);
-    w.write_string_block(name);
+    w.write_u32(names.len() as u32);
+    for name in names {
+        w.write_string_block(name);
+    }
     w.into_vec()
 }
 
-fn footprint_params(fp: &FootprintIr, name: &str) -> Vec<u8> {
+fn section_keys_bytes(pairs: &[(String, String)]) -> Vec<u8> {
+    let mut w = BinWriter::new();
+    w.write_i32(pairs.len() as i32);
+    for (name, key) in pairs {
+        w.write_block(0, |w| {
+            w.write_pascal_short(name);
+            w.write_u8(0);
+        });
+        w.write_string_block(key);
+    }
+    w.into_vec()
+}
+
+fn models_data(models: &[EmbeddedModel]) -> Vec<u8> {
+    let mut w = BinWriter::new();
+    for model in models {
+        let text = format!(
+            "EMBED=TRUE|MODELSOURCE=Undefined|ID={}|ROTX=0.000|ROTY=0.000|ROTZ=0.000|DZ=0|CHECKSUM=0|NAME={}",
+            model.id, model.name
+        );
+        let mut inner = BinWriter::new();
+        inner.write_cstring(&text);
+        let data = inner.into_vec();
+        w.write_i32(data.len() as i32);
+        w.write_bytes(&data);
+    }
+    w.into_vec()
+}
+
+fn footprint_params(fp: &FootprintIr, name: &str, height_raw: i32) -> Vec<u8> {
     let mut w = BinWriter::new();
     w.write_params(&[
         ("PATTERN", name.into()),
-        ("HEIGHT", "0mil".into()),
+        ("HEIGHT", format_raw_mil(height_raw)),
         ("DESCRIPTION", altium_param(&fp.description)),
         ("ITEMGUID", "".into()),
         ("REVISIONGUID", "".into()),
@@ -108,7 +216,7 @@ fn unique_id_primitive_information(names: &[&str]) -> Vec<u8> {
     w.into_vec()
 }
 
-fn footprint_data(fp: &FootprintIr, name: &str) -> (Vec<u8>, Vec<&'static str>) {
+fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec<u8>, Vec<&'static str>) {
     let mut w = BinWriter::new();
     w.write_string_block(name);
     let mut names = Vec::new();
@@ -172,6 +280,12 @@ fn footprint_data(fp: &FootprintIr, name: &str) -> (Vec<u8>, Vec<&'static str>) 
         w.write_u8(11);
         write_region(&mut w, layer, &closed_outline(&r.points));
         names.push("Region");
+    }
+
+    if let Some(body) = body {
+        w.write_u8(12);
+        write_component_body(&mut w, body);
+        names.push("ComponentBody");
     }
 
     (w.into_vec(), names)
@@ -353,4 +467,150 @@ fn write_pad(w: &mut BinWriter, pad: &IrPad) {
             w.write_u8(if rounded { DEFAULT_CORNER_RADIUS } else { 50 });
         }
     });
+}
+
+fn write_component_body(w: &mut BinWriter, body: &BodyInfo) {
+    w.write_block(0, |w| {
+        write_common(w, 57); // MECHANICAL1
+        w.write_u32(0);
+        w.write_u8(0);
+        w.write_params(&[
+            ("V7_LAYER", "MECHANICAL1".into()),
+            ("NAME", "__LCEDA_BODY__".into()),
+            ("KIND", "0".into()),
+            ("SUBPOLYINDEX", "-1".into()),
+            ("UNIONINDEX", "0".into()),
+            ("ARCRESOLUTION", "0.5mil".into()),
+            ("ISSHAPEBASED", "FALSE".into()),
+            ("CAVITYHEIGHT", "0mil".into()),
+            ("STANDOFFHEIGHT", "0mil".into()),
+            ("OVERALLHEIGHT", format_raw_mil(body.height)),
+            ("BODYPROJECTION", "0".into()),
+            ("BODYCOLOR3D", "8421504".into()),
+            ("BODYOPACITY3D", "1.000".into()),
+            ("IDENTIFIER", "".into()),
+            ("TEXTURE", "".into()),
+            ("TEXTURECENTERX", "0mil".into()),
+            ("TEXTURECENTERY", "0mil".into()),
+            ("TEXTURESIZEX", "0mil".into()),
+            ("TEXTURESIZEY", "0mil".into()),
+            ("TEXTUREROTATION", "0.000".into()),
+            ("MODELID", body.id.clone()),
+            ("MODEL.CHECKSUM", "0".into()),
+            ("MODEL.EMBED", "TRUE".into()),
+            ("MODEL.NAME", body.name.clone()),
+            ("MODEL.2D.X", "0mil".into()),
+            ("MODEL.2D.Y", "0mil".into()),
+            ("MODEL.2D.ROTATION", "0.000".into()),
+            ("MODEL.3D.ROTX", "0.000".into()),
+            ("MODEL.3D.ROTY", "0.000".into()),
+            ("MODEL.3D.ROTZ", "0.000".into()),
+            ("MODEL.3D.DZ", "0mil".into()),
+            ("MODEL.MODELTYPE", "1".into()),
+            ("MODEL.MODELSOURCE", "Undefined".into()),
+        ]);
+        w.write_u32(body.outline.len() as u32);
+        for &(x, y) in &body.outline {
+            w.write_f64(x as f64);
+            w.write_f64(y as f64);
+        }
+    });
+}
+
+fn body_outline(fp: &FootprintIr) -> Vec<(i32, i32)> {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    {
+        let mut add = |x: f64, y: f64| {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        };
+        for pad in &fp.pads {
+            let hx = pad.width.abs() / 2.0;
+            let hy = pad.height.abs() / 2.0;
+            add(pad.x - hx, pad.y - hy);
+            add(pad.x + hx, pad.y + hy);
+        }
+        for t in &fp.tracks {
+            for &(x, y) in &t.points {
+                add(x, y);
+            }
+        }
+        for c in &fp.circles {
+            add(c.x - c.radius, c.y - c.radius);
+            add(c.x + c.radius, c.y + c.radius);
+        }
+        for r in &fp.regions {
+            for &(x, y) in &r.points {
+                add(x, y);
+            }
+        }
+    }
+    if !min_x.is_finite() {
+        min_x = -1.0;
+        max_x = 1.0;
+        min_y = -1.0;
+        max_y = 1.0;
+    }
+    let pad = 0.1;
+    vec![
+        (from_mm(min_x - pad), from_mm(min_y - pad)),
+        (from_mm(max_x + pad), from_mm(min_y - pad)),
+        (from_mm(max_x + pad), from_mm(max_y + pad)),
+        (from_mm(min_x - pad), from_mm(max_y + pad)),
+    ]
+}
+
+fn step_model_name(fp_name: &str) -> String {
+    let mut name = sanitize_filename(fp_name);
+    if !name.to_ascii_lowercase().ends_with(".step") && !name.to_ascii_lowercase().ends_with(".stp")
+    {
+        name.push_str(".step");
+    }
+    name
+}
+
+fn model_guid(key: &str, index: usize) -> String {
+    let h = fnv1a(&format!("{key}|{index}"));
+    format!(
+        "{{{:08X}-{:04X}-4{:03X}-8{:03X}-{:012X}}}",
+        (h >> 32) as u32,
+        (h >> 16) as u16,
+        (h as u16) & 0x0FFF,
+        ((h >> 8) as u16) & 0x0FFF,
+        h & 0x0000_FFFF_FFFF
+    )
+}
+
+fn fnv1a(s: &str) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+fn format_raw_mil(raw: i32) -> String {
+    let mut text = format!("{:.4}", raw as f64 / 10_000.0);
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    if text == "-0" {
+        text = "0".into();
+    }
+    format!("{text}mil")
+}
+
+fn zlib_store(data: &[u8]) -> Result<Vec<u8>> {
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data)?;
+    Ok(enc.finish()?)
 }

@@ -52,6 +52,9 @@ pub enum Cmd {
         /// 同时（或仅）保存 EasyEDA JSON
         #[arg(long)]
         source: bool,
+        /// 不把 STEP 嵌入 PcbLib（默认嵌入）
+        #[arg(long = "no-ad-3d")]
+        no_ad_3d: bool,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -74,6 +77,9 @@ pub enum Cmd {
         datasheet: bool,
         #[arg(long)]
         source: bool,
+        /// 不把 STEP 嵌入 PcbLib（默认嵌入）
+        #[arg(long = "no-ad-3d")]
+        no_ad_3d: bool,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -130,12 +136,13 @@ pub fn run() -> Result<i32> {
             pads,
             datasheet,
             source,
+            no_ad_3d,
             output,
             force,
         }) => {
             let client = LcedaClient::new();
             let item = client.select(&keyword, index)?;
-            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, output, force);
+            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, !no_ad_3d, output, force);
             let paths = export::export(&client, &item, &req).context("export failed")?;
             print_paths(&paths);
             Ok(0)
@@ -149,6 +156,7 @@ pub fn run() -> Result<i32> {
             pads,
             datasheet,
             source,
+            no_ad_3d,
             output,
             force,
         }) => {
@@ -159,7 +167,7 @@ pub fn run() -> Result<i32> {
                 println!("empty list");
                 return Ok(1);
             }
-            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, output, force);
+            let req = build_req(step, obj, ad, kicad, pads, datasheet, source, !no_ad_3d, output, force);
             let client = LcedaClient::new();
             let mut failed = 0;
             for (kw, result) in export::export_batch(&client, &ids, &req) {
@@ -187,6 +195,7 @@ fn build_req(
     pads: bool,
     datasheet: bool,
     source: bool,
+    ad_embed_3d: bool,
     output: PathBuf,
     force: bool,
 ) -> ExportRequest {
@@ -200,6 +209,9 @@ fn build_req(
         source_json: source || ad || kicad || pads,
         force,
         out_dir: output,
+        ad_embed_3d,
+        merge: false,
+        merge_name: "lceda".into(),
     };
     if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
     {

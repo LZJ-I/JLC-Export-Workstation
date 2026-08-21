@@ -56,6 +56,8 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "download_obj") => "Download OBJ",
         (Lang::Zh, "export_ad") => "导出 AD 库",
         (Lang::En, "export_ad") => "Export Altium",
+        (Lang::Zh, "ad_embed_3d") => "含 3D",
+        (Lang::En, "ad_embed_3d") => "Embed 3D",
         (Lang::Zh, "export_kicad") => "导出 KiCad",
         (Lang::En, "export_kicad") => "Export KiCad",
         (Lang::Zh, "export_pads") => "导出 PADS",
