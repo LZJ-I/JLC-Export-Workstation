@@ -165,7 +165,7 @@ pub fn symbol_ir(name: &str, description: &str, src: EasyedaSymbol, meta: PartMe
             });
         }
     }
-    SymbolIr {
+    let mut symbol = SymbolIr {
         name: name.to_string(),
         description: meta.describe(description),
         meta,
@@ -177,7 +177,7 @@ pub fn symbol_ir(name: &str, description: &str, src: EasyedaSymbol, meta: PartMe
                 name: p.name,
                 x: p.x * SYMBOL_UNIT_MM,
                 y: p.y * SYMBOL_UNIT_MM,
-                length: p.length.max(10.0) * SYMBOL_UNIT_MM,
+                length: p.length.max(0.0) * SYMBOL_UNIT_MM,
                 rotation: p.rotation,
                 pin_type: p.pin_type,
             })
@@ -198,7 +198,90 @@ pub fn symbol_ir(name: &str, description: &str, src: EasyedaSymbol, meta: PartMe
                 ry: e.ry * SYMBOL_UNIT_MM,
             })
             .collect(),
+    };
+    snap_pins_to_body(&mut symbol);
+    symbol
+}
+
+const MIN_PIN_LENGTH_MM: f64 = 2.54;
+
+fn snap_pins_to_body(symbol: &mut SymbolIr) {
+    let bounds = graphics_bounds(symbol);
+    for pin in &mut symbol.pins {
+        let mut attached = false;
+        if let Some((min_x, min_y, max_x, max_y)) = bounds {
+            let mut orient = pin_quadrant(pin.rotation);
+            let horizontal = orient == 0 || orient == 2;
+            let mut length = pin.length;
+            let mut x = pin.x;
+            let mut y = pin.y;
+            if horizontal {
+                if pin.x <= min_x {
+                    orient = 2;
+                    length = min_x - pin.x;
+                    x = min_x;
+                    attached = true;
+                } else if pin.x >= max_x {
+                    orient = 0;
+                    length = pin.x - max_x;
+                    x = max_x;
+                    attached = true;
+                }
+            } else if pin.y <= min_y {
+                orient = 3;
+                length = min_y - pin.y;
+                y = min_y;
+                attached = true;
+            } else if pin.y >= max_y {
+                orient = 1;
+                length = pin.y - max_y;
+                y = max_y;
+                attached = true;
+            }
+            if attached && length.is_finite() && length > 1e-6 {
+                pin.x = x;
+                pin.y = y;
+                pin.length = length.max(MIN_PIN_LENGTH_MM);
+                pin.rotation = f64::from(orient) * 90.0;
+                continue;
+            }
+        }
+        pin.length = pin.length.max(MIN_PIN_LENGTH_MM);
     }
+}
+
+fn pin_quadrant(rotation_deg: f64) -> u8 {
+    let a = crate::easyeda::normalize_angle(rotation_deg);
+    ((a / 90.0).round() as i32).rem_euclid(4) as u8
+}
+
+fn graphics_bounds(symbol: &SymbolIr) -> Option<(f64, f64, f64, f64)> {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    {
+        let mut add = |x: f64, y: f64| {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        };
+        for r in &symbol.rects {
+            add(r.x1, r.y1);
+            add(r.x2, r.y2);
+        }
+        for poly in &symbol.polys {
+            for &(x, y) in poly {
+                add(x, y);
+            }
+        }
+        for e in &symbol.ellipses {
+            add(e.x - e.rx, e.y - e.ry);
+            add(e.x + e.rx, e.y + e.ry);
+        }
+    }
+    min_x.is_finite().then_some((min_x, min_y, max_x, max_y))
 }
 
 pub fn footprint_ir(name: &str, description: &str, src: EasyedaFootprint, meta: PartMeta) -> FootprintIr {
@@ -277,5 +360,57 @@ pub fn footprint_ir(name: &str, description: &str, src: EasyedaFootprint, meta: 
                     .collect(),
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::easyeda::{EasyedaSymbol, SymbolPin, SymbolRect};
+
+    #[test]
+    fn snaps_side_pins_to_body_edge() {
+        let src = EasyedaSymbol {
+            pins: vec![
+                SymbolPin {
+                    id: "a".into(),
+                    x: -20.0,
+                    y: 0.0,
+                    length: 3.0,
+                    rotation: 0.0,
+                    number: "1".into(),
+                    name: "1".into(),
+                    pin_type: String::new(),
+                },
+                SymbolPin {
+                    id: "b".into(),
+                    x: 20.0,
+                    y: 0.0,
+                    length: 3.0,
+                    rotation: 180.0,
+                    number: "2".into(),
+                    name: "2".into(),
+                    pin_type: String::new(),
+                },
+            ],
+            rects: vec![SymbolRect {
+                x1: -10.0,
+                y1: -4.0,
+                x2: 10.0,
+                y2: 4.0,
+            }],
+            polys: vec![],
+            ellipses: vec![],
+            part_box: None,
+        };
+        let sym = symbol_ir("L", "", src, PartMeta::default());
+        let left = &sym.pins[0];
+        let right = &sym.pins[1];
+        assert!((left.x - (-10.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
+        assert!((right.x - (10.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
+        assert!((left.rotation - 180.0).abs() < 1e-9);
+        assert!(right.rotation.abs() < 1e-9);
+        assert!(left.length >= MIN_PIN_LENGTH_MM - 1e-9);
+        assert!(right.length >= MIN_PIN_LENGTH_MM - 1e-9);
     }
 }
