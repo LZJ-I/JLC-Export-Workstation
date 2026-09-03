@@ -3,7 +3,7 @@ name = "lceda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "立创封装助手：搜索、3D、Altium / KiCad / PADS 库导出"
+description = "JLC-Export：搜索、3D、Altium / KiCad / PADS 库导出"
 
 [[bin]]
 name = "lceda"

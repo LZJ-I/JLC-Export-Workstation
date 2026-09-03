@@ -58,8 +58,8 @@ fn windows_ui_lang() -> Option<Lang> {
 
 pub fn t(lang: Lang, key: &str) -> &'static str {
     match (lang, key) {
-        (Lang::Zh, "app_title") => "立创封装助手",
-        (Lang::En, "app_title") => "LCSC Parts",
+        (Lang::Zh, "app_title") => "JLC-Export",
+        (Lang::En, "app_title") => "JLC-Export",
         (Lang::Zh, "search") => "搜索",
         (Lang::En, "search") => "Search",
         (Lang::Zh, "keyword") => "型号 / 立创编号",

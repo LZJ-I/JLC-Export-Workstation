@@ -8,7 +8,7 @@ use lceda_core::models::{self, DownloadPaths};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "lceda", version, about = "立创封装助手：搜索、3D、Altium / KiCad / PADS 库导出")]
+#[command(name = "lceda", version, about = "JLC-Export：搜索、3D、Altium / KiCad / PADS 库导出")]
 pub struct Cli {
     /// zh / en（默认跟随系统；图形界面会记住上次选择）
     #[arg(long, global = true)]
