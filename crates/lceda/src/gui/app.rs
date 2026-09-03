@@ -130,6 +130,9 @@ struct App {
     zoom: f32,
     alert: Option<String>,
     show_about: bool,
+    show_welcome: bool,
+    welcome_hide: bool,
+    hide_welcome: bool,
     show_settings: bool,
     show_batch: bool,
     batch_opts: BatchOpts,
@@ -184,6 +187,9 @@ impl App {
             zoom: 1.0,
             alert: None,
             show_about: false,
+            show_welcome: !prefs.hide_welcome && !skip_update,
+            welcome_hide: true,
+            hide_welcome: prefs.hide_welcome,
             show_settings: false,
             show_batch: false,
             batch_opts: BatchOpts::default(),
@@ -259,6 +265,49 @@ impl App {
             });
         if close {
             self.alert = None;
+        }
+    }
+
+    fn show_welcome(&mut self, ctx: &egui::Context) {
+        if !self.show_welcome {
+            return;
+        }
+        let mut close = false;
+        let mut open_repo = false;
+        let lang = self.lang;
+        let width = 440.0;
+        fit_window(i18n::t(lang, "notice"), "lceda_welcome_fit", width).show(ctx, |ui| {
+            ui.set_width(width - 8.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.add(
+                egui::Label::new(egui::RichText::new(i18n::t(lang, "welcome_p1")).color(LABEL))
+                    .wrap(),
+            );
+            ui.add(
+                egui::Label::new(egui::RichText::new(i18n::t(lang, "welcome_p2")).color(LABEL))
+                    .wrap(),
+            );
+            ui.add_space(4.0);
+            ui.checkbox(&mut self.welcome_hide, i18n::t(lang, "welcome_hide"));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::pill_button(ui, i18n::t(lang, "ok"), true, true).clicked() {
+                        close = true;
+                    }
+                    if theme::pill_button(ui, i18n::t(lang, "open_repo"), true, false).clicked() {
+                        open_repo = true;
+                    }
+                });
+            });
+        });
+        if open_repo {
+            let _ = webbrowser::open(update::REPO_URL);
+        }
+        if close {
+            self.show_welcome = false;
+            self.hide_welcome = self.welcome_hide;
+            self.persist_prefs();
         }
     }
 
@@ -631,10 +680,13 @@ impl eframe::App for App {
                 self.right_pane(ui);
             });
         self.show_alert(ctx);
+        self.show_welcome(ctx);
         self.show_about(ctx);
         self.show_settings(ctx);
         self.show_batch_dialog(ctx);
-        self.show_update(ctx);
+        if !self.show_welcome {
+            self.show_update(ctx);
+        }
         self.tick_debug_shot(ctx);
     }
 
@@ -1304,6 +1356,7 @@ impl App {
             ad_embed_3d: self.ad_embed_3d,
             kicad_attach_3d: self.kicad_attach_3d,
             batch_merge: self.batch_merge,
+            hide_welcome: self.hide_welcome,
             lang: if self.lang_pinned {
                 Some(self.lang.as_code().into())
             } else {

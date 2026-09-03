@@ -7,6 +7,7 @@ pub struct Prefs {
     pub ad_embed_3d: bool,
     pub kicad_attach_3d: bool,
     pub batch_merge: bool,
+    pub hide_welcome: bool,
     pub lang: Option<String>,
 }
 
@@ -16,6 +17,7 @@ impl Default for Prefs {
             ad_embed_3d: true,
             kicad_attach_3d: true,
             batch_merge: false,
+            hide_welcome: false,
             lang: None,
         }
     }
@@ -35,6 +37,7 @@ pub fn load() -> Prefs {
         ad_embed_3d: v.get("ad_embed_3d").and_then(Value::as_bool).unwrap_or(true),
         kicad_attach_3d: v.get("kicad_attach_3d").and_then(Value::as_bool).unwrap_or(true),
         batch_merge: v.get("batch_merge").and_then(Value::as_bool).unwrap_or(false),
+        hide_welcome: v.get("hide_welcome").and_then(Value::as_bool).unwrap_or(false),
         lang: v
             .get("lang")
             .and_then(Value::as_str)
@@ -54,6 +57,7 @@ pub fn save(prefs: &Prefs) {
         "ad_embed_3d": prefs.ad_embed_3d,
         "kicad_attach_3d": prefs.kicad_attach_3d,
         "batch_merge": prefs.batch_merge,
+        "hide_welcome": prefs.hide_welcome,
     });
     if let Some(lang) = &prefs.lang {
         body["lang"] = json!(lang);
