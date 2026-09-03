@@ -1911,7 +1911,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "lceda"
-version = "0.3.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1933,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "lceda-core"
-version = "0.3.3"
+version = "0.5.0"
 dependencies = [
  "cfb",
  "encoding_rs",
