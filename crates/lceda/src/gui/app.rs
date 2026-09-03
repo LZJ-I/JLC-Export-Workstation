@@ -3,6 +3,7 @@ use super::theme::{self, ACCENT, LABEL, SECONDARY, WELL, WINDOW_BG};
 use crate::i18n::{self, Lang};
 use crate::update::{self, CheckResult, UpdateInfo, UpdatePhase, UpdateProgress};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use eframe::egui_glow::glow;
 use lceda_core::client::LcedaClient;
 use lceda_core::export::{ExportRequest, export};
@@ -139,6 +140,7 @@ struct App {
     update: Option<UpdateInfo>,
     update_job: Option<ApplyPromise>,
     update_progress: Option<update::ProgressHandle>,
+    md_cache: CommonMarkCache,
     frame: u32,
     pending_search: Option<String>,
     shot_path: Option<PathBuf>,
@@ -196,6 +198,7 @@ impl App {
             update: None,
             update_job: None,
             update_progress: None,
+            md_cache: CommonMarkCache::default(),
             frame: 0,
             pending_search: env::var("LCEDA_SEARCH").ok().filter(|s| !s.is_empty()),
             shot_path: env::var("LCEDA_SHOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
@@ -442,43 +445,40 @@ impl App {
         let body = i18n::t(self.lang, "update_body")
             .replace("{cur}", update::current_version())
             .replace("{new}", &info.version);
-        let notes = info.notes.trim();
-        let width = if notes.is_empty() { 400.0 } else { 440.0 };
+        let notes = info.notes.trim().to_string();
+        let width = if notes.is_empty() { 400.0 } else { 500.0 };
         let tall = notes.lines().count() > 8 || notes.chars().count() > 240;
-        fit_window(i18n::t(self.lang, "update_title"), "lceda_update_fit", width)
-            .max_height(if tall { 420.0 } else { 800.0 })
+        let lang = self.lang;
+        let progress = self.update_progress.clone();
+        fit_window(i18n::t(lang, "update_title"), "lceda_update_fit", width)
+            .max_height(if tall { 520.0 } else { 800.0 })
             .show(ctx, |ui| {
                 ui.set_width(width - 8.0);
                 ui.add(egui::Label::new(egui::RichText::new(body).color(LABEL)).wrap());
                 if !notes.is_empty() {
                     ui.add_space(8.0);
                     ui.label(
-                        egui::RichText::new(i18n::t(self.lang, "update_notes"))
+                        egui::RichText::new(i18n::t(lang, "update_notes"))
                             .color(SECONDARY)
                             .size(12.0),
                     );
                     ui.add_space(4.0);
-                    let add_notes = |ui: &mut egui::Ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(notes).color(LABEL).size(13.0))
-                                .wrap()
-                                .halign(egui::Align::Min),
-                        );
-                    };
+                    let cache = &mut self.md_cache;
                     if tall {
                         egui::ScrollArea::vertical()
                             .id_salt("update_notes")
-                            .max_height(220.0)
+                            .max_height(280.0)
                             .auto_shrink([false, true])
-                            .show(ui, add_notes);
+                            .show(ui, |ui| {
+                                CommonMarkViewer::new().show(ui, cache, &notes);
+                            });
                     } else {
-                        add_notes(ui);
+                        CommonMarkViewer::new().show(ui, cache, &notes);
                     }
                 }
                 if downloading {
                     ui.add_space(8.0);
-                    let (label, fraction, indeterminate) = self
-                        .update_progress
+                    let (label, fraction, indeterminate) = progress
                         .as_ref()
                         .and_then(|p| p.lock().ok())
                         .map(|g| {
@@ -487,9 +487,9 @@ impl App {
                                 UpdatePhase::Installing => "update_installing",
                                 _ => "update_downloading",
                             };
-                            (i18n::t(self.lang, key), g.fraction, g.indeterminate)
+                            (i18n::t(lang, key), g.fraction, g.indeterminate)
                         })
-                        .unwrap_or((i18n::t(self.lang, "update_downloading"), 0.0, true));
+                        .unwrap_or((i18n::t(lang, "update_downloading"), 0.0, true));
                     ui.label(egui::RichText::new(label).color(SECONDARY));
                     ui.add_space(4.0);
                     if indeterminate {
@@ -505,7 +505,7 @@ impl App {
                             if info.zip_url.is_some()
                                 && theme::pill_button(
                                     ui,
-                                    i18n::t(self.lang, "update_now"),
+                                    i18n::t(lang, "update_now"),
                                     true,
                                     true,
                                 )
@@ -513,14 +513,14 @@ impl App {
                             {
                                 now = true;
                             }
-                            if theme::pill_button(ui, i18n::t(self.lang, "update_open"), true, false)
+                            if theme::pill_button(ui, i18n::t(lang, "update_open"), true, false)
                                 .clicked()
                             {
                                 open = true;
                             }
                             if theme::pill_button(
                                 ui,
-                                i18n::t(self.lang, "update_later"),
+                                i18n::t(lang, "update_later"),
                                 true,
                                 false,
                             )

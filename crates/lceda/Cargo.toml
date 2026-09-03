@@ -17,6 +17,7 @@ image.workspace = true
 eframe = { version = "0.32", default-features = true }
 egui = "0.32"
 egui_extras = { version = "0.32", features = ["image"] }
+egui_commonmark = { version = "0.21.1", default-features = false }
 poll-promise = "0.3"
 rfd = "0.15"
 directories = "6"

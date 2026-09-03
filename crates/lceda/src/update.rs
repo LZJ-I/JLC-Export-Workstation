@@ -16,7 +16,7 @@ pub struct UpdateInfo {
     pub version: String,
     pub zip_url: Option<String>,
     pub page_url: String,
-    /// GitHub Release 描述（markdown 原文，可能为空）。
+    /// 当前版本到最新版本之间各 Release 的 markdown（新→旧）。
     pub notes: String,
 }
 
@@ -60,36 +60,103 @@ pub fn via_proxy(url: &str) -> String {
 }
 
 pub fn check_for_update() -> CheckResult {
-    let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let Some(body) = fetch_bytes(&via_proxy(&api)).or_else(|| fetch_bytes(&api)) else {
-        return CheckResult::Failed;
-    };
-    let Ok(json) = serde_json::from_slice::<Value>(&body) else {
-        return CheckResult::Failed;
-    };
-    let Some(tag) = json.get("tag_name").and_then(Value::as_str).map(str::trim) else {
-        return CheckResult::Failed;
-    };
-    let Some(remote) = parse_version(tag) else {
-        return CheckResult::Failed;
-    };
     let Some(local) = parse_version(current_version()) else {
         return CheckResult::Failed;
     };
-    if remote <= local {
-        return CheckResult::UpToDate;
+    let list_api = format!("https://api.github.com/repos/{REPO}/releases?per_page=50");
+    if let Some(json) = fetch_json(&list_api) {
+        if let Some(result) = result_from_list(&json, local) {
+            return result;
+        }
     }
-    let version = tag.trim_start_matches('v').to_string();
-    let zip_url = json
-        .get("assets")
-        .and_then(Value::as_array)
-        .and_then(|assets| pick_asset(assets));
-    CheckResult::Available(UpdateInfo {
-        version,
-        zip_url,
-        page_url: via_proxy(RELEASES_URL),
-        notes: release_notes(&json),
+    let latest_api = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    result_from_latest(&latest_api, local).unwrap_or(CheckResult::Failed)
+}
+
+fn fetch_json(url: &str) -> Option<Value> {
+    let body = fetch_bytes(&via_proxy(url)).or_else(|| fetch_bytes(url))?;
+    serde_json::from_slice(&body).ok()
+}
+
+#[derive(Debug, Clone)]
+struct Release {
+    version: String,
+    parsed: (u64, u64, u64),
+    notes: String,
+    zip_url: Option<String>,
+}
+
+fn parse_release(v: &Value) -> Option<Release> {
+    if v.get("draft").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
+    if v.get("prerelease").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
+    let tag = v.get("tag_name").and_then(Value::as_str)?.trim();
+    let parsed = parse_version(tag)?;
+    Some(Release {
+        version: tag.trim_start_matches('v').to_string(),
+        parsed,
+        notes: release_notes(v),
+        zip_url: v
+            .get("assets")
+            .and_then(Value::as_array)
+            .and_then(|assets| pick_asset(assets)),
     })
+}
+
+fn result_from_list(json: &Value, local: (u64, u64, u64)) -> Option<CheckResult> {
+    let arr = json.as_array()?;
+    let mut rels: Vec<Release> = arr.iter().filter_map(parse_release).collect();
+    if rels.is_empty() {
+        return None;
+    }
+    rels.sort_by(|a, b| b.parsed.cmp(&a.parsed));
+    let latest = rels[0].parsed;
+    if latest <= local {
+        return Some(CheckResult::UpToDate);
+    }
+    Some(CheckResult::Available(UpdateInfo {
+        version: rels[0].version.clone(),
+        zip_url: rels[0].zip_url.clone(),
+        page_url: via_proxy(RELEASES_URL),
+        notes: compose_notes(&rels, local, latest),
+    }))
+}
+
+fn result_from_latest(url: &str, local: (u64, u64, u64)) -> Option<CheckResult> {
+    let json = fetch_json(url)?;
+    let rel = parse_release(&json)?;
+    if rel.parsed <= local {
+        return Some(CheckResult::UpToDate);
+    }
+    Some(CheckResult::Available(UpdateInfo {
+        version: rel.version.clone(),
+        zip_url: rel.zip_url.clone(),
+        page_url: via_proxy(RELEASES_URL),
+        notes: compose_notes(std::slice::from_ref(&rel), local, rel.parsed),
+    }))
+}
+
+fn compose_notes(rels: &[Release], local: (u64, u64, u64), latest: (u64, u64, u64)) -> String {
+    let mut chunks = Vec::new();
+    for r in rels {
+        if r.parsed > local && r.parsed <= latest {
+            let mut block = format!("# {}", r.version);
+            if !r.notes.is_empty() {
+                block.push_str("\n\n");
+                block.push_str(&r.notes);
+            }
+            chunks.push((r.parsed, block));
+        }
+    }
+    chunks.sort_by(|a, b| b.0.cmp(&a.0));
+    chunks
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn release_notes(json: &Value) -> String {
@@ -303,5 +370,46 @@ mod tests {
         assert_eq!(release_notes(&json), "- 修复导出\n- 更新文档");
         let empty = serde_json::json!({ "body": null });
         assert!(release_notes(&empty).is_empty());
+    }
+
+    #[test]
+    fn changelog_lists_versions_after_local() {
+        let json = serde_json::json!([
+            { "tag_name": "v0.3.3", "body": "## 改进\n- 放大", "draft": false, "prerelease": false },
+            { "tag_name": "v0.3.2", "body": "## 改进\n- 旋转", "draft": false, "prerelease": false },
+            { "tag_name": "v0.3.1", "body": "## 修复\n- PcbLib", "draft": false, "prerelease": false },
+            { "tag_name": "v0.2.1", "body": "## 改进\n- 进度条", "draft": false, "prerelease": false },
+        ]);
+        let CheckResult::Available(info) =
+            result_from_list(&json, parse_version("0.3.1").unwrap()).unwrap()
+        else {
+            panic!("expected available");
+        };
+        assert_eq!(info.version, "0.3.3");
+        assert!(info.notes.starts_with("# 0.3.3"));
+        assert!(info.notes.contains("# 0.3.2"));
+        assert!(info.notes.contains("放大"));
+        assert!(info.notes.contains("旋转"));
+        assert!(!info.notes.contains("# 0.3.1"));
+        assert!(!info.notes.contains("PcbLib"));
+        assert!(!info.notes.contains("0.2.1"));
+    }
+
+    #[test]
+    fn changelog_skips_draft_and_prerelease() {
+        let json = serde_json::json!([
+            { "tag_name": "v0.3.3", "body": "stable", "draft": false, "prerelease": false },
+            { "tag_name": "v0.3.4-rc", "body": "rc", "draft": false, "prerelease": true },
+            { "tag_name": "v0.3.2", "body": "drafted", "draft": true, "prerelease": false },
+        ]);
+        let CheckResult::Available(info) =
+            result_from_list(&json, parse_version("0.3.0").unwrap()).unwrap()
+        else {
+            panic!("expected available");
+        };
+        assert_eq!(info.version, "0.3.3");
+        assert!(info.notes.contains("stable"));
+        assert!(!info.notes.contains("rc"));
+        assert!(!info.notes.contains("drafted"));
     }
 }
