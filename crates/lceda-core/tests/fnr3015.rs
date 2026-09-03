@@ -58,6 +58,11 @@ fn parses_fnr3015_footprint_pads_and_courtyard() {
         src.tracks.len()
     );
     let ir = ir::footprint_ir("FNR3015S2R2MT", "inductor", src, Default::default());
+    assert!(
+        (ir.model.rot_z - 90.0).abs() < 1e-9,
+        "FNR transform is rotZ=90, got {}",
+        ir.model.rot_z
+    );
     assert_eq!(ir.pads.len(), 2);
     assert!(ir.pads.iter().all(|p| p.polygon.is_none()));
     assert!(

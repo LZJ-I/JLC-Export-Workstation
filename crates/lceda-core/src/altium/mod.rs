@@ -111,6 +111,7 @@ mod tests {
             circles: vec![],
             arcs: vec![],
             regions: vec![],
+            model: Default::default(),
         };
         write_pcblib(&path, &fp).unwrap();
         let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
@@ -180,6 +181,7 @@ mod tests {
                 layer: 13,
                 points: vec![(-3.0, -3.0), (3.0, -3.0), (3.0, 3.0), (-3.0, 3.0)],
             }],
+            model: Default::default(),
         };
         write_pcblib(&path, &fp).unwrap();
         let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
@@ -230,6 +232,10 @@ mod tests {
             circles: vec![],
             arcs: vec![],
             regions: vec![],
+            model: crate::ir::Model3dPlacement {
+                rot_z: 90.0,
+                ..Default::default()
+            },
         };
         let step = b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n";
         write_pcblib_with_step(&path, &fp, Some(step)).unwrap();
@@ -250,6 +256,11 @@ mod tests {
         let mut count = Vec::new();
         cfb.open_stream("BODY/Header").unwrap().read_to_end(&mut count).unwrap();
         assert_eq!(i32::from_le_bytes(count.try_into().unwrap()), 2); // pad + body
+        let mut data = Vec::new();
+        cfb.open_stream("BODY/Data").unwrap().read_to_end(&mut data).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("MODEL.3D.ROTZ=90.000"), "{text}");
+        assert!(text.contains("MODEL.3D.ROTX=0.000"));
     }
 
     #[test]
@@ -279,6 +290,7 @@ mod tests {
             circles: vec![],
             arcs: vec![],
             regions: vec![],
+            model: Default::default(),
         };
         write_pcblib(&path, &fp).unwrap();
         let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
@@ -344,6 +356,7 @@ mod tests {
             circles: vec![],
             arcs: vec![],
             regions: vec![],
+            model: Default::default(),
         }
     }
 

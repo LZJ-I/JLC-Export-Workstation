@@ -45,6 +45,11 @@ fn skips_3d_pin_fills_and_keeps_pads_silk_and_shape() {
         src.tracks.iter().any(|t| t.layer == 48),
         "component shape outline should remain"
     );
+    assert!(
+        (src.model.rot_z - 90.0).abs() < 1e-9,
+        "DS90 transform is rotZ=90, got {}",
+        src.model.rot_z
+    );
 }
 
 #[test]

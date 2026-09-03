@@ -48,6 +48,20 @@ pub struct EasyedaFootprint {
     pub circles: Vec<FootprintCircle>,
     pub arcs: Vec<FootprintArc>,
     pub regions: Vec<FootprintRegion>,
+    pub model: EasyedaModel3d,
+}
+
+/// EasyEDA Pro `model_3d.transform`：尺寸 + ZXY 旋转 + 偏移（库坐标，mil）。
+/// 官方顺序：sizeX,sizeY,sizeZ,rotZ,rotX,rotY,offX,offY,offZ
+/// <https://prodocs.easyeda.com/en/format/pcb/component/>
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EasyedaModel3d {
+    pub rot_x: f64,
+    pub rot_y: f64,
+    pub rot_z: f64,
+    pub off_x: f64,
+    pub off_y: f64,
+    pub off_z: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +244,10 @@ pub fn parse_symbol(value: &Value) -> Result<EasyedaSymbol> {
 
 pub fn parse_footprint(value: &Value) -> Result<EasyedaFootprint> {
     let rows = parse_component_json(value)?;
-    let mut fp = EasyedaFootprint::default();
+    let mut fp = EasyedaFootprint {
+        model: parse_model_3d(value),
+        ..EasyedaFootprint::default()
+    };
     let mut fallback = 1usize;
 
     for row in &rows {
@@ -384,6 +401,33 @@ pub fn parse_footprint(value: &Value) -> Result<EasyedaFootprint> {
         }
     }
     Ok(fp)
+}
+
+fn parse_model_3d(value: &Value) -> EasyedaModel3d {
+    value
+        .pointer("/result/model_3d/transform")
+        .and_then(Value::as_str)
+        .map(parse_model_3d_transform)
+        .unwrap_or_default()
+}
+
+/// 立创封装库里的九元组；不足 6 个数时当作没有姿态。
+pub fn parse_model_3d_transform(raw: &str) -> EasyedaModel3d {
+    let nums: Vec<f64> = raw
+        .split(',')
+        .filter_map(|p| p.trim().parse().ok())
+        .collect();
+    if nums.len() < 6 {
+        return EasyedaModel3d::default();
+    }
+    EasyedaModel3d {
+        rot_z: nums[3],
+        rot_x: nums[4],
+        rot_y: nums[5],
+        off_x: nums.get(6).copied().unwrap_or(0.0),
+        off_y: nums.get(7).copied().unwrap_or(0.0),
+        off_z: nums.get(8).copied().unwrap_or(0.0),
+    }
 }
 
 /// PCB drawings we keep. EasyEDA Pro names from the footprint LAYER table:
@@ -657,5 +701,19 @@ mod tests {
         assert_eq!(fp.regions.len(), 1, "marking FILL on 49 stays; 50/51 are 3D pins");
         assert_eq!(fp.regions[0].layer, 49);
         assert!(fp.circles.is_empty());
+    }
+
+    #[test]
+    fn parses_pro_model_transform_as_rotz_rotx_roty() {
+        let ds90 = parse_model_3d_transform("252.188,196.85,0,90,0,0,0,0.005,0");
+        assert!((ds90.rot_z - 90.0).abs() < 1e-9);
+        assert!(ds90.rot_x.abs() < 1e-9);
+        assert!(ds90.rot_y.abs() < 1e-9);
+        assert!(ds90.off_x.abs() < 1e-9);
+        assert!((ds90.off_y - 0.005).abs() < 1e-9);
+        let fnr = parse_model_3d_transform("118.11,118.11,0,90,0,0,0,0,0");
+        assert!((fnr.rot_z - 90.0).abs() < 1e-9);
+        let empty = parse_model_3d_transform("");
+        assert_eq!(empty, EasyedaModel3d::default());
     }
 }

@@ -84,6 +84,18 @@ pub struct FootprintIr {
     pub circles: Vec<IrCircle>,
     pub arcs: Vec<IrArc>,
     pub regions: Vec<IrRegion>,
+    pub model: Model3dPlacement,
+}
+
+/// STEP 相对封装原点的姿态（毫米 / 度），来自立创 `model_3d.transform`。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Model3dPlacement {
+    pub rot_x: f64,
+    pub rot_y: f64,
+    pub rot_z: f64,
+    pub off_x: f64,
+    pub off_y: f64,
+    pub off_z: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +372,14 @@ pub fn footprint_ir(name: &str, description: &str, src: EasyedaFootprint, meta: 
                     .collect(),
             })
             .collect(),
+        model: Model3dPlacement {
+            rot_x: src.model.rot_x,
+            rot_y: src.model.rot_y,
+            rot_z: src.model.rot_z,
+            off_x: src.model.off_x * FOOTPRINT_UNIT_MM,
+            off_y: src.model.off_y * FOOTPRINT_UNIT_MM,
+            off_z: src.model.off_z * FOOTPRINT_UNIT_MM,
+        },
     }
 }
 

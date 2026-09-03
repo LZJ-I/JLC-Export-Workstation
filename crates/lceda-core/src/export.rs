@@ -587,6 +587,7 @@ mod tests {
             circles: vec![],
             arcs: vec![],
             regions: vec![],
+            model: Default::default(),
         }
     }
 

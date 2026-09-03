@@ -216,9 +216,16 @@ fn footprint_mod_text(fp: &FootprintIr, step_rel: Option<&str>) -> String {
         ));
     }
     if let Some(rel) = step_rel {
+        let m = &fp.model;
         out.push_str(&format!(
-            "  (model {}\n    (offset (xyz 0 0 0))\n    (scale (xyz 1 1 1))\n    (rotate (xyz 0 0 0))\n  )\n",
-            quoted(rel)
+            "  (model {}\n    (offset (xyz {} {} {}))\n    (scale (xyz 1 1 1))\n    (rotate (xyz {} {} {}))\n  )\n",
+            quoted(rel),
+            n(m.off_x),
+            n(m.off_y),
+            n(m.off_z),
+            n(m.rot_x),
+            n(m.rot_y),
+            n(m.rot_z),
         ));
     }
     out.push_str(")\n");
@@ -489,6 +496,7 @@ mod tests {
             circles: vec![],
             arcs: vec![],
             regions: vec![],
+            model: Default::default(),
         };
         let text = footprint_mod_text(&fp, None);
         assert!(text.contains("(footprint"));
@@ -508,11 +516,18 @@ mod tests {
             circles: vec![],
             arcs: vec![],
             regions: vec![],
+            model: Default::default(),
         };
         let text = footprint_mod_text(&fp, Some("../R0402.3dshapes/R0402.step"));
         assert!(text.contains("  (model \"../R0402.3dshapes/R0402.step\"\n"));
         assert!(text.contains("    (offset (xyz 0 0 0))\n"));
         assert!(text.contains("    (scale (xyz 1 1 1))\n"));
         assert!(text.contains("    (rotate (xyz 0 0 0))\n"));
+        let mut rotated = fp;
+        rotated.model.rot_z = 90.0;
+        rotated.model.off_y = 0.1;
+        let text = footprint_mod_text(&rotated, Some("../R0402.3dshapes/R0402.step"));
+        assert!(text.contains("    (offset (xyz 0 0.1 0))\n"));
+        assert!(text.contains("    (rotate (xyz 0 0 90))\n"));
     }
 }

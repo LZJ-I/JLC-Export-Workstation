@@ -50,6 +50,12 @@ pub fn write_library(path: &Path, parts: &[PcbLibPart<'_>]) -> Result<()> {
                     name: name.clone(),
                     outline: body_outline(part.fp),
                     height: from_mm(DEFAULT_BODY_HEIGHT_MM),
+                    rot_x: part.fp.model.rot_x,
+                    rot_y: part.fp.model.rot_y,
+                    rot_z: part.fp.model.rot_z,
+                    off_x: from_mm(part.fp.model.off_x),
+                    off_y: from_mm(part.fp.model.off_y),
+                    off_z: from_mm(part.fp.model.off_z),
                 }));
                 models.push(EmbeddedModel {
                     id,
@@ -147,6 +153,12 @@ struct BodyInfo {
     name: String,
     outline: Vec<(i32, i32)>,
     height: i32,
+    rot_x: f64,
+    rot_y: f64,
+    rot_z: f64,
+    off_x: i32,
+    off_y: i32,
+    off_z: i32,
 }
 
 fn i32_stream(v: i32) -> Vec<u8> {
@@ -577,13 +589,13 @@ fn write_component_body(w: &mut BinWriter, body: &BodyInfo) {
             ("MODEL.CHECKSUM", "0".into()),
             ("MODEL.EMBED", "TRUE".into()),
             ("MODEL.NAME", body.name.clone()),
-            ("MODEL.2D.X", "0mil".into()),
-            ("MODEL.2D.Y", "0mil".into()),
+            ("MODEL.2D.X", format_raw_mil(body.off_x)),
+            ("MODEL.2D.Y", format_raw_mil(body.off_y)),
             ("MODEL.2D.ROTATION", "0.000".into()),
-            ("MODEL.3D.ROTX", "0.000".into()),
-            ("MODEL.3D.ROTY", "0.000".into()),
-            ("MODEL.3D.ROTZ", "0.000".into()),
-            ("MODEL.3D.DZ", "0mil".into()),
+            ("MODEL.3D.ROTX", format_deg(body.rot_x)),
+            ("MODEL.3D.ROTY", format_deg(body.rot_y)),
+            ("MODEL.3D.ROTZ", format_deg(body.rot_z)),
+            ("MODEL.3D.DZ", format_raw_mil(body.off_z)),
             ("MODEL.MODELTYPE", "1".into()),
             ("MODEL.MODELSOURCE", "Undefined".into()),
         ]);
@@ -676,6 +688,10 @@ fn fnv1a(s: &str) -> u64 {
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
+}
+
+fn format_deg(v: f64) -> String {
+    format!("{v:.3}")
 }
 
 fn format_raw_mil(raw: i32) -> String {
