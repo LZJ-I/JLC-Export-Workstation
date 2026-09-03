@@ -1,12 +1,12 @@
 **Language / 语言:** **English** · [中文](README_ZH.md)
 
-# LCSC Parts Assistant
+# JLC-Export
 
-[![Stars](https://img.shields.io/github/stars/LZJ-I/lceda-assistant?style=social)](https://github.com/LZJ-I/lceda-assistant)
+[![Stars](https://img.shields.io/github/stars/LZJ-I/JLC-Export?style=social)](https://github.com/LZJ-I/JLC-Export)
 
 Written in Rust. Search parts by MPN or LCSC id, download STEP / OBJ, and export Altium (`.SchLib` / `.PcbLib`), KiCad (`.kicad_sym` / `.pretty`), and classic PADS Logic / Layout ASCII (`.c` / `.d` / `.p`). The UI is Chinese / English.
 
-If this project helps you, please [⭐ Star](https://github.com/LZJ-I/lceda-assistant) it.
+If this project helps you, please [⭐ Star](https://github.com/LZJ-I/JLC-Export) it.
 
 ![Search ESP32-S3-WROOM-1-N16R8 and hover-zoom the preview](docs/demo.gif)
 
@@ -14,7 +14,7 @@ Licensed under [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/).
 
 ## Install
 
-Download the Windows 64-bit zip from [Releases](https://github.com/LZJ-I/lceda-assistant/releases), unzip, and run `lceda.exe`. To update, unzip over the previous files, or use in-app update (downloads, replaces, restarts).
+Download the Windows 64-bit zip from [Releases](https://github.com/LZJ-I/JLC-Export/releases), unzip, and run `lceda.exe`. To update, unzip over the previous files, or use in-app update (downloads, replaces, restarts).
 
 Or build from source (requires [Rust](https://rustup.rs/)):
 
@@ -80,7 +80,7 @@ Check exported libraries in Altium / KiCad / PADS before using them. This tool t
 ## About
 
 - Author: [LZJ-I](https://github.com/LZJ-I)
-- Repository: [LZJ-I/lceda-assistant](https://github.com/LZJ-I/lceda-assistant)
+- Repository: [LZJ-I/JLC-Export](https://github.com/LZJ-I/JLC-Export)
 - License: [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)
 
-If it helps, please [Star](https://github.com/LZJ-I/lceda-assistant) the repo.
+If it helps, please [Star](https://github.com/LZJ-I/JLC-Export) the repo.

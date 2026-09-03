@@ -1,12 +1,12 @@
 **语言 / Language:** [English](README.md) · **中文**
 
-# 立创封装助手
+# JLC-Export
 
-[![Stars](https://img.shields.io/github/stars/LZJ-I/lceda-assistant?style=social)](https://github.com/LZJ-I/lceda-assistant)
+[![Stars](https://img.shields.io/github/stars/LZJ-I/JLC-Export?style=social)](https://github.com/LZJ-I/JLC-Export)
 
 用 Rust 编写。按型号或立创编号搜索器件，下载 STEP / OBJ，导出 Altium（`.SchLib` / `.PcbLib`）、KiCad（`.kicad_sym` / `.pretty`）和经典 PADS Logic / Layout ASCII（`.c` / `.d` / `.p`）。界面支持中文 / 英文。
 
-如果这个项目对你有帮助，欢迎点一下右上角的 [⭐ Star](https://github.com/LZJ-I/lceda-assistant)。
+如果这个项目对你有帮助，欢迎点一下右上角的 [⭐ Star](https://github.com/LZJ-I/JLC-Export)。
 
 ![搜索 ESP32-S3-WROOM-1-N16R8 并悬停放大预览图](docs/demo.gif)
 
@@ -14,7 +14,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/LZJ-I/lceda-assistant/releases) 下载 Windows 64 位压缩包，解压后运行 `lceda.exe`。更新时解压覆盖即可。软件内也可检查更新并自动替换后重启。
+从 [Releases](https://github.com/LZJ-I/JLC-Export/releases) 下载 Windows 64 位压缩包，解压后运行 `lceda.exe`。更新时解压覆盖即可。软件内也可检查更新并自动替换后重启。
 
 或从源码编译（需 [Rust](https://rustup.rs/)）：
 
@@ -80,7 +80,7 @@ lceda --lang zh gui
 ## 关于
 
 - 作者：[LZJ-I](https://github.com/LZJ-I)
-- 仓库：[LZJ-I/lceda-assistant](https://github.com/LZJ-I/lceda-assistant)
+- 仓库：[LZJ-I/JLC-Export](https://github.com/LZJ-I/JLC-Export)
 - 许可：[CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)
 
-有帮助的话，欢迎 [Star](https://github.com/LZJ-I/lceda-assistant)。
+有帮助的话，欢迎 [Star](https://github.com/LZJ-I/JLC-Export)。

@@ -6,7 +6,7 @@ members = ["crates/lceda-core", "crates/lceda"]
 version = "0.3.3"
 edition = "2021"
 license = "CC-BY-NC-4.0"
-repository = "https://github.com/LZJ-I/lceda-assistant"
+repository = "https://github.com/LZJ-I/JLC-Export"
 authors = ["LZJ-I"]
 
 [workspace.dependencies]

@@ -6,9 +6,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const REPO: &str = "LZJ-I/lceda-assistant";
-pub const REPO_URL: &str = "https://github.com/LZJ-I/lceda-assistant";
-pub const RELEASES_URL: &str = "https://github.com/LZJ-I/lceda-assistant/releases/latest";
+pub const REPO: &str = "LZJ-I/JLC-Export";
+pub const REPO_URL: &str = "https://github.com/LZJ-I/JLC-Export";
+pub const RELEASES_URL: &str = "https://github.com/LZJ-I/JLC-Export/releases/latest";
 const PROXY: &str = "https://gh-proxy.com/";
 
 #[derive(Debug, Clone)]
@@ -231,7 +231,7 @@ fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
 fn fetch_bytes_with_progress(url: &str, progress: &Option<ProgressHandle>) -> Option<Vec<u8>> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(120))
-        .user_agent("lceda-assistant")
+        .user_agent("JLC-Export")
         .build();
     let resp = agent
         .get(url)
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn proxy_wraps_once() {
-        let u = "https://github.com/LZJ-I/lceda-assistant/releases/latest";
+        let u = "https://github.com/LZJ-I/JLC-Export/releases/latest";
         let p = via_proxy(u);
         assert!(p.starts_with(PROXY));
         assert_eq!(via_proxy(&p), p);
