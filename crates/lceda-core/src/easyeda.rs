@@ -386,8 +386,11 @@ pub fn parse_footprint(value: &Value) -> Result<EasyedaFootprint> {
     Ok(fp)
 }
 
+/// PCB drawings we keep. EasyEDA Pro names from the footprint LAYER table:
+/// 3/4 silk, 12 multi, 13 document/courtyard, 48 component shape, 49 marking.
+/// 50 PIN_SOLDERING / 51 PIN_FLOATING / 52 COMPONENT_MODEL are 3D visualization.
 fn is_graphic_layer(code: i32) -> bool {
-    matches!(code, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 11 | 12 | 13 | 48 | 49 | 50 | 51)
+    matches!(code, 3 | 4 | 12 | 13 | 48 | 49)
 }
 
 fn parse_hole(el: Option<&Value>) -> (String, f64, f64) {
@@ -636,5 +639,23 @@ mod tests {
         let fp = parse_footprint(&json!({"result": {"dataStr": ds}})).unwrap();
         assert_eq!(fp.pads[0].shape, "POLY");
         assert_eq!(fp.pads[0].polygon.as_ref().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn skips_3d_body_construction_but_keeps_assembly_fill() {
+        let ds = r#"["DOCTYPE","FOOTPRINT","1.8"]
+["POLY","e0",0,"",48,2,[-10,-10,"L",-10,10,10,10,10,-10,-10,-10],0]
+["FILL","e1",0,"",49,0.2,0,[["CIRCLE",0,0,2]],0]
+["FILL","e2",0,"",50,0.2,0,[[-4,-8,"L",-4,-2,4,-2,4,-8,-4,-8]],0]
+["FILL","e3",0,"",51,0.2,0,[[-4,2,"L",-4,8,4,8,4,2,-4,2]],0]
+["POLY","e4",0,"",3,6,[-20,-15,"L",20,-15],0]
+"#;
+        let fp = parse_footprint(&json!({"result": {"dataStr": ds}})).unwrap();
+        assert_eq!(fp.tracks.len(), 2, "silk + component-shape outline");
+        assert!(fp.tracks.iter().any(|t| t.layer == 3));
+        assert!(fp.tracks.iter().any(|t| t.layer == 48));
+        assert_eq!(fp.regions.len(), 1, "marking FILL on 49 stays; 50/51 are 3D pins");
+        assert_eq!(fp.regions[0].layer, 49);
+        assert!(fp.circles.is_empty());
     }
 }

@@ -113,12 +113,21 @@ mod tests {
             regions: vec![],
         };
         write_pcblib(&path, &fp).unwrap();
-        let cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
         assert!(cfb.exists("FileHeader"));
+        assert!(cfb.exists("FileVersionInfo/Data"));
         assert!(cfb.exists("Library/Data"));
+        assert!(cfb.exists("Library/PadViaLibrary/Data"));
+        assert!(cfb.exists("Library/ComponentParamsTOC/Data"));
         assert!(cfb.exists("Library/ModelsNoEmbed/Header"));
         assert!(cfb.exists("R0402/Data"));
         assert!(cfb.exists("R0402/UniqueIdPrimitiveInformation/Data"));
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        assert_eq!(hdr.len(), 53, "AD FileHeader is version + 5.01 + UniqueId");
+        let mut lib = Vec::new();
+        cfb.open_stream("Library/Data").unwrap().read_to_end(&mut lib).unwrap();
+        assert!(lib.len() > 10_000, "Library/Data must carry the board stack, got {}", lib.len());
     }
 
     #[test]
@@ -178,15 +187,18 @@ mod tests {
         cfb.open_stream("IND/Header").unwrap().read_to_end(&mut hdr).unwrap();
         assert_eq!(hdr.len(), 4);
         let count = i32::from_le_bytes(hdr.try_into().unwrap());
-        // 2 pads + 4 courtyard track segments + 1 region (object id 11)
-        assert_eq!(count, 7, "Header primitive count must match written Data records");
+        // 2 pads + 4 courtyard track segments; overlay FILLs are not written as Region
+        assert_eq!(count, 6, "Header primitive count must match written Data records");
         let mut uid = Vec::new();
         cfb.open_stream("IND/UniqueIdPrimitiveInformation/Data")
             .unwrap()
             .read_to_end(&mut uid)
             .unwrap();
         let uid_text = String::from_utf8_lossy(&uid);
-        assert!(uid_text.contains("Region"), "courtyard/copper pours must be Region records");
+        assert!(uid_text.contains("Pad"));
+        assert!(uid_text.contains("Track"));
+        assert!(uid_text.contains("UNIQUEID="));
+        assert!(uid_text.contains("PRIMITIVEINDEX=0"));
         assert!(cfb.exists("IND/UniqueIdPrimitiveInformation/Data"));
         assert!(path.metadata().unwrap().len() > 64);
     }
@@ -376,28 +388,30 @@ mod tests {
         let mut lib = Vec::new();
         let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&pcb).unwrap()).unwrap();
         cfb.open_stream("Library/Data").unwrap().read_to_end(&mut lib).unwrap();
-        assert!(String::from_utf8_lossy(&lib).contains("WEIGHT=2"));
+        let lib_text = String::from_utf8_lossy(&lib);
+        assert!(lib_text.contains("KIND=Protel_Advanced_PCB_Library"));
+        assert!(cfb.exists("FPA/Data"));
+        assert!(cfb.exists("FPB/Data"));
     }
 }
 
-/// EasyEDA 图层 → Altium PcbLib 二进制 layer byte。
+/// EasyEDA Pro 图层 → Altium PcbLib 二进制 layer byte。
+/// 48 外形跟 EasyEDALoader 的 ComponentShape 一样落到机械层；49 标记放到丝印，方便看见 Pin 1。
 pub fn pcb_layer(easy: i32, hole_mm: f64) -> u8 {
     if easy == 12 || hole_mm > 1e-6 {
         return 74; // MultiLayer
     }
     match easy {
-        1 => 1,   // Top
-        2 => 32,  // Bottom
-        3 | 49 => 33, // Top overlay
-        4 => 34,  // Bottom overlay
-        5 => 37,  // Top solder
-        6 => 38,  // Bottom solder
-        7 => 35,  // Top paste
-        8 => 36,  // Bottom paste
-        11 | 48 => 57, // Mechanical1
-        13 => 58,
-        50 => 61,
-        51 => 62,
+        1 => 1,       // Top
+        2 => 32,      // Bottom
+        3 | 49 => 33, // Top overlay / component marking
+        4 => 34,      // Bottom overlay
+        5 => 37,      // Top solder
+        6 => 38,      // Bottom solder
+        7 => 35,      // Top paste
+        8 => 36,      // Bottom paste
+        11 | 48 => 57, // Mechanical1 / component shape
+        13 => 58,     // Mechanical2 / document courtyard
         _ => 33,
     }
 }

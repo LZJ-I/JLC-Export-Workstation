@@ -5,7 +5,7 @@ use super::binary::{BinWriter, CfbDoc, encode_flags, from_mils, from_mm};
 use super::{hole_type_byte, pad_shape_byte, pcb_layer};
 use crate::error::{Error, Result};
 use crate::ir::{FootprintIr, IrPad};
-use crate::util::{looks_like_step, sanitize_filename, unique_altium_section_key};
+use crate::util::{looks_like_step, sanitize_filename, unique_altium_section_key, unique_id};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
@@ -63,6 +63,9 @@ pub fn write_library(path: &Path, parts: &[PcbLibPart<'_>]) -> Result<()> {
 
     let mut cfb = CfbDoc::create(path)?;
     cfb.stream("FileHeader", &file_header())?;
+    cfb.storage("FileVersionInfo")?;
+    cfb.stream("FileVersionInfo/Header", &i32_stream(1))?;
+    cfb.stream("FileVersionInfo/Data", include_bytes!("pcblib_file_version_info.bin"))?;
 
     let key_pairs: Vec<(String, String)> = parts
         .iter()
@@ -77,6 +80,22 @@ pub fn write_library(path: &Path, parts: &[PcbLibPart<'_>]) -> Result<()> {
     cfb.storage("Library")?;
     cfb.stream("Library/Header", &i32_stream(1))?;
     cfb.stream("Library/Data", &library_data(&keys))?;
+    cfb.stream("Library/EmbeddedFonts", &i32_stream(0))?;
+
+    cfb.storage("Library/ComponentParamsTOC")?;
+    cfb.stream("Library/ComponentParamsTOC/Header", &i32_stream(parts.len() as i32))?;
+    cfb.stream(
+        "Library/ComponentParamsTOC/Data",
+        &component_params_toc(parts, &keys, &bodies),
+    )?;
+
+    cfb.storage("Library/PadViaLibrary")?;
+    cfb.stream("Library/PadViaLibrary/Header", &i32_stream(0))?;
+    cfb.stream("Library/PadViaLibrary/Data", &pad_via_library_data())?;
+
+    cfb.storage("Library/LayerKindMapping")?;
+    cfb.stream("Library/LayerKindMapping/Header", &i32_stream(1))?;
+    cfb.stream("Library/LayerKindMapping/Data", include_bytes!("pcblib_layer_kind.bin"))?;
 
     cfb.storage("Library/Models")?;
     cfb.stream("Library/Models/Header", &i32_stream(models.len() as i32))?;
@@ -135,23 +154,55 @@ fn i32_stream(v: i32) -> Vec<u8> {
 }
 
 fn file_header() -> Vec<u8> {
-    // npnp / 实测 AD 能打开的 PcbLib：FileHeader 只有版本 Pascal 串。
+    // AD / altium-monkey from-scratch：53 字节 = 版本 Pascal + 5.01 + UniqueId。
+    // 只有前 32 字节时，当前 AD 会 Failed to load。
     let mut w = BinWriter::new();
     let version = "PCB 6.0 Binary Library File";
     w.write_i32(version.len() as i32);
     w.write_pascal_short(version);
+    w.write_f64(5.01);
+    let uid = unique_id();
+    w.write_i32(uid.len() as i32);
+    w.write_pascal_short(&uid);
     w.into_vec()
 }
 
 fn library_data(names: &[String]) -> Vec<u8> {
     let mut w = BinWriter::new();
-    w.write_params(&[
-        ("HEADER", "PCB 6.0 Binary Library File".into()),
-        ("WEIGHT", names.len().to_string()),
-    ]);
+    w.write_block(0, |w| {
+        w.write_bytes(include_bytes!("pcblib_library_data.bin"));
+        w.write_u8(0);
+    });
     w.write_u32(names.len() as u32);
     for name in names {
         w.write_string_block(name);
+    }
+    w.into_vec()
+}
+
+fn pad_via_library_data() -> Vec<u8> {
+    let mut w = BinWriter::new();
+    w.write_params(&[
+        ("PADVIALIBRARY.LIBRARYID", "{15139DE7-7D64-49B0-B082-4A540410AAE6}".into()),
+        ("PADVIALIBRARY.LIBRARYNAME", "<Local>".into()),
+        ("PADVIALIBRARY.DISPLAYUNITS", "1".into()),
+    ]);
+    w.into_vec()
+}
+
+fn component_params_toc(parts: &[PcbLibPart<'_>], keys: &[String], bodies: &[Option<BodyInfo>]) -> Vec<u8> {
+    let mut w = BinWriter::new();
+    for (i, part) in parts.iter().enumerate() {
+        let height = bodies[i].as_ref().map(|b| b.height).unwrap_or(0);
+        let height = format_raw_mil(height).trim_end_matches("mil").to_string();
+        let text = format!(
+            "Name={}|Pad Count={}|Height={}|Description={}\r\n",
+            keys[i],
+            part.fp.pads.len(),
+            height,
+            altium_param(&part.fp.description)
+        );
+        w.write_block(0, |w| w.write_cstring(&text));
     }
     w.into_vec()
 }
@@ -206,12 +257,11 @@ fn empty_params() -> Vec<u8> {
 fn unique_id_primitive_information(names: &[&str]) -> Vec<u8> {
     let mut w = BinWriter::new();
     for (index, object_name) in names.iter().enumerate() {
-        let mut pairs: Vec<(&str, String)> = Vec::new();
-        if index > 0 {
-            pairs.push(("PRIMITIVEINDEX", index.to_string()));
-        }
-        pairs.push(("PRIMITIVEOBJECTID", (*object_name).to_string()));
-        w.write_params(&pairs);
+        w.write_params(&[
+            ("PRIMITIVEINDEX", index.to_string()),
+            ("PRIMITIVEOBJECTID", (*object_name).to_string()),
+            ("UNIQUEID", unique_id()),
+        ]);
     }
     w.into_vec()
 }
@@ -230,11 +280,11 @@ fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec
                 let outline = closed_outline(pts);
                 let copper = pcb_layer(pad.layer, pad.hole);
                 w.write_u8(11);
-                write_region(&mut w, copper, &outline);
+                write_region(&mut w, copper, &outline, &[("V7_LAYER", v7_layer_name(copper).into())]);
                 names.push("Region");
                 for layer in mask_layers(pad) {
                     w.write_u8(11);
-                    write_region(&mut w, layer, &outline);
+                    write_region(&mut w, layer, &outline, &[("V7_LAYER", v7_layer_name(layer).into())]);
                     names.push("Region");
                 }
             }
@@ -286,15 +336,8 @@ fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec
         names.push("Arc");
     }
 
-    for r in &fp.regions {
-        if r.points.len() < 3 {
-            continue;
-        }
-        let layer = pcb_layer(r.layer, 0.0);
-        w.write_u8(11);
-        write_region(&mut w, layer, &closed_outline(&r.points));
-        names.push("Region");
-    }
+    // EasyEDA FILL（标记/院子）先不写成 Region。手写 Region 仍容易让 AD 整库失败；
+    // 异形焊盘的铜皮/阻焊 Region 仍走下面 pad.is_custom_poly。
 
     if let Some(body) = body {
         w.write_u8(12);
@@ -366,12 +409,12 @@ fn write_arc(
     });
 }
 
-fn write_region(w: &mut BinWriter, layer: u8, points: &[(f64, f64)]) {
+fn write_region(w: &mut BinWriter, layer: u8, points: &[(f64, f64)], params: &[(&str, String)]) {
     w.write_block(0, |w| {
         write_common(w, layer);
         w.write_u32(0);
         w.write_u8(0);
-        w.write_params(&[("V7_LAYER", v7_layer_name(layer).into())]);
+        w.write_params(params);
         w.write_u32(points.len() as u32);
         for &(x, y) in points {
             w.write_f64(from_mm(x) as f64);

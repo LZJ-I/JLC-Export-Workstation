@@ -60,6 +60,10 @@ fn parses_fnr3015_footprint_pads_and_courtyard() {
     let ir = ir::footprint_ir("FNR3015S2R2MT", "inductor", src, Default::default());
     assert_eq!(ir.pads.len(), 2);
     assert!(ir.pads.iter().all(|p| p.polygon.is_none()));
+    assert!(
+        ir.regions.iter().all(|r| matches!(r.layer, 3 | 4 | 12 | 13 | 49)),
+        "3D body FILLs on 50/51 must not become PCB regions"
+    );
 }
 
 #[test]
