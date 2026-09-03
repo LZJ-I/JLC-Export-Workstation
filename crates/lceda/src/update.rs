@@ -286,6 +286,7 @@ mod tests {
         assert!(parse_version("0.3.0").unwrap() > parse_version("0.2.1").unwrap());
         assert!(parse_version("0.3.1").unwrap() > parse_version("0.3.0").unwrap());
         assert!(parse_version("0.3.2").unwrap() > parse_version("0.3.1").unwrap());
+        assert!(parse_version("0.3.3").unwrap() > parse_version("0.3.2").unwrap());
     }
 
     #[test]

@@ -861,7 +861,18 @@ impl App {
 
     fn photo_card(&self, ui: &mut egui::Ui, rect: egui::Rect) {
         card_shell(ui, rect, "photo", |ui| {
-            ui.label(egui::RichText::new(i18n::t(self.lang, "preview")).strong());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(i18n::t(self.lang, "preview")).strong());
+                if self.image_tex.is_some() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(i18n::t(self.lang, "preview_zoom"))
+                                .color(SECONDARY)
+                                .small(),
+                        );
+                    });
+                }
+            });
             let h = ui.max_rect().height();
             let reserved = 28.0 + if self.selected_item().is_some() { 78.0 } else { 10.0 };
             let well_h = (h - reserved).max(80.0);
@@ -889,6 +900,11 @@ impl App {
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     Color32::WHITE,
                 );
+                if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                    if img_rect.contains(pointer) {
+                        paint_photo_zoom(ui, tex, img_rect, pointer, rect);
+                    }
+                }
             } else {
                 painter.text(
                     well.center(),
@@ -1574,7 +1590,79 @@ fn load_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<TextureHandle> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-    Some(ctx.load_texture("part", color, Default::default()))
+    Some(ctx.load_texture("part", color, TextureOptions::LINEAR))
+}
+
+/// 立创商城式局部放大：图上跟一块取景框，旁边用同一张图的 UV 裁切放大。
+fn paint_photo_zoom(
+    ui: &egui::Ui,
+    tex: &TextureHandle,
+    img_rect: egui::Rect,
+    pointer: egui::Pos2,
+    card: egui::Rect,
+) {
+    const LENS: f32 = 0.40;
+    let size = img_rect.size();
+    if size.x < 8.0 || size.y < 8.0 {
+        return;
+    }
+    let uv = ((pointer - img_rect.min) / size).clamp(egui::Vec2::ZERO, egui::Vec2::splat(1.0));
+    let half = LENS * 0.5;
+    let cx = uv.x.clamp(half, 1.0 - half);
+    let cy = uv.y.clamp(half, 1.0 - half);
+    let uv_min = egui::pos2(cx - half, cy - half);
+    let uv_max = egui::pos2(cx + half, cy + half);
+    let lens = egui::Rect::from_min_max(
+        img_rect.min + size * uv_min.to_vec2(),
+        img_rect.min + size * uv_max.to_vec2(),
+    );
+    let lens_painter = ui.painter_at(img_rect);
+    lens_painter.rect_filled(
+        lens,
+        2.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 70),
+    );
+    lens_painter.rect_stroke(
+        lens,
+        2.0,
+        egui::Stroke::new(1.5_f32, ACCENT),
+        egui::StrokeKind::Outside,
+    );
+
+    let zoom_w = (img_rect.width() * 1.75).clamp(220.0, 400.0);
+    let zoom_h = zoom_w * (size.y / size.x).clamp(0.55, 1.45);
+    let screen = ui.ctx().screen_rect().shrink(8.0);
+    let mut origin = egui::pos2(card.max.x + 8.0, card.min.y);
+    if origin.x + zoom_w > screen.max.x {
+        origin.x = (card.min.x - 8.0 - zoom_w).max(screen.min.x);
+    }
+    if origin.y + zoom_h > screen.max.y {
+        origin.y = (screen.max.y - zoom_h).max(screen.min.y);
+    }
+
+    egui::Area::new(egui::Id::new("photo_lens_zoom"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(origin)
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            let (panel, _) =
+                ui.allocate_exact_size(egui::vec2(zoom_w, zoom_h), egui::Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(panel, 8.0, Color32::WHITE);
+            p.rect_stroke(
+                panel,
+                8.0,
+                egui::Stroke::new(1.0_f32, theme::hairline()),
+                egui::StrokeKind::Inside,
+            );
+            let inner = panel.shrink(5.0);
+            p.image(
+                tex.id(),
+                inner,
+                egui::Rect::from_min_max(uv_min, uv_max),
+                Color32::WHITE,
+            );
+        });
 }
 
 fn rasterize_mesh(

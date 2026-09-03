@@ -48,6 +48,8 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
         (Lang::En, "components") => "Parts",
         (Lang::Zh, "preview") => "预览",
         (Lang::En, "preview") => "Preview",
+        (Lang::Zh, "preview_zoom") => "悬停局部放大",
+        (Lang::En, "preview_zoom") => "Hover to magnify",
         (Lang::Zh, "model3d") => "三维外形",
         (Lang::En, "model3d") => "3D outline",
         (Lang::Zh, "download_step") => "下载 STEP",
