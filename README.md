@@ -8,7 +8,7 @@
 
 如果这个项目对你有帮助，欢迎点一下右上角的 [⭐ Star](https://github.com/LZJ-I/lceda-assistant)。
 
-![搜索 STM32F103C8T6 / C8734 并查看三维外形](docs/demo.gif)
+![搜索 ESP32-S3-WROOM-1-N16R8 并悬停放大预览图](docs/demo.gif)
 
 许可为 [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)，禁止商用。
 

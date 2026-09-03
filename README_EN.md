@@ -8,7 +8,7 @@ Written in Rust. Search parts by MPN or LCSC id, download STEP / OBJ, and export
 
 If this project helps you, please [⭐ Star](https://github.com/LZJ-I/lceda-assistant) it.
 
-![Search STM32F103C8T6 / C8734 and orbit the 3D outline](docs/demo.gif)
+![Search ESP32-S3-WROOM-1-N16R8 and hover-zoom the preview](docs/demo.gif)
 
 Licensed under [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/). Non-commercial use only.
 
