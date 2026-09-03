@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "lceda", version, about = "立创封装助手：搜索、3D、Altium / KiCad / PADS 库导出")]
 pub struct Cli {
-    /// zh / en（默认跟随系统）
+    /// zh / en（默认跟随系统；图形界面会记住上次选择）
     #[arg(long, global = true)]
     pub lang: Option<String>,
 
@@ -96,13 +96,19 @@ pub enum Cmd {
     },
 }
 
+fn resolve_lang(cli_lang: Option<&str>) -> Lang {
+    if let Some(code) = cli_lang {
+        return Lang::from_code(code);
+    }
+    if let Some(code) = crate::prefs::load().lang {
+        return Lang::from_code(&code);
+    }
+    Lang::detect()
+}
+
 pub fn run() -> Result<i32> {
     let cli = Cli::parse();
-    let lang = cli
-        .lang
-        .as_deref()
-        .map(Lang::from_code)
-        .unwrap_or_else(Lang::detect);
+    let lang = resolve_lang(cli.lang.as_deref());
 
     match cli.cmd {
         None | Some(Cmd::Gui) => {

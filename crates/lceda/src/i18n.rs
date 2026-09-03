@@ -15,15 +15,26 @@ impl Lang {
         }
     }
 
+    pub fn as_code(self) -> &'static str {
+        match self {
+            Self::Zh => "zh",
+            Self::En => "en",
+        }
+    }
+
     pub fn detect() -> Self {
-        for key in ["LCEDA_LANG", "LANG", "LC_ALL"] {
+        for key in ["LCEDA_LANG", "LANG", "LC_ALL", "LC_MESSAGES"] {
             if let Ok(v) = env::var(key) {
                 if !v.is_empty() {
                     return Self::from_code(&v);
                 }
             }
         }
-        Self::Zh
+        #[cfg(windows)]
+        if let Some(lang) = windows_ui_lang() {
+            return lang;
+        }
+        Self::En
     }
 
     pub fn toggle(self) -> Self {
@@ -32,6 +43,17 @@ impl Lang {
             Self::En => Self::Zh,
         }
     }
+}
+
+#[cfg(windows)]
+fn windows_ui_lang() -> Option<Lang> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetUserDefaultUILanguage() -> u16;
+    }
+    // PRIMARYLANGID; LANG_CHINESE == 0x04
+    let primary = unsafe { GetUserDefaultUILanguage() } & 0x3ff;
+    Some(if primary == 0x04 { Lang::Zh } else { Lang::En })
 }
 
 pub fn t(lang: Lang, key: &str) -> &'static str {

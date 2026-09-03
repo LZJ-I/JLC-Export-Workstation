@@ -111,6 +111,7 @@ pub fn run(lang: Lang) -> anyhow::Result<()> {
 
 struct App {
     lang: Lang,
+    lang_pinned: bool,
     keyword: String,
     out_dir: String,
     items: Vec<SearchItem>,
@@ -163,6 +164,7 @@ impl App {
         let prefs = crate::prefs::load();
         Self {
             lang,
+            lang_pinned: prefs.lang.is_some(),
             keyword: String::new(),
             out_dir,
             items: Vec::new(),
@@ -595,6 +597,8 @@ impl eframe::App for App {
                         };
                         if theme::pill_button(ui, label, true, false).clicked() {
                             self.lang = self.lang.toggle();
+                            self.lang_pinned = true;
+                            self.persist_prefs();
                         }
                         ui.add_space(6.0);
                         if theme::pill_button(ui, i18n::t(self.lang, "about"), true, false).clicked()
@@ -1300,6 +1304,11 @@ impl App {
             ad_embed_3d: self.ad_embed_3d,
             kicad_attach_3d: self.kicad_attach_3d,
             batch_merge: self.batch_merge,
+            lang: if self.lang_pinned {
+                Some(self.lang.as_code().into())
+            } else {
+                None
+            },
         });
     }
 
