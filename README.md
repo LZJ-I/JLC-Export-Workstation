@@ -14,17 +14,22 @@ Licensed under [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/).
 
 ## Install
 
-Download the Windows 64-bit zip from [Releases](https://github.com/LZJ-I/JLC-Export/releases), unzip, and run `lceda.exe`. To update, unzip over the previous files, or use in-app update (downloads, replaces, restarts).
+Download a zip for your OS from [Releases](https://github.com/LZJ-I/JLC-Export/releases), unzip, and run it. To update, unzip over the previous files, or use in-app update (downloads the matching OS zip, replaces, restarts).
+
+- Windows x64: `lceda-v*-x86_64-pc-windows-msvc.zip` → `lceda.exe`
+- Linux x64: `lceda-v*-x86_64-unknown-linux-gnu.zip` → `lceda`
+- macOS Apple Silicon: `lceda-v*-aarch64-apple-darwin.zip` → `lceda`
+- macOS Intel: `lceda-v*-x86_64-apple-darwin.zip` → `lceda`
 
 Or build from source (requires [Rust](https://rustup.rs/)):
 
 ```bash
-cargo build --release -p lceda --target x86_64-pc-windows-msvc
+cargo build --release -p lceda
 ```
 
 ## GUI
 
-Double-click `lceda.exe`. Files go to `lceda-out` under your Downloads folder by default. Change the path on the right, or click **Open folder**.
+Open `lceda.exe` (Windows) or `lceda` (Linux / macOS). Files go to `lceda-out` under your Downloads folder by default. Change the path on the right, or click **Open folder**.
 
 Each part gets a subfolder named `MPN_LCSC_Manufacturer`. Files inside use the MPN.
 

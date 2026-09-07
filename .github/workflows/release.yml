@@ -1,0 +1,100 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Linux GUI libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxkbcommon-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+      - name: Build
+        run: cargo build --release -p lceda --target ${{ matrix.target }}
+      - name: Package zip
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+
+          target = os.environ["TARGET"]
+          tag = os.environ["TAG"]
+          exe = "lceda.exe" if "windows" in target else "lceda"
+          src = Path("target") / target / "release" / exe
+          if not src.is_file():
+              raise SystemExit(f"missing {src}")
+          out = Path("dist")
+          out.mkdir(exist_ok=True)
+          zpath = out / f"lceda-{tag}-{target}.zip"
+          with ZipFile(zpath, "w", ZIP_DEFLATED) as z:
+              info = ZipInfo(exe)
+              info.compress_type = ZIP_DEFLATED
+              info.external_attr = (0o755 if exe == "lceda" else 0o644) << 16
+              z.writestr(info, src.read_bytes())
+              lic = ZipInfo("LICENSE")
+              lic.compress_type = ZIP_DEFLATED
+              lic.external_attr = 0o644 << 16
+              z.writestr(lic, Path("LICENSE").read_bytes())
+          print(zpath, zpath.stat().st_size)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -lh dist
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "$(cat <<'EOF'
+          ## 改进
+          - **预览图改拉原图**：搜索接口给的是 224px `/middle/` 缩略图，悬停放大改为优先下载立创 `/source/` 原图，失败再回退缩略图。
+          - **多平台安装包**：Windows x64、Linux x64、macOS Apple Silicon / Intel 均由 GitHub Actions 构建。
+
+          ## 下载
+          解压后运行：
+          - Windows：`lceda.exe`
+          - Linux / macOS：`lceda`
+          EOF
+          )"

@@ -14,17 +14,22 @@
 
 ## 安装
 
-从 [Releases](https://github.com/LZJ-I/JLC-Export/releases) 下载 Windows 64 位压缩包，解压后运行 `lceda.exe`。更新时解压覆盖即可。软件内也可检查更新并自动替换后重启。
+从 [Releases](https://github.com/LZJ-I/JLC-Export/releases) 下载对应系统的压缩包，解压后运行。更新时解压覆盖即可。软件内检查更新会按当前系统下载对应安装包并替换重启。
+
+- Windows x64：`lceda-v*-x86_64-pc-windows-msvc.zip` → `lceda.exe`
+- Linux x64：`lceda-v*-x86_64-unknown-linux-gnu.zip` → `lceda`
+- macOS Apple Silicon：`lceda-v*-aarch64-apple-darwin.zip` → `lceda`
+- macOS Intel：`lceda-v*-x86_64-apple-darwin.zip` → `lceda`
 
 或从源码编译（需 [Rust](https://rustup.rs/)）：
 
 ```bash
-cargo build --release -p lceda --target x86_64-pc-windows-msvc
+cargo build --release -p lceda
 ```
 
 ## 图形界面
 
-双击 `lceda.exe` 打开。默认把文件保存到「下载」文件夹下的 `lceda-out`，可在右侧改路径，点「打开目录」查看。
+打开 `lceda.exe`（Windows）或 `lceda`（Linux / macOS）。默认把文件保存到「下载」文件夹下的 `lceda-out`，可在右侧改路径，点「打开目录」查看。
 
 每个器件一个子目录，名字是 `型号_立创编号_厂牌`，目录里的文件用型号命名。
 

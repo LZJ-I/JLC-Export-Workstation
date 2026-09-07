@@ -27,16 +27,31 @@ impl SearchItem {
     }
 
     pub fn image_url(&self) -> Option<String> {
-        if let Some(images) = self.raw.get("images").and_then(Value::as_array) {
-            if let Some(first) = images.first().and_then(Value::as_str) {
-                return normalize_url(first);
-            }
+        self.image_urls().into_iter().next()
+    }
+
+    /// 预览优先用立创原图，失败再回退搜索接口给的缩略图。
+    pub fn image_urls(&self) -> Vec<String> {
+        let raw = if let Some(images) = self.raw.get("images").and_then(Value::as_array) {
+            images.first().and_then(Value::as_str)
+        } else {
+            None
         }
-        self.raw
-            .get("creator")
-            .and_then(|c| c.get("avatar"))
-            .and_then(Value::as_str)
-            .and_then(normalize_url)
+        .or_else(|| {
+            self.raw
+                .get("creator")
+                .and_then(|c| c.get("avatar"))
+                .and_then(Value::as_str)
+        });
+        let Some(url) = raw.and_then(normalize_url) else {
+            return Vec::new();
+        };
+        let hd = prefer_source_image_url(&url);
+        if hd != url {
+            vec![hd, url]
+        } else {
+            vec![url]
+        }
     }
 
     pub fn symbol_uuid(&self) -> Option<String> {
@@ -179,6 +194,11 @@ pub fn normalize_url(url: &str) -> Option<String> {
         return Some(format!("https://{rest}"));
     }
     Some(value.to_string())
+}
+
+/// 搜索接口 `images` 是 `/product/middle/`（约 224px），立创原图在同路径 `/source/`。
+pub fn prefer_source_image_url(url: &str) -> String {
+    url.replace("/product/middle/", "/product/source/")
 }
 
 pub fn join_dir(dir: impl AsRef<Path>, name: &str) -> PathBuf {
@@ -365,6 +385,33 @@ pub fn parse_id_list(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_urls_prefer_source_over_middle_thumb() {
+        let item = SearchItem {
+            index: 1,
+            display_title: "BAT54WS".into(),
+            title: String::new(),
+            manufacturer: String::new(),
+            model_uuid: None,
+            raw: serde_json::json!({
+                "images": [
+                    "https://alimg.szlcsc.com/upload/public/product/middle/20230822/3A57432B09985736ABAADF64C6CD16FA.jpg"
+                ]
+            }),
+        };
+        assert_eq!(
+            item.image_urls(),
+            [
+                "https://alimg.szlcsc.com/upload/public/product/source/20230822/3A57432B09985736ABAADF64C6CD16FA.jpg",
+                "https://alimg.szlcsc.com/upload/public/product/middle/20230822/3A57432B09985736ABAADF64C6CD16FA.jpg",
+            ]
+        );
+        assert_eq!(
+            item.image_url().as_deref(),
+            Some("https://alimg.szlcsc.com/upload/public/product/source/20230822/3A57432B09985736ABAADF64C6CD16FA.jpg")
+        );
+    }
 
     #[test]
     fn extracts_lcsc_numbers() {

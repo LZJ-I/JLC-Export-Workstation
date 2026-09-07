@@ -1287,8 +1287,11 @@ impl App {
                 mesh: None,
                 mesh_note: None,
             };
-            if let Some(url) = item.image_url() {
-                data.image = client.get_bytes(&url).ok();
+            for url in item.image_urls() {
+                if let Ok(bytes) = client.get_bytes(&url) {
+                    data.image = Some(bytes);
+                    break;
+                }
             }
             if item.model_uuid.is_some() {
                 match client.download_obj_bytes(&item) {

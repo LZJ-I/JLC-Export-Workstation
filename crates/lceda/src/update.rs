@@ -215,26 +215,25 @@ fn set_progress(
 
 fn pick_asset(assets: &[Value]) -> Option<String> {
     let hint = asset_hint();
-    let mut found = None;
     for a in assets {
         let name = a.get("name")?.as_str()?;
         let url = a.get("browser_download_url")?.as_str()?;
-        if !name.ends_with(".zip") {
-            continue;
-        }
-        if name.contains(hint) {
+        if name.ends_with(".zip") && name.contains(hint) {
             return Some(via_proxy(url));
         }
-        if found.is_none() && name.contains("lceda") {
-            found = Some(via_proxy(url));
-        }
     }
-    found
+    None
 }
 
 fn asset_hint() -> &'static str {
     if cfg!(windows) {
         "x86_64-pc-windows-msvc"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-apple-darwin"
+        }
     } else {
         "x86_64-unknown-linux-gnu"
     }
@@ -355,6 +354,40 @@ mod tests {
         assert!(parse_version("0.3.2").unwrap() > parse_version("0.3.1").unwrap());
         assert!(parse_version("0.3.3").unwrap() > parse_version("0.3.2").unwrap());
         assert!(parse_version("0.5.0").unwrap() > parse_version("0.3.3").unwrap());
+        assert!(parse_version("0.5.1").unwrap() > parse_version("0.5.0").unwrap());
+    }
+
+    #[test]
+    fn pick_asset_matches_current_os_only() {
+        let assets = serde_json::json!([
+            {
+                "name": "lceda-v0.5.1-x86_64-pc-windows-msvc.zip",
+                "browser_download_url": "https://example.com/win.zip"
+            },
+            {
+                "name": "lceda-v0.5.1-x86_64-unknown-linux-gnu.zip",
+                "browser_download_url": "https://example.com/linux.zip"
+            },
+            {
+                "name": "lceda-v0.5.1-aarch64-apple-darwin.zip",
+                "browser_download_url": "https://example.com/mac-arm.zip"
+            },
+            {
+                "name": "lceda-v0.5.1-x86_64-apple-darwin.zip",
+                "browser_download_url": "https://example.com/mac-intel.zip"
+            }
+        ]);
+        let url = pick_asset(assets.as_array().unwrap()).expect("matching zip");
+        let expect = if cfg!(windows) {
+            "win.zip"
+        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "mac-arm.zip"
+        } else if cfg!(target_os = "macos") {
+            "mac-intel.zip"
+        } else {
+            "linux.zip"
+        };
+        assert!(url.ends_with(expect), "{url} should end with {expect}");
     }
 
     #[test]
