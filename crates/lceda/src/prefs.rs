@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub struct Prefs {
     pub ad_embed_3d: bool,
     pub kicad_attach_3d: bool,
+    pub rename_footprint: bool,
     pub batch_merge: bool,
     pub hide_welcome: bool,
     pub lang: Option<String>,
@@ -16,6 +17,7 @@ impl Default for Prefs {
         Self {
             ad_embed_3d: true,
             kicad_attach_3d: true,
+            rename_footprint: false,
             batch_merge: false,
             hide_welcome: false,
             lang: None,
@@ -36,6 +38,10 @@ pub fn load() -> Prefs {
     Prefs {
         ad_embed_3d: v.get("ad_embed_3d").and_then(Value::as_bool).unwrap_or(true),
         kicad_attach_3d: v.get("kicad_attach_3d").and_then(Value::as_bool).unwrap_or(true),
+        rename_footprint: v
+            .get("rename_footprint")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         batch_merge: v.get("batch_merge").and_then(Value::as_bool).unwrap_or(false),
         hide_welcome: v.get("hide_welcome").and_then(Value::as_bool).unwrap_or(false),
         lang: v
@@ -56,6 +62,7 @@ pub fn save(prefs: &Prefs) {
     let mut body = json!({
         "ad_embed_3d": prefs.ad_embed_3d,
         "kicad_attach_3d": prefs.kicad_attach_3d,
+        "rename_footprint": prefs.rename_footprint,
         "batch_merge": prefs.batch_merge,
         "hide_welcome": prefs.hide_welcome,
     });

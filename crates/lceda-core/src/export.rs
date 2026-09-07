@@ -28,6 +28,8 @@ pub struct ExportRequest {
     pub ad_embed_3d: bool,
     /// Write STEP into `{name}.3dshapes` and reference it from the KiCad footprint.
     pub kicad_attach_3d: bool,
+    /// 用器件型号覆盖立创原来的封装名。默认 false，保留通用封装名。
+    pub rename_footprint: bool,
     /// Batch: write one combined library instead of per-part folders for AD/KiCad.
     pub merge: bool,
     pub merge_name: String,
@@ -47,6 +49,7 @@ impl Default for ExportRequest {
             out_dir: PathBuf::from("."),
             ad_embed_3d: true,
             kicad_attach_3d: true,
+            rename_footprint: false,
             merge: false,
             merge_name: "lceda".into(),
         }
@@ -160,7 +163,7 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             return Err(Error::NoSymbolOrFootprint);
         }
         let (symbol_json, footprint_json, fetched_sym, fetched_fp) =
-            fetch_sources(client, item, &part_dir, &base, req.force)?;
+            fetch_sources(client, item, &part_dir, &base, req.force, req.rename_footprint)?;
         symbol_ir = fetched_sym;
         footprint_ir = fetched_fp;
         if req.source_json || req.ad || req.kicad || req.pads {
@@ -514,6 +517,7 @@ fn fetch_sources(
     out_dir: &Path,
     base: &str,
     force: bool,
+    rename_footprint: bool,
 ) -> Result<(
     Option<PathBuf>,
     Option<PathBuf>,
@@ -543,7 +547,17 @@ fn fetch_sources(
         write_json(&path, &json, force)?;
         footprint_path = Some(path);
         match easyeda::parse_footprint(&json) {
-            Ok(src) => footprint_ir = Some(ir::footprint_ir(base, &desc, src, meta)),
+            Ok(src) => {
+                let name = if rename_footprint {
+                    base.to_string()
+                } else {
+                    easyeda::component_display_title(&json)
+                        .map(|s| sanitize_filename(&s))
+                        .filter(|s| !s.is_empty() && s != "component")
+                        .unwrap_or_else(|| base.to_string())
+                };
+                footprint_ir = Some(ir::footprint_ir(&name, &desc, src, meta));
+            }
             Err(e) => eprintln!("解析封装失败: {e}"),
         }
     }

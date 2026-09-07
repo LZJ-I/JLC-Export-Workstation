@@ -58,6 +58,9 @@ pub enum Cmd {
         /// 不把 STEP 写入 KiCad .3dshapes（默认写入）
         #[arg(long = "no-kicad-3d")]
         no_kicad_3d: bool,
+        /// 用器件型号覆盖立创原来的封装名（默认保留原名）
+        #[arg(long)]
+        rename_footprint: bool,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -86,6 +89,9 @@ pub enum Cmd {
         /// 不把 STEP 写入 KiCad .3dshapes（默认写入）
         #[arg(long = "no-kicad-3d")]
         no_kicad_3d: bool,
+        /// 用器件型号覆盖立创原来的封装名（默认保留原名）
+        #[arg(long)]
+        rename_footprint: bool,
         /// 将本次批量的 AD/KiCad 合成一个库（不追加已有文件）
         #[arg(long)]
         merge: bool,
@@ -153,6 +159,7 @@ pub fn run() -> Result<i32> {
             source,
             no_ad_3d,
             no_kicad_3d,
+            rename_footprint,
             output,
             force,
         }) => {
@@ -168,6 +175,7 @@ pub fn run() -> Result<i32> {
                 source,
                 !no_ad_3d,
                 !no_kicad_3d,
+                rename_footprint,
                 output,
                 force,
             );
@@ -186,6 +194,7 @@ pub fn run() -> Result<i32> {
             source,
             no_ad_3d,
             no_kicad_3d,
+            rename_footprint,
             merge,
             output,
             force,
@@ -207,6 +216,7 @@ pub fn run() -> Result<i32> {
                 source,
                 !no_ad_3d,
                 !no_kicad_3d,
+                rename_footprint,
                 output,
                 force,
             );
@@ -240,6 +250,7 @@ fn build_req(
     source: bool,
     ad_embed_3d: bool,
     kicad_attach_3d: bool,
+    rename_footprint: bool,
     output: PathBuf,
     force: bool,
 ) -> ExportRequest {
@@ -255,6 +266,7 @@ fn build_req(
         out_dir: output,
         ad_embed_3d,
         kicad_attach_3d,
+        rename_footprint,
         merge: false,
         merge_name: "lceda".into(),
     };

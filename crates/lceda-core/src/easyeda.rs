@@ -242,6 +242,20 @@ pub fn parse_symbol(value: &Value) -> Result<EasyedaSymbol> {
     Ok(symbol)
 }
 
+/// 立创封装/符号的原始库名，优先 `result.display_title`。
+pub fn component_display_title(value: &Value) -> Option<String> {
+    let root = value.get("result").unwrap_or(value);
+    for key in ["display_title", "title"] {
+        if let Some(s) = root.get(key).and_then(Value::as_str) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn parse_footprint(value: &Value) -> Result<EasyedaFootprint> {
     let rows = parse_component_json(value)?;
     let mut fp = EasyedaFootprint {
@@ -648,6 +662,20 @@ pub fn normalize_angle(v: f64) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn component_display_title_prefers_result_display_title() {
+        let v = json!({
+            "result": {
+                "display_title": "SOIC-8_L5.3-W5.3-P1.27-LS6.00-BL",
+                "title": "other"
+            }
+        });
+        assert_eq!(
+            component_display_title(&v).as_deref(),
+            Some("SOIC-8_L5.3-W5.3-P1.27-LS6.00-BL")
+        );
+    }
 
     #[test]
     fn parses_pin_row() {

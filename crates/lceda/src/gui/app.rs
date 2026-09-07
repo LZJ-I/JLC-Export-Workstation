@@ -70,6 +70,7 @@ impl BatchOpts {
             out_dir,
             ad_embed_3d: true,
             kicad_attach_3d: true,
+            rename_footprint: false,
             merge: false,
             merge_name: "lceda".into(),
         }
@@ -151,6 +152,7 @@ struct App {
     shot_settle: u32,
     ad_embed_3d: bool,
     kicad_attach_3d: bool,
+    rename_footprint: bool,
     batch_merge: bool,
 }
 
@@ -212,6 +214,7 @@ impl App {
             shot_settle: 0,
             ad_embed_3d: prefs.ad_embed_3d,
             kicad_attach_3d: prefs.kicad_attach_3d,
+            rename_footprint: prefs.rename_footprint,
             batch_merge: prefs.batch_merge,
         }
     }
@@ -379,16 +382,23 @@ impl App {
         let mut close = false;
         let mut persist = false;
         let lang = self.lang;
-        let width = 420.0;
+        let width = 460.0;
         fit_window(i18n::t(lang, "settings"), "lceda_settings_fit", width).show(ctx, |ui| {
             ui.set_width(width - 8.0);
             ui.label(egui::RichText::new(i18n::t(lang, "settings_3d_hint")).color(SECONDARY));
             ui.add_space(8.0);
             let before_ad = self.ad_embed_3d;
             let before_kicad = self.kicad_attach_3d;
+            let before_fp = self.rename_footprint;
             ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
             ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
-            if self.ad_embed_3d != before_ad || self.kicad_attach_3d != before_kicad {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(i18n::t(lang, "settings_fp_hint")).color(SECONDARY));
+            ui.checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
+            if self.ad_embed_3d != before_ad
+                || self.kicad_attach_3d != before_kicad
+                || self.rename_footprint != before_fp
+            {
                 persist = true;
             }
             ui.add_space(10.0);
@@ -1350,6 +1360,7 @@ impl App {
         mutate(&mut req);
         req.ad_embed_3d = self.ad_embed_3d;
         req.kicad_attach_3d = self.kicad_attach_3d;
+        req.rename_footprint = self.rename_footprint;
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("export", move || {
             let client = LcedaClient::new();
@@ -1362,6 +1373,7 @@ impl App {
         crate::prefs::save(&crate::prefs::Prefs {
             ad_embed_3d: self.ad_embed_3d,
             kicad_attach_3d: self.kicad_attach_3d,
+            rename_footprint: self.rename_footprint,
             batch_merge: self.batch_merge,
             hide_welcome: self.hide_welcome,
             lang: if self.lang_pinned {
@@ -1387,6 +1399,7 @@ impl App {
         let mut req = self.batch_opts.request(out_dir.clone());
         req.ad_embed_3d = self.ad_embed_3d;
         req.kicad_attach_3d = self.kicad_attach_3d;
+        req.rename_footprint = self.rename_footprint;
         req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("batch", move || {

@@ -46,7 +46,7 @@ Each part gets a subfolder named `MPN_LCSC_Manufacturer`. Files inside use the M
 
 Dimmed buttons mean this part has no matching asset. Click anyway for a notice; no empty folder is created.
 
-**Settings** (top right) controls whether Altium export embeds STEP in the PcbLib and whether KiCad export writes `.3dshapes`. Both default on; a missing model is skipped, not a failure.
+**Settings** (top right) controls whether Altium export embeds STEP in the PcbLib, whether KiCad export writes `.3dshapes`, and whether footprints are renamed to the part number. 3D options default on (a missing model is skipped). Footprint names stay as LCSC left them unless you turn renaming on.
 
 Exporting Altium / KiCad / PADS also keeps EasyEDA JSON for inspection.
 
@@ -70,6 +70,7 @@ lceda search C2040
 lceda get C2040 --step --ad --kicad --pads -o ./out
 lceda get C2040 --kicad --no-kicad-3d -o ./out
 lceda get C2040 --ad --no-ad-3d -o ./out
+lceda get C2040 --ad --rename-footprint -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out

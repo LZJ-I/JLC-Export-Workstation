@@ -46,7 +46,7 @@ cargo build --release -p lceda
 
 按钮变灰表示当前器件没有对应资源；再点一下会弹出说明，不会建空文件夹。
 
-右上角 **设置** 里可开关：导出 AD 时是否把 STEP 嵌入 PcbLib、导出 KiCad 时是否写入 `.3dshapes`。两项默认开启；器件没有 3D 时跳过，不失败。
+右上角 **设置** 里可开关：导出 AD 时是否把 STEP 嵌入 PcbLib、导出 KiCad 时是否写入 `.3dshapes`、是否把封装名改成器件型号。3D 两项默认开启（没有模型则跳过）。封装名默认保持立创原名，需要再勾选改名。
 
 导出 AD / KiCad / PADS 时会同时留下 EasyEDA JSON，供对照，不必单独再导一遍。
 
@@ -70,6 +70,7 @@ lceda search C2040
 lceda get C2040 --step --ad --kicad --pads -o ./out
 lceda get C2040 --kicad --no-kicad-3d -o ./out
 lceda get C2040 --ad --no-ad-3d -o ./out
+lceda get C2040 --ad --rename-footprint -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out
