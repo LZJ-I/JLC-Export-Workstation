@@ -90,8 +90,7 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --notes "$(cat <<'EOF'
           ## 改进
-          - **预览图改拉原图**：搜索接口给的是 224px `/middle/` 缩略图，悬停放大改为优先下载立创 `/source/` 原图，失败再回退缩略图。
-          - **多平台安装包**：Windows x64、Linux x64、macOS Apple Silicon / Intel 均由 GitHub Actions 构建。
+          - **更新说明对比度**：标题和加粗不再用按钮按下的白字，浅色底上能看清。
 
           ## 下载
           解压后运行：

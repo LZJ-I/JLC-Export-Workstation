@@ -519,10 +519,14 @@ impl App {
                             .max_height(280.0)
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
-                                CommonMarkViewer::new().show(ui, cache, &notes);
+                                theme::show_markdown(ui, |ui| {
+                                    CommonMarkViewer::new().show(ui, cache, &notes);
+                                });
                             });
                     } else {
-                        CommonMarkViewer::new().show(ui, cache, &notes);
+                        theme::show_markdown(ui, |ui| {
+                            CommonMarkViewer::new().show(ui, cache, &notes);
+                        });
                     }
                 }
                 if downloading {

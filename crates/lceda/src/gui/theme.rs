@@ -32,6 +32,7 @@ pub fn apply(ctx: &egui::Context) {
     visuals.widgets.active.bg_fill = ACCENT;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, LABEL);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, LABEL);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(10);
     visuals.widgets.hovered.corner_radius = CornerRadius::same(10);
     visuals.widgets.active.corner_radius = CornerRadius::same(10);
@@ -111,6 +112,17 @@ pub fn paint_card(painter: &egui::Painter, rect: egui::Rect) {
         Stroke::new(1.0_f32, hairline()),
         egui::StrokeKind::Inside,
     );
+}
+
+/// Markdown 的标题/加粗走 `strong_text_color()`（即 active 白字）。浅色底上必须改回深色。
+pub fn show_markdown(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.scope(|ui| {
+        let v = ui.visuals_mut();
+        v.override_text_color = Some(LABEL);
+        v.widgets.active.fg_stroke = Stroke::new(1.0_f32, LABEL);
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, LABEL);
+        add_contents(ui);
+    });
 }
 
 pub fn card_frame() -> egui::Frame {
