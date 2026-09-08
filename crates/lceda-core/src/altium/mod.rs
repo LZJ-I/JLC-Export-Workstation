@@ -114,16 +114,24 @@ mod tests {
             text.contains("Color=136") || text.contains("COLOR=136"),
             "立创官方外壳 #880000=136, got {text}"
         );
-        assert!(text.contains("RECORD=2"), "{text}");
-        assert!(text.contains("NAME_CUSTOMFONTID=2"), "{text}");
-        assert!(!cfb.exists("RES/PinTextData"));
+        assert!(data.windows(4).any(|w| w == 136i32.to_le_bytes()), "signal pin line #880000");
+        assert!(cfb.exists("RES/PinTextData"), "普通脚蓝字走 PinTextData");
+        let mut pin_text = Vec::new();
+        cfb.open_stream("RES/PinTextData")
+            .unwrap()
+            .read_to_end(&mut pin_text)
+            .unwrap();
+        let decoded = decode_pin_text_data(&pin_text);
+        assert!(
+            decoded.iter().any(|s| s.contains("NAME.CUSTOMCOLOR=16711680")),
+            "官方普通脚字蓝: {decoded:?}"
+        );
         let mut hdr = Vec::new();
         cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
         let hdr = String::from_utf8_lossy(&hdr);
-        assert!(hdr.contains("FONTIDCOUNT=4"), "{hdr}");
+        assert!(hdr.contains("FONTNAME2=Verdana"), "{hdr}");
+        assert!(hdr.contains("SIZE2=7"), "{hdr}");
         assert!(hdr.contains("COLOR2=16711680"), "官方管脚字蓝: {hdr}");
-        assert!(hdr.contains("COLOR3=255"), "电源红: {hdr}");
-        assert!(hdr.contains("COLOR4=0"), "地黑: {hdr}");
     }
 
     #[test]
@@ -531,10 +539,19 @@ mod tests {
         let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
         let mut data = Vec::new();
         cfb.open_stream("U/Data").unwrap().read_to_end(&mut data).unwrap();
-        let text = String::from_utf8_lossy(&data);
-        assert!(text.contains("NAME=TXD") && text.contains("COLOR=136"), "{text}");
         assert!(data.windows(4).any(|w| w == 255i32.to_le_bytes()), "VCC red binary");
-        assert!(data.windows(4).any(|w| w == 0i32.to_le_bytes()), "GND black binary");
+        assert!(data.windows(4).any(|w| w == 136i32.to_le_bytes()), "TXD maroon line");
+        assert!(cfb.exists("U/PinTextData"));
+        let mut pin_text = Vec::new();
+        cfb.open_stream("U/PinTextData")
+            .unwrap()
+            .read_to_end(&mut pin_text)
+            .unwrap();
+        let decoded = decode_pin_text_data(&pin_text);
+        assert!(
+            decoded.iter().any(|s| s.contains("NAME.CUSTOMCOLOR=16711680")),
+            "{decoded:?}"
+        );
     }
 
     #[test]
@@ -558,6 +575,54 @@ mod tests {
         let hdr = String::from_utf8_lossy(&hdr);
         assert!(hdr.contains("COLOR2=0"), "{hdr}");
         assert!(hdr.contains("COLOR3=32768"), "{hdr}");
+    }
+
+    fn decode_pin_text_data(raw: &[u8]) -> Vec<String> {
+        use flate2::read::ZlibDecoder;
+        let mut out = Vec::new();
+        if raw.len() < 4 {
+            return out;
+        }
+        let header_len = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+        let mut i = 4 + header_len;
+        while i + 4 <= raw.len() {
+            let size = (u32::from_le_bytes(raw[i..i + 4].try_into().unwrap()) & 0x00FF_FFFF) as usize;
+            i += 4;
+            if size == 0 || i + size > raw.len() {
+                break;
+            }
+            let block = &raw[i..i + size];
+            i += size;
+            if block.first() != Some(&0xD0) || block.len() < 3 {
+                continue;
+            }
+            let name_len = block[1] as usize;
+            let comp_off = 2 + name_len;
+            if block.len() < comp_off + 4 {
+                continue;
+            }
+            let comp_len =
+                u32::from_le_bytes(block[comp_off..comp_off + 4].try_into().unwrap()) as usize;
+            if block.len() < comp_off + 4 + comp_len {
+                continue;
+            }
+            let comp = &block[comp_off + 4..comp_off + 4 + comp_len];
+            let mut dec = ZlibDecoder::new(comp);
+            let mut payload = Vec::new();
+            if dec.read_to_end(&mut payload).is_err() || payload.len() < 4 {
+                continue;
+            }
+            let n = i32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+            if n == 0 || payload.len() < 4 + n {
+                continue;
+            }
+            let u16s: Vec<u16> = payload[4..4 + n]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            out.push(String::from_utf16_lossy(&u16s).trim_end_matches('\0').into());
+        }
+        out
     }
 }
 

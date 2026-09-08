@@ -44,6 +44,11 @@ pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchCol
     for (sym, key) in symbols.iter().zip(keys.iter()) {
         cfb.storage(key)?;
         cfb.stream(&format!("{key}/Data"), &component_data(sym, key, colors))?;
+        // 立创官方：AD 不吃 FileHeader 的 FONT COLORn，普通脚蓝字要靠 PinTextData。
+        // Altium 经典不写，避免再出现黑字变绿。
+        if let Some(text) = pin_text_data(sym, colors) {
+            cfb.stream(&format!("{key}/PinTextData"), &text)?;
+        }
     }
     cfb.finish()
 }
@@ -54,6 +59,11 @@ fn file_header_many(names: &[String], colors: SchColors) -> Vec<u8> {
     let n = names.len();
     let extra = colors.pin_text_fonts();
     let font_count = 1 + extra.len();
+    let (pin_face, pin_size) = if colors == SchColors::easyeda() {
+        ("Verdana", 7)
+    } else {
+        ("Times New Roman", 10)
+    };
     let mut raw = format!(
         "|HEADER=Protel for Windows - Schematic Library Editor Binary File Version 5.0\
          |WEIGHT={n}|MINORVERSION=2|UNIQUEID={uid}|FONTIDCOUNT={font_count}\
@@ -62,7 +72,7 @@ fn file_header_many(names: &[String], colors: SchColors) -> Vec<u8> {
     for (i, color) in extra.iter().enumerate() {
         let id = i + 2;
         raw.push_str(&format!(
-            "|FONTNAME{id}=Times New Roman|SIZE{id}=10|COLOR{id}={color}"
+            "|FONTNAME{id}={pin_face}|SIZE{id}={pin_size}|BOLD{id}=F|ITALIC{id}=F|COLOR{id}={color}"
         ));
     }
     raw.push_str(&format!(
@@ -253,11 +263,55 @@ fn write_named(w: &mut BinWriter, pairs: &[(String, String)]) {
 
 fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin, colors: SchColors) {
     let style = colors.pin_style(&pin.pin_type, &pin.name);
-    if style.uses_local_font() {
-        write_pin_ascii(w, pin, colors, style);
-    } else {
+    // 立创官方一律二进制管脚（线色），蓝字交给 PinTextData。
+    // Altium 经典仍用 ASCII + 黑体，不写 PinTextData。
+    if colors == SchColors::easyeda() || !style.uses_local_font() {
         write_pin_binary(w, pin, style.line);
+    } else {
+        write_pin_ascii(w, pin, colors, style);
     }
+}
+
+/// 仅立创官方：名/号颜色跟线不同时写本地字体（官方 SVG 普通脚蓝字）。
+fn pin_text_data(symbol: &SymbolIr, colors: SchColors) -> Option<Vec<u8>> {
+    if colors != SchColors::easyeda() || symbol.pins.is_empty() {
+        return None;
+    }
+    let styles: Vec<_> = symbol
+        .pins
+        .iter()
+        .map(|p| colors.pin_style(&p.pin_type, &p.name))
+        .collect();
+    if !styles.iter().any(|s| s.uses_local_font()) {
+        return None;
+    }
+
+    let mut w = BinWriter::new();
+    w.write_params(&[
+        ("HEADER", "PinTextData".into()),
+        ("Weight", symbol.pins.len().to_string()),
+    ]);
+    for (i, style) in styles.iter().enumerate() {
+        let mut payload = BinWriter::new();
+        let mut pairs: Vec<(&str, String)> = Vec::new();
+        if style.name != style.line {
+            let font = colors.font_id_for(style.name);
+            pairs.push(("NAME.FONTMODE", "1".into()));
+            pairs.push(("NAME.CUSTOMFONTID", font.to_string()));
+            pairs.push(("NAME.CUSTOMCOLOR", style.name.to_string()));
+            pairs.push(("NAME_CUSTOMFONTID", font.to_string()));
+        }
+        if style.number != style.line {
+            let font = colors.font_id_for(style.number);
+            pairs.push(("DESIGNATOR.FONTMODE", "1".into()));
+            pairs.push(("DESIGNATOR.CUSTOMFONTID", font.to_string()));
+            pairs.push(("DESIGNATOR.CUSTOMCOLOR", style.number.to_string()));
+            pairs.push(("DESIGNATOR_CUSTOMFONTID", font.to_string()));
+        }
+        payload.write_unicode_params(&pairs);
+        w.write_compressed_named(&i.to_string(), &payload.into_vec());
+    }
+    Some(w.into_vec())
 }
 
 /// 线/名/号同色时走二进制管脚（立创电源/地，或黑白）。

@@ -145,7 +145,6 @@ impl BinWriter {
 
     /// UTF-16LE 参数块：`int32 字节数` + `|KEY=VAL|…` + 结尾 NUL。
     /// 与 AltiumSharp `WriteUnicodeParameterBlock` / `PinSymbolLineWidth` 内层一致。
-    #[allow(dead_code)]
     pub fn write_unicode_params(&mut self, pairs: &[(&str, String)]) {
         let mut s = String::new();
         for (k, v) in pairs {
@@ -161,7 +160,6 @@ impl BinWriter {
     }
 
     /// OLE 压缩条目：`0xD0` + Pascal 名 + zlib 载荷。用于 PinFrac / PinTextData 等。
-    #[allow(dead_code)]
     pub fn write_compressed_named(&mut self, name: &str, payload: &[u8]) {
         let compressed = zlib_compress(payload);
         let (name_bytes, _, _) = WINDOWS_1252.encode(name);
@@ -176,7 +174,6 @@ impl BinWriter {
     }
 }
 
-#[allow(dead_code)]
 pub fn zlib_compress(data: &[u8]) -> Vec<u8> {
     let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(data).expect("zlib compress");
