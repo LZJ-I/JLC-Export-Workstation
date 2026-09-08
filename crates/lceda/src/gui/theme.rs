@@ -191,6 +191,11 @@ pub fn paint_card(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
+/// `.strong()` 用的是 active 白字，浅色底上会看不见。标题一律走这里。
+pub fn heading(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text.into()).strong().color(label())
+}
+
 /// Markdown 的标题/加粗走 `strong_text_color()`（即 active 白字）。浅色底上必须改回深色。
 pub fn show_markdown(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.scope(|ui| {

@@ -2267,7 +2267,7 @@ impl App {
                 }
             });
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(i18n::t(self.lang, "components")).strong());
+            ui.label(theme::heading(i18n::t(self.lang, "components")));
             egui::ScrollArea::vertical().id_salt("part_list").show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 for (idx, item) in self.items.iter().enumerate() {
@@ -2380,7 +2380,7 @@ impl App {
                     if theme::pill_button(ui, i18n::t(lang, "fav_back"), true, false).clicked() {
                         leave = true;
                     }
-                    ui.label(egui::RichText::new(cat_title).strong());
+                    ui.label(theme::heading(cat_title));
                 });
                 ui.add_space(8.0);
                 if parts.is_empty() {
@@ -2411,7 +2411,7 @@ impl App {
                     }
                 });
             } else {
-                ui.label(egui::RichText::new(i18n::t(lang, "favorites")).strong());
+                ui.label(theme::heading(i18n::t(lang, "favorites")));
                 ui.add_space(8.0);
                 egui::ScrollArea::vertical().id_salt("fav_tree").show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -2699,7 +2699,7 @@ impl App {
             // 1 顶栏
             ui.horizontal(|ui| {
                 ui.set_height(22.0);
-                ui.label(egui::RichText::new(i18n::t(self.lang, "preview")).strong());
+                ui.label(theme::heading(i18n::t(self.lang, "preview")));
                 if self.image_tex.is_some() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -2795,7 +2795,7 @@ impl App {
     fn mesh_card(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         card_shell(ui, rect, "mesh", |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(i18n::t(self.lang, "model3d")).strong());
+                ui.label(theme::heading(i18n::t(self.lang, "model3d")));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.mesh.is_some() {
                         ui.label(
