@@ -1,26 +1,15 @@
-**语言 / Language:** [English](README.md) · **中文**
+**语言：** [English](README.md) · **中文**
 
 # 嘉立创导出工作站
 
-搜索立创器件，预览 3D，导出 Altium / KiCad / PADS 库和 STEP。
+| 中文 | English |
+| --- | --- |
+| 搜索立创器件，预览 3D（可嵌入封装），导出 Altium / KiCad / PADS 库和 STEP。 | Search LCSC parts, preview 3D (embeddable in footprints), and export Altium / KiCad / PADS libraries plus STEP. |
+| 位号写入 Designator，型号写入 Comment，Description 可勾选规格和编号。 | Designator gets the prefix, Comment the MPN, and Description is a configurable template. |
+| 用 Rust 编写。原生桌面程序，Windows 约 11 MB，内存占用低，没有 Electron，也不用额外运行时。 | Written in Rust. One small native binary (~11 MB on Windows), low memory use, no Electron or extra runtime. |
+| 许可为 [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)。 | Licensed under [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/). |
 
-Search LCSC parts, preview 3D, and export Altium / KiCad / PADS libraries plus STEP.
-
-[![Stars](https://img.shields.io/github/stars/LZJ-I/JLC-Export-Workstation?style=social)](https://github.com/LZJ-I/JLC-Export-Workstation)
-
-位号写入 Designator，型号写入 Comment，Description 可勾选规格和编号。
-
-Designator gets the prefix, Comment the MPN, and Description a configurable template.
-
-如果这个项目对你有帮助，欢迎点一下右上角的 [⭐ Star](https://github.com/LZJ-I/JLC-Export-Workstation)。
-
-If this project helps you, please [⭐ Star](https://github.com/LZJ-I/JLC-Export-Workstation) it.
-
-![搜索、3D、位号 Description、导出 / Search, 3D, Designator, export](docs/demo.gif)
-
-许可为 [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)。
-
-Licensed under [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+![搜索、3D、位号 Description、导出](docs/demo.gif)
 
 ## 安装
 
@@ -112,4 +101,4 @@ lceda --lang zh gui
 - 仓库：[LZJ-I/JLC-Export-Workstation](https://github.com/LZJ-I/JLC-Export-Workstation)
 - 许可：[CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)
 
-有帮助的话，欢迎 [Star](https://github.com/LZJ-I/JLC-Export-Workstation)。
+有帮助的话，欢迎点一下 Star。[![Stars](https://img.shields.io/github/stars/LZJ-I/JLC-Export-Workstation?style=social)](https://github.com/LZJ-I/JLC-Export-Workstation)
