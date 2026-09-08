@@ -1,4 +1,5 @@
 use crate::altium;
+use crate::altium::SchColors;
 use crate::client::LcedaClient;
 use crate::easyeda;
 use crate::error::{Error, Result};
@@ -33,6 +34,8 @@ pub struct ExportRequest {
     /// Batch: write one combined library instead of per-part folders for AD/KiCad.
     pub merge: bool,
     pub merge_name: String,
+    /// Altium 原理图库颜色。默认是 AD 经典暗红/蓝。
+    pub sch_colors: SchColors,
 }
 
 impl Default for ExportRequest {
@@ -52,6 +55,7 @@ impl Default for ExportRequest {
             rename_footprint: false,
             merge: false,
             merge_name: "lceda".into(),
+            sch_colors: SchColors::default(),
         }
     }
 }
@@ -179,6 +183,7 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
                 symbol_ir.as_ref(),
                 footprint_ir.as_ref(),
                 step_bytes.as_deref(),
+                req.sch_colors,
             ) {
                 if !req.kicad {
                     return Err(e);
@@ -304,7 +309,7 @@ fn write_merged_libraries(req: &ExportRequest, parts: &[PartExport]) -> Result<D
         let symbols: Vec<&SymbolIr> = parts.iter().filter_map(|p| p.symbol.as_ref()).collect();
         if !symbols.is_empty() {
             let sch = req.out_dir.join(format!("{name}.SchLib"));
-            match altium::write_schlib_many(&sch, &symbols) {
+            match altium::write_schlib_many_with_colors(&sch, &symbols, req.sch_colors) {
                 Ok(()) if sch.exists() && sch.metadata().map(|m| m.len()).unwrap_or(0) > 64 => {
                     out.schlib = Some(sch);
                 }
@@ -397,6 +402,7 @@ fn export_altium(
     symbol_ir: Option<&SymbolIr>,
     footprint_ir: Option<&FootprintIr>,
     step: Option<&[u8]>,
+    colors: SchColors,
 ) -> Result<()> {
     let mut ad_err: Option<String> = None;
     if let Some(sym) = symbol_ir {
@@ -407,7 +413,7 @@ fn export_altium(
             }
         }
         let sch = out_dir.join(format!("{base}.SchLib"));
-        match altium::write_schlib(&sch, &sym) {
+        match altium::write_schlib_with_colors(&sch, &sym, colors) {
             Ok(()) if sch.exists() && sch.metadata().map(|m| m.len()).unwrap_or(0) > 64 => {
                 out.schlib = Some(sch);
             }

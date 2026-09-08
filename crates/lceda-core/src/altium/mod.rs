@@ -1,6 +1,9 @@
 pub mod binary;
 pub mod pcblib;
+pub mod sch_color;
 pub mod schlib;
+
+pub use sch_color::{SchColorScheme, SchColors};
 
 use crate::error::Result;
 use crate::ir::{FootprintIr, SymbolIr};
@@ -10,8 +13,20 @@ pub fn write_schlib(path: &Path, symbol: &SymbolIr) -> Result<()> {
     schlib::write(path, symbol)
 }
 
+pub fn write_schlib_with_colors(path: &Path, symbol: &SymbolIr, colors: SchColors) -> Result<()> {
+    schlib::write_with_colors(path, symbol, colors)
+}
+
 pub fn write_schlib_many(path: &Path, symbols: &[&SymbolIr]) -> Result<()> {
     schlib::write_many(path, symbols)
+}
+
+pub fn write_schlib_many_with_colors(
+    path: &Path,
+    symbols: &[&SymbolIr],
+    colors: SchColors,
+) -> Result<()> {
+    schlib::write_many_with_colors(path, symbols, colors)
 }
 
 pub fn write_pcblib(path: &Path, footprint: &FootprintIr) -> Result<()> {
@@ -66,6 +81,34 @@ mod tests {
         let mut hdr = Vec::new();
         cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
         assert!(hdr.len() > 32);
+        let mut data = Vec::new();
+        cfb.open_stream("RES/Data").unwrap().read_to_end(&mut data).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(
+            text.contains("Color=128") || text.contains("COLOR=128"),
+            "default SchLib must use Altium maroon 128, got {text}"
+        );
+        assert!(text.contains("16711680"), "designator/comment must be blue 16711680: {text}");
+        assert!(text.contains("NAME=Comment"), "{text}");
+        assert!(data.windows(4).any(|w| w == 128i32.to_le_bytes()), "pin COLORREF 128");
+    }
+
+    #[test]
+    fn writes_schlib_easyeda_colors() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-easyeda");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("RES.SchLib");
+        let symbol = sample_symbol("RES");
+        write_schlib_with_colors(&path, &symbol, SchColors::easyeda()).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut data = Vec::new();
+        cfb.open_stream("RES/Data").unwrap().read_to_end(&mut data).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(
+            text.contains("Color=16711680") || text.contains("COLOR=16711680"),
+            "EasyEDA body is blue, got {text}"
+        );
+        assert!(data.windows(4).any(|w| w == 0x0000_00FFi32.to_le_bytes()), "pin red");
     }
 
     #[test]

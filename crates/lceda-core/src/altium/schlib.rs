@@ -1,18 +1,24 @@
 use super::binary::{BinWriter, CfbDoc, add_coord_param};
+use super::sch_color::SchColors;
 use crate::error::{Error, Result};
 use crate::ir::SymbolIr;
 use crate::util::{unique_altium_section_key, unique_id};
 use std::collections::HashSet;
 use std::path::Path;
 
-const BLUE_BGR: i32 = 0x00FF0000;
-const RED_BGR: i32 = 0x000000FF;
-
 pub fn write(path: &Path, symbol: &SymbolIr) -> Result<()> {
-    write_many(path, &[symbol])
+    write_with_colors(path, symbol, SchColors::default())
+}
+
+pub fn write_with_colors(path: &Path, symbol: &SymbolIr, colors: SchColors) -> Result<()> {
+    write_many_with_colors(path, &[symbol], colors)
 }
 
 pub fn write_many(path: &Path, symbols: &[&SymbolIr]) -> Result<()> {
+    write_many_with_colors(path, symbols, SchColors::default())
+}
+
+pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchColors) -> Result<()> {
     if symbols.is_empty() {
         return Err(Error::Altium("SchLib 没有元件".into()));
     }
@@ -37,7 +43,7 @@ pub fn write_many(path: &Path, symbols: &[&SymbolIr]) -> Result<()> {
 
     for (sym, key) in symbols.iter().zip(keys.iter()) {
         cfb.storage(key)?;
-        cfb.stream(&format!("{key}/Data"), &component_data(sym, key))?;
+        cfb.stream(&format!("{key}/Data"), &component_data(sym, key, colors))?;
     }
     cfb.finish()
 }
@@ -89,7 +95,7 @@ fn empty_storage() -> Vec<u8> {
     w.into_vec()
 }
 
-fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
+fn component_data(symbol: &SymbolIr, libref: &str, colors: SchColors) -> Vec<u8> {
     let mut w = BinWriter::new();
     let uid = unique_id();
     let mut header = vec![
@@ -107,7 +113,7 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
         ("TARGETFILENAME", "*".into()),
         ("UNIQUEID", uid),
         ("AREACOLOR", "11599871".into()),
-        ("COLOR", BLUE_BGR.to_string()),
+        ("COLOR", colors.body.to_string()),
         ("PARTIDLOCKED", "T".into()),
         ("DESIGNITEMID", libref.into()),
     ];
@@ -117,7 +123,7 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
     w.write_params(&header);
 
     for pin in &symbol.pins {
-        write_pin(&mut w, pin);
+        write_pin(&mut w, pin, colors);
     }
 
     for r in &symbol.rects {
@@ -125,7 +131,7 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
             ("RECORD".into(), "14".into()),
             ("OwnerPartId".into(), "1".into()),
             ("LineWidth".into(), "1".into()),
-            ("Color".into(), BLUE_BGR.to_string()),
+            ("Color".into(), colors.body.to_string()),
             ("IsSolid".into(), "F".into()),
             ("Transparent".into(), "T".into()),
         ];
@@ -144,7 +150,7 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
             ("RECORD".into(), "6".into()),
             ("OWNERPARTID".into(), "1".into()),
             ("LINEWIDTH".into(), "1".into()),
-            ("COLOR".into(), BLUE_BGR.to_string()),
+            ("COLOR".into(), colors.body.to_string()),
             ("LOCATIONCOUNT".into(), poly.len().to_string()),
         ];
         for (i, (x, y)) in poly.iter().enumerate() {
@@ -159,7 +165,7 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
             ("RECORD".into(), "8".into()),
             ("OwnerPartId".into(), "1".into()),
             ("LineWidth".into(), "1".into()),
-            ("Color".into(), BLUE_BGR.to_string()),
+            ("Color".into(), colors.body.to_string()),
             ("AreaColor".into(), "0".into()),
             ("IsSolid".into(), "F".into()),
             ("Transparent".into(), "T".into()),
@@ -174,10 +180,19 @@ fn component_data(symbol: &SymbolIr, libref: &str) -> Vec<u8> {
     w.write_params(&[
         ("RECORD", "34".into()),
         ("OWNERPARTID", "-1".into()),
-        ("COLOR", "8388608".into()),
+        ("COLOR", colors.designator.to_string()),
         ("FONTID", "1".into()),
         ("TEXT", "U?".into()),
         ("NAME", "Designator".into()),
+        ("READONLYSTATE", "1".into()),
+    ]);
+    w.write_params(&[
+        ("RECORD", "34".into()),
+        ("OWNERPARTID", "-1".into()),
+        ("COLOR", colors.comment.to_string()),
+        ("FONTID", "1".into()),
+        ("TEXT", symbol.name.clone()),
+        ("NAME", "Comment".into()),
         ("READONLYSTATE", "1".into()),
     ]);
 
@@ -225,7 +240,7 @@ fn write_named(w: &mut BinWriter, pairs: &[(String, String)]) {
     w.write_params(&refs);
 }
 
-fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin) {
+fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin, colors: SchColors) {
     let orient = pin_orient(pin.rotation);
     let loc_x = dxp_num(pin.x);
     let loc_y = dxp_num(pin.y);
@@ -248,7 +263,7 @@ fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin) {
         w.write_i16(len as i16);
         w.write_i16(loc_x as i16);
         w.write_i16(loc_y as i16);
-        w.write_i32(RED_BGR);
+        w.write_i32(colors.pin);
         w.write_pascal_short(&pin.name);
         w.write_pascal_short(&pin.number);
         w.write_pascal_short("");
