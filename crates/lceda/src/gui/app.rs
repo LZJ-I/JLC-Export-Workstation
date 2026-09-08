@@ -559,8 +559,9 @@ impl App {
             return;
         }
         let screen = ctx.screen_rect();
+        // Middle covers panels; Foreground dialogs must stay above this scrim.
         egui::Area::new(egui::Id::new("modal_scrim"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .fixed_pos(screen.min)
             .interactable(true)
             .show(ctx, |ui| {
@@ -3281,6 +3282,7 @@ impl App {
         let shown = egui::Window::new(title)
             .id(egui::Id::new("lceda_sponsor_qr"))
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(false)
             .default_width(size)
