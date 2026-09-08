@@ -3,7 +3,8 @@ name = "lceda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "JLC-Export：搜索、3D、Altium / KiCad / PADS 库导出"
+description = "嘉立创导出工作站 / JLC Export Workstation：搜索、3D、导出 Altium / KiCad / PADS"
+keywords = ["lcsc", "altium", "kicad", "easyeda", "jlcpcb"]
 
 [[bin]]
 name = "lceda"

@@ -23,8 +23,8 @@ fn main() {
 
     let mut res = winresource::WindowsResource::new();
     res.set_icon(icon.to_str().expect("icon path utf-8"));
-    res.set("FileDescription", "JLC-Export");
-    res.set("ProductName", "JLC-Export");
+    res.set("FileDescription", "嘉立创导出工作站 / JLC Export Workstation");
+    res.set("ProductName", "JLC Export Workstation");
     res.set("OriginalFilename", "lceda.exe");
     res.set("LegalCopyright", "Copyright (c) 2026 LZJ-I");
     if let Err(e) = res.compile() {

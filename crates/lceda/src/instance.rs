@@ -151,12 +151,10 @@ fn activate_existing_window() {
         fn IsIconic(hwnd: *mut std::ffi::c_void) -> i32;
     }
     const SW_RESTORE: i32 = 9;
-    let title: Vec<u16> = "JLC-Export\0".encode_utf16().collect();
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
-        if hwnd.is_null() {
+        let Some(hwnd) = find_app_window() else {
             return;
-        }
+        };
         if IsIconic(hwnd) != 0 {
             ShowWindow(hwnd, SW_RESTORE);
         }
@@ -166,6 +164,26 @@ fn activate_existing_window() {
 
 #[cfg(not(windows))]
 fn activate_existing_window() {}
+
+#[cfg(windows)]
+fn find_app_window() -> Option<*mut std::ffi::c_void> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(cls: *const u16, title: *const u16) -> *mut std::ffi::c_void;
+    }
+    for title in [
+        "嘉立创导出工作站",
+        "JLC Export Workstation",
+        "JLC-Export",
+    ] {
+        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+        if !hwnd.is_null() {
+            return Some(hwnd);
+        }
+    }
+    None
+}
 
 /// Win11 用 DWM 圆角；失败时用窗口区域裁成 12px 圆角。最大化时去掉圆角。
 pub fn apply_window_rounding(maximized: bool, logical_w: f32) -> bool {
@@ -216,12 +234,10 @@ fn apply_window_rounding_win(maximized: bool, logical_w: f32) -> bool {
     const DWMWCP_DONOTROUND: u32 = 1;
     const CORNER: i32 = 12;
 
-    let title: Vec<u16> = "JLC-Export\0".encode_utf16().collect();
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
-        if hwnd.is_null() {
+        let Some(hwnd) = find_app_window() else {
             return false;
-        }
+        };
         let pref = if maximized {
             DWMWCP_DONOTROUND
         } else {

@@ -2,15 +2,24 @@
 
 # JLC-Export
 
+搜索立创器件，预览 3D，导出 Altium / KiCad / PADS 库和 STEP。
+Search LCSC parts, preview 3D, and export Altium / KiCad / PADS libraries plus STEP.
+
 [![Stars](https://img.shields.io/github/stars/LZJ-I/JLC-Export?style=social)](https://github.com/LZJ-I/JLC-Export)
 
-用 Rust 编写。按型号或立创编号搜索器件，下载 STEP / OBJ，导出 Altium（`.SchLib` / `.PcbLib`）、KiCad（`.kicad_sym` / `.pretty`）和经典 PADS Logic / Layout ASCII（`.c` / `.d` / `.p`）。界面支持中文 / 英文。
+位号写入 Designator，型号写入 Comment，Description 可勾选规格和编号。
+Designator gets the prefix, Comment the MPN, and Description a configurable template.
+
+也可搜：立创EDA 导出 Altium、嘉立创封装库、LCSC 转 KiCad。
+Also try: LCSC to Altium, JLCPCB library, EasyEDA SchLib / PcbLib.
 
 如果这个项目对你有帮助，欢迎点一下右上角的 [⭐ Star](https://github.com/LZJ-I/JLC-Export)。
+If this project helps you, please [⭐ Star](https://github.com/LZJ-I/JLC-Export) it.
 
-![搜索 ESP32-S3-WROOM-1-N16R8 并悬停放大预览图](docs/demo.gif)
+![搜索、3D、位号 Description、导出 / Search, 3D, Designator, export](docs/demo.gif)
 
 许可为 [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/)。
+Licensed under [CC BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/).
 
 ## 安装
 

@@ -174,26 +174,34 @@ struct PreviewData {
 pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(ICON_PNG).ok();
     let prefs = crate::prefs::load();
+    let shooting = env::var("LCEDA_SHOT").is_ok();
+    let (win_w, win_h) = if shooting {
+        (1180.0, 760.0)
+    } else {
+        (prefs.win_w, prefs.win_h)
+    };
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(i18n::t(lang, "app_title"))
-        .with_inner_size([prefs.win_w, prefs.win_h])
+        .with_inner_size([win_w, win_h])
         .with_min_inner_size([960.0, 620.0])
         .with_transparent(true)
         .with_decorations(false);
-    if prefs.always_on_top {
+    if !shooting && prefs.always_on_top {
         viewport = viewport.with_always_on_top();
     }
-    if prefs.win_max {
+    if !shooting && prefs.win_max {
         viewport = viewport.with_maximized(true);
-    } else if let (Some(x), Some(y)) = (prefs.win_x, prefs.win_y) {
-        viewport = viewport.with_position([x, y]);
+    } else if !shooting {
+        if let (Some(x), Some(y)) = (prefs.win_x, prefs.win_y) {
+            viewport = viewport.with_position([x, y]);
+        }
     }
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions {
         viewport,
-        centered: prefs.win_x.is_none() || prefs.win_y.is_none(),
+        centered: shooting || prefs.win_x.is_none() || prefs.win_y.is_none(),
         ..Default::default()
     };
     eframe::run_native(
@@ -330,17 +338,28 @@ impl App {
             mesh: None,
             mesh_tex: None,
             mesh_note: None,
-            yaw: 0.7,
-            pitch: 0.55,
-            zoom: 1.0,
+            yaw: env_f32("LCEDA_YAW").unwrap_or(0.7),
+            pitch: env_f32("LCEDA_PITCH").unwrap_or(0.55),
+            zoom: env_f32("LCEDA_ZOOM").unwrap_or(1.0),
             alert: None,
-            page: if !prefs.hide_welcome && !skip_update {
-                NavPage::Settings
-            } else {
-                NavPage::Search
+            page: match env::var("LCEDA_PAGE").as_deref() {
+                Ok("settings") => NavPage::Settings,
+                Ok("about") => NavPage::About,
+                _ if !prefs.hide_welcome && !skip_update => NavPage::Settings,
+                _ => NavPage::Search,
             },
-            settings_tab: prefs.settings_tab,
-            export_section: prefs.export_section,
+            settings_tab: match env::var("LCEDA_SETTINGS_TAB").as_deref() {
+                Ok("export") => SettingsTab::Export,
+                Ok("appearance") => SettingsTab::Appearance,
+                Ok("general") => SettingsTab::General,
+                _ => prefs.settings_tab,
+            },
+            export_section: match env::var("LCEDA_EXPORT_SEC").as_deref() {
+                Ok("description") => ExportSection::Description,
+                Ok("schematic") => ExportSection::Schematic,
+                Ok("format") => ExportSection::Format,
+                _ => prefs.export_section,
+            },
             theme: env::var("LCEDA_THEME")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -422,7 +441,7 @@ impl App {
             desc_fields: prefs.desc_fields.clone(),
             show_detail: false,
             detail_query: String::new(),
-            desc_preview_kw: String::new(),
+            desc_preview_kw: env::var("LCEDA_DESC_PREVIEW").unwrap_or_default(),
             desc_preview_item: None,
             desc_preview_job: None,
             desc_preview_note: None,
@@ -3791,6 +3810,14 @@ impl App {
         if self.shot_path.is_none() {
             return;
         }
+        self.apply_shot_camera();
+        if !self.desc_preview_kw.trim().is_empty()
+            && self.desc_preview_item.is_none()
+            && self.desc_preview_job.is_none()
+            && self.desc_preview_note.is_none()
+        {
+            self.start_desc_preview();
+        }
         self.frame = self.frame.saturating_add(1);
         ctx.request_repaint();
 
@@ -3812,13 +3839,28 @@ impl App {
             }
         }
 
-        let jobs_idle = self.search.is_none() && self.preview.is_none() && self.job.is_none();
-        let preview_ready = self.mesh.is_some() || self.mesh_note.is_some() || self.image_tex.is_some();
-        let waited = if self.keyword.is_empty() {
-            self.frame >= 12
-        } else {
-            self.frame >= 40 && jobs_idle && preview_ready
-        };
+        let jobs_idle = self.search.is_none()
+            && self.preview.is_none()
+            && self.job.is_none()
+            && self.desc_preview_job.is_none();
+        let preview_ready =
+            self.mesh.is_some() || self.mesh_note.is_some() || self.image_tex.is_some();
+        let want_batch = env::var("LCEDA_BATCH").is_ok();
+        let want_detail = env::var("LCEDA_DETAIL").is_ok();
+        if jobs_idle && self.selected_item().is_some() {
+            if want_batch && !self.show_batch {
+                self.show_batch = true;
+            }
+            if want_detail && !self.show_detail {
+                self.show_detail = true;
+            }
+        }
+        let desc_ready = self.desc_preview_kw.trim().is_empty()
+            || self.desc_preview_item.is_some()
+            || self.desc_preview_note.is_some();
+        let search_ready = self.keyword.is_empty() || (jobs_idle && preview_ready);
+        let dialog_ready = (!want_batch || self.show_batch) && (!want_detail || self.show_detail);
+        let waited = self.frame >= 40 && jobs_idle && desc_ready && search_ready && dialog_ready;
         if waited {
             self.shot_settle = self.shot_settle.saturating_add(1);
         }
@@ -3826,9 +3868,21 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             self.shot_requested = true;
         }
-        if self.frame > 1800 {
+        if self.frame > 3600 {
             eprintln!("LCEDA_SHOT timed out");
             std::process::exit(3);
+        }
+    }
+
+    fn apply_shot_camera(&mut self) {
+        if let Some(v) = env_f32("LCEDA_YAW") {
+            self.yaw = v;
+        }
+        if let Some(v) = env_f32("LCEDA_PITCH") {
+            self.pitch = v;
+        }
+        if let Some(v) = env_f32("LCEDA_ZOOM") {
+            self.zoom = v;
         }
     }
 }
@@ -4389,6 +4443,10 @@ fn format_paths(paths: &lceda_core::models::DownloadPaths, out_dir: &Path) -> St
         lines.push(format!("封装 JSON  {}", short_name(p)));
     }
     lines.join("\n")
+}
+
+fn env_f32(key: &str) -> Option<f32> {
+    env::var(key).ok()?.parse().ok()
 }
 
 fn default_out_dir() -> String {

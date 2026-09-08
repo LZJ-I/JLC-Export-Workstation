@@ -3,7 +3,8 @@ name = "lceda-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "立创 / LCSC 器件搜索、3D 下载与 Altium / KiCad / PADS 库写出"
+description = "立创商城 / LCSC / EasyEDA 器件搜索、3D 与 Altium SchLib / KiCad / PADS 库写出"
+keywords = ["lcsc", "altium", "kicad", "easyeda", "jlcpcb"]
 
 [dependencies]
 cfb.workspace = true
