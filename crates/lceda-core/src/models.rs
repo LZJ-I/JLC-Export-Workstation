@@ -12,6 +12,13 @@ pub struct SearchItem {
 }
 
 impl SearchItem {
+    pub fn manufacturer_label(&self) -> String {
+        if !self.manufacturer.is_empty() {
+            return self.manufacturer.clone();
+        }
+        manufacturer_from_raw(&self.raw)
+    }
+
     pub fn name(&self) -> &str {
         if !self.display_title.is_empty() {
             &self.display_title
@@ -166,6 +173,29 @@ fn nested_uuid(raw: &Value, key: &str) -> Option<String> {
         .and_then(|v| v.get("uuid"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+pub fn manufacturer_from_raw(raw: &Value) -> String {
+    const ATTR_KEYS: &[&str] = &[
+        "Manufacturer",
+        "manufacturer",
+        "Brand",
+        "brand",
+        "厂牌",
+        "品牌",
+        "Manufacturer Name",
+    ];
+    for key in ATTR_KEYS {
+        if let Some(s) = attr_string(raw, key) {
+            return s;
+        }
+    }
+    for key in ["manufacturer", "brand"] {
+        if let Some(s) = string_or_num(raw, key) {
+            return s;
+        }
+    }
+    String::new()
 }
 
 fn attr_string(raw: &Value, key: &str) -> Option<String> {
@@ -521,6 +551,16 @@ mod tests {
                 .as_deref(),
             Some("3198300")
         );
+    }
+
+    #[test]
+    fn manufacturer_from_raw_reads_brand_and_cjk() {
+        let brand = serde_json::json!({"attributes": {"Brand": "STC"}});
+        assert_eq!(manufacturer_from_raw(&brand), "STC");
+        let cjk = serde_json::json!({"attributes": {"厂牌": "意法半导体"}});
+        assert_eq!(manufacturer_from_raw(&cjk), "意法半导体");
+        let top = serde_json::json!({"manufacturer": "TI"});
+        assert_eq!(manufacturer_from_raw(&top), "TI");
     }
 
     #[test]

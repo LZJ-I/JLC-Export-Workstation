@@ -96,12 +96,7 @@ impl LcedaClient {
                 index: idx + 1,
                 display_title: string_field(raw, "display_title"),
                 title: string_field(raw, "title"),
-                manufacturer: raw
-                    .get("attributes")
-                    .and_then(|a| a.get("Manufacturer"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                manufacturer: crate::models::manufacturer_from_raw(raw),
                 model_uuid: raw
                     .get("attributes")
                     .and_then(|a| a.get("3D Model"))
