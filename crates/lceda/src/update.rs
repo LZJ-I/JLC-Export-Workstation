@@ -193,9 +193,58 @@ pub fn download_and_apply(info: &UpdateInfo, progress: Option<ProgressHandle>) -
 }
 
 pub fn cleanup_old_binary() {
-    if let Ok(cur) = std::env::current_exe() {
-        let _ = fs::remove_file(old_path(&cur));
+    if remove_leftover_update_files() {
+        return;
     }
+    // Windows 上旧进程刚退出时 .old 还被占用，启动时删一次经常失败。
+    std::thread::spawn(|| {
+        for i in 1..=40 {
+            std::thread::sleep(Duration::from_millis(150 * i.min(8)));
+            if remove_leftover_update_files() {
+                return;
+            }
+        }
+    });
+}
+
+fn remove_leftover_update_files() -> bool {
+    let Ok(cur) = std::env::current_exe() else {
+        return true;
+    };
+    let mut all_gone = true;
+    for path in leftover_update_paths(&cur) {
+        if !path.exists() {
+            continue;
+        }
+        if fs::remove_file(&path).is_err() {
+            all_gone = false;
+        }
+    }
+    all_gone
+}
+
+fn leftover_update_paths(current: &Path) -> Vec<PathBuf> {
+    let name = current
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let stem = current
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let mut paths = vec![
+        current.with_file_name(format!("{name}.old")),
+        current.with_file_name(format!("{name}.new")),
+    ];
+    if let Some(parent) = current.parent() {
+        if !stem.is_empty() {
+            paths.push(parent.join(format!("{stem}.old.exe")));
+            paths.push(parent.join(format!("{stem}.old")));
+        }
+    }
+    paths
 }
 
 fn set_progress(
@@ -290,7 +339,7 @@ fn old_path(current: &Path) -> PathBuf {
     current.with_file_name(format!("{name}.old"))
 }
 
-fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
     fetch_bytes_with_progress(url, &None)
 }
 
@@ -357,6 +406,18 @@ mod tests {
         assert!(parse_version("0.5.1").unwrap() > parse_version("0.5.0").unwrap());
         assert!(parse_version("0.5.2").unwrap() > parse_version("0.5.1").unwrap());
         assert!(parse_version("0.5.3").unwrap() > parse_version("0.5.2").unwrap());
+    }
+
+    #[test]
+    fn leftover_paths_cover_windows_old_names() {
+        let cur = PathBuf::from("/app/lceda.exe");
+        let names: Vec<String> = leftover_update_paths(&cur)
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"lceda.exe.old".into()));
+        assert!(names.contains(&"lceda.exe.new".into()));
+        assert!(names.contains(&"lceda.old.exe".into()));
     }
 
     #[test]
