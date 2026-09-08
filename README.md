@@ -29,24 +29,36 @@ cargo build --release -p lceda
 
 ## GUI
 
-Open `lceda.exe` (Windows) or `lceda` (Linux / macOS). Files go to `lceda-out` under your Downloads folder by default. Change the path on the right, or click **Open folder**.
+Open `lceda.exe` (Windows) or `lceda` (Linux / macOS). Files go to `lceda-out` under your Downloads folder by default. Change the path in **Settings**.
 
 Each part gets a subfolder named `MPN_LCSC_Manufacturer`. Files inside use the MPN.
 
-1. Type an MPN (e.g. `STM32F103C8T6`) or LCSC id (e.g. `C8734`), then press Enter or **Search**.
-2. Select a part on the left. Photo on the top right; drag in the lower half to orbit the 3D outline.
-3. Use the buttons on the right:
+The left sidebar switches pages: **Search**, **Favorites**, **Export list**, **Sponsor**, **Settings**, **About**. The title bar is drawn by the app (drag to move, double-click to maximize). Window size, splitters, and theme are remembered.
+
+1. Type an MPN (e.g. `STM32F103C8T6`) or LCSC id (e.g. `C8734`), then press Enter or **Search**. Double-click a row to add it to the export list.
+2. Select a part. Photo on the top right; drag in the lower half to orbit the 3D outline. Drag the splitters to resize the panes.
+3. Use the buttons on the right. **Export** always opens a checklist first — nothing is written until you confirm:
    - **Download STEP / OBJ**: 3D models
    - **Export Altium**: `.SchLib` / `.PcbLib` (EasyEDA JSON is kept too)
    - **Export KiCad**: `.kicad_sym` and `.pretty` (writes `.3dshapes` and a footprint model ref when a STEP exists)
    - **Export PADS**: `.c` schematic decal, `.d` PCB decal, `.p` part type (classic Logic / Layout; not PADS Professional / Xpedition Central Library)
    - **Datasheet**: PDF. LCSC often gives an HTML page; the app pulls the real PDF from it
    - **Open LCSC**: Chinese product page (`item.szlcsc.com`)
-   - **Batch file…**: tick the formats you want, then pick a text file, one id or keyword per line
 
 Dimmed buttons mean this part has no matching asset. Click anyway for a notice; no empty folder is created.
 
-**Settings** (top right) controls whether Altium export embeds STEP in the PcbLib, whether KiCad export writes `.3dshapes`, and whether footprints are renamed to the part number. 3D options default on (a missing model is skipped). Footprint names stay as LCSC left them unless you turn renaming on.
+**Favorites** holds categories (right-click to create / rename / import / export / delete). **Export list** is a queue you can import, export, or clear.
+
+**Settings** controls language, appearance, the save folder, which boxes are pre-ticked on Export, 3D attach options, footprint renaming, batch merge, and **schematic colors** for Altium `.SchLib`:
+
+- **Altium classic** (default): maroon body and pins (`COLOR=128`), blue designator / comment, black pin text — the stock Altium / Protel library look
+- **LCSC / EasyEDA**: blue outline, red pins (the old JLC-Export default)
+- **Black & white**: for print / IEEE-style sheets
+- **Custom**: pick each color; shown as a live preview
+
+3D options default on (a missing model is skipped). Footprint names stay as LCSC left them unless you turn renaming on.
+
+**Sponsor** loads QR codes from the shared [LZJ-I/sponsor](https://github.com/LZJ-I/sponsor) repo. GitHub’s funding link points there only.
 
 Exporting Altium / KiCad / PADS also keeps EasyEDA JSON for inspection.
 
@@ -71,13 +83,14 @@ lceda get C2040 --step --ad --kicad --pads -o ./out
 lceda get C2040 --kicad --no-kicad-3d -o ./out
 lceda get C2040 --ad --no-ad-3d -o ./out
 lceda get C2040 --ad --rename-footprint -o ./out
+lceda get C2040 --ad --sch-color easyeda -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out
 lceda --lang zh gui
 ```
 
-`batch` uses the same file format; CLI flags (`--ad`, `--kicad`, `--pads`, …) pick the types.
+`batch` uses the same file format; CLI flags (`--ad`, `--kicad`, `--pads`, …) pick the types. `--sch-color` accepts `altium` (default), `easyeda`, or `mono`. The GUI custom palette is used when the CLI omits the flag and Settings is set to Custom.
 
 ## Notes
 
