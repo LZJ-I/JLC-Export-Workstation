@@ -345,6 +345,9 @@ impl App {
             page: match env::var("LCEDA_PAGE").as_deref() {
                 Ok("settings") => NavPage::Settings,
                 Ok("about") => NavPage::About,
+                Ok("favorites") => NavPage::Favorites,
+                Ok("queue") => NavPage::Queue,
+                Ok("sponsor") => NavPage::Sponsor,
                 _ if !prefs.hide_welcome && !skip_update => NavPage::Settings,
                 _ => NavPage::Search,
             },
@@ -954,9 +957,8 @@ impl App {
             let path_w = ui.available_width();
             let path = ui.add_sized(
                 egui::vec2(path_w, 28.0),
-                egui::TextEdit::singleline(&mut self.out_dir)
-                    .desired_width(path_w)
-                    .hint_text(i18n::t(lang, "output_hint")),
+                theme::edit_single(&mut self.out_dir, i18n::t(lang, "output_hint"))
+                    .desired_width(path_w),
             );
             if path.lost_focus() {
                 persist = true;
@@ -3407,8 +3409,7 @@ impl App {
             }
             ui.add_sized(
                 egui::vec2(ui.available_width(), 30.0),
-                egui::TextEdit::singleline(&mut self.new_cat_name)
-                    .hint_text(i18n::t(lang, "cat_name")),
+                theme::edit_single(&mut self.new_cat_name, i18n::t(lang, "cat_name")),
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {

@@ -8,7 +8,7 @@ use std::cell::Cell;
 
 pub const ACCENT: Color32 = Color32::from_rgb(0, 122, 255);
 pub const LABEL: Color32 = Color32::from_rgb(29, 29, 31);
-pub const SECONDARY: Color32 = Color32::from_rgb(134, 134, 139);
+pub const SECONDARY: Color32 = Color32::from_rgb(90, 90, 95);
 pub const WINDOW_BG: Color32 = Color32::from_rgb(242, 242, 247);
 pub const WELL: Color32 = Color32::from_rgb(236, 236, 241);
 
@@ -68,9 +68,17 @@ pub fn label() -> Color32 {
 }
 pub fn secondary() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(174, 174, 178)
+        Color32::from_rgb(188, 188, 192)
     } else {
         SECONDARY
+    }
+}
+
+pub fn disabled_text() -> Color32 {
+    if is_dark() {
+        Color32::from_rgb(174, 174, 178)
+    } else {
+        Color32::from_rgb(99, 99, 102)
     }
 }
 
@@ -95,8 +103,11 @@ pub fn apply_visuals(ctx: &egui::Context, dark: bool) {
     };
     visuals.widgets.active.bg_fill = ACCENT;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, label());
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, label());
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, label());
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, label());
+    visuals.weak_text_color = Some(secondary());
     visuals.widgets.inactive.corner_radius = CornerRadius::same(10);
     visuals.widgets.hovered.corner_radius = CornerRadius::same(10);
     visuals.widgets.active.corner_radius = CornerRadius::same(10);
@@ -336,7 +347,7 @@ pub fn action_button(
                 Color32::from_rgb(236, 236, 240)
             },
             hairline(),
-            Color32::from_rgb(174, 174, 178),
+            disabled_text(),
         )
     } else if filled {
         (ACCENT, ACCENT, Color32::WHITE)
@@ -389,6 +400,12 @@ pub fn action_button(
     resp
 }
 
+pub fn edit_single<'a>(text: &'a mut String, hint: &str) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .text_color(label())
+        .hint_text(egui::RichText::new(hint).color(secondary()))
+}
+
 pub fn search_field(
     ui: &mut egui::Ui,
     text: &mut String,
@@ -398,9 +415,8 @@ pub fn search_field(
 ) -> egui::Response {
     ui.add_sized(
         size,
-        egui::TextEdit::singleline(text)
+        edit_single(text, hint)
             .id(egui::Id::new(id))
-            .hint_text(hint)
             .vertical_align(egui::Align::Center)
             .margin(egui::Margin {
                 left: 10,
