@@ -10,7 +10,7 @@ use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use eframe::egui_glow::glow;
 use lceda_core::client::LcedaClient;
-use lceda_core::altium::{SchColorScheme, SchColors};
+use lceda_core::altium::{PIN_FONT_SIZE_MAX, PIN_FONT_SIZE_MIN, SchColorScheme, SchColors};
 use lceda_core::export::{ExportRequest, export};
 use lceda_core::mesh::{self, Mesh};
 use lceda_core::models::SearchItem;
@@ -1004,6 +1004,45 @@ impl App {
                         i18n::t(lang, "sch_color_comment"),
                         &mut custom.comment,
                     );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "sch_color_pin_size"))
+                            .color(theme::label())
+                            .size(12.0),
+                    );
+                    let mut size = custom.clamped_pin_font_size();
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut size)
+                            .range(PIN_FONT_SIZE_MIN..=PIN_FONT_SIZE_MAX)
+                            .suffix(" pt")
+                            .speed(0.2),
+                    );
+                    if resp.changed() {
+                        custom.pin_font_size = size;
+                        dirty = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "sch_color_pin_size_hint"))
+                            .color(theme::secondary())
+                            .size(11.0),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.small_button(i18n::t(lang, "sch_color_apply_altium")).clicked() {
+                        custom = SchColors::altium_classic();
+                        dirty = true;
+                    }
+                    if ui.small_button(i18n::t(lang, "sch_color_apply_easyeda")).clicked() {
+                        custom = SchColors::easyeda();
+                        dirty = true;
+                    }
+                    if ui.small_button(i18n::t(lang, "sch_color_apply_mono")).clicked() {
+                        custom = SchColors::mono();
+                        dirty = true;
+                    }
                 });
                 if dirty {
                     self.sch_custom = custom;
@@ -3500,13 +3539,21 @@ fn sch_color_row(ui: &mut egui::Ui, label: &str, color: &mut i32) -> bool {
             changed = true;
         }
         ui.label(egui::RichText::new(label).color(theme::label()).size(12.0));
+        ui.label(
+            egui::RichText::new(SchColors::as_hex(*color))
+                .color(theme::secondary())
+                .size(11.0)
+                .monospace(),
+        );
     });
     changed
 }
 
 fn sch_color_preview(ui: &mut egui::Ui, colors: SchColors) {
     let w = ui.available_width().max(200.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 148.0), egui::Sense::hover());
+    let pin_pt = colors.clamped_pin_font_size() as f32;
+    let h = (148.0 + (pin_pt - 7.0) * 3.0).clamp(148.0, 188.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 8.0, theme::well());
     p.rect_stroke(
@@ -3525,7 +3572,7 @@ fn sch_color_preview(ui: &mut egui::Ui, colors: SchColors) {
     );
     let left = ["V+", "S", "D+", "D-", "GND"];
     let right = ["#OE", "HSD2+", "HSD2-", "HSD1+", "HSD1-"];
-    let font = egui::FontId::proportional(9.0);
+    let font = egui::FontId::proportional(colors.clamped_pin_font_size() as f32);
     for i in 0..5 {
         let y = body.top() + 12.0 + i as f32 * 13.0;
         let ls = colors.pin_style("", left[i]);

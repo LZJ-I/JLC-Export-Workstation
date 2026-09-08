@@ -44,9 +44,7 @@ pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchCol
     for (sym, key) in symbols.iter().zip(keys.iter()) {
         cfb.storage(key)?;
         cfb.stream(&format!("{key}/Data"), &component_data(sym, key, colors))?;
-        // 立创官方：AD 不吃 FileHeader 的 FONT COLORn，普通脚蓝字要靠 PinTextData。
-        // Altium 经典不写，避免再出现黑字变绿。
-        if let Some(text) = pin_text_data(sym, colors) {
+        if let Some(text) = pin_text_data_stream(sym, colors) {
             cfb.stream(&format!("{key}/PinTextData"), &text)?;
         }
     }
@@ -59,11 +57,8 @@ fn file_header_many(names: &[String], colors: SchColors) -> Vec<u8> {
     let n = names.len();
     let extra = colors.pin_text_fonts();
     let font_count = 1 + extra.len();
-    let (pin_face, pin_size) = if colors == SchColors::easyeda() {
-        ("Verdana", 7)
-    } else {
-        ("Times New Roman", 10)
-    };
+    let pin_face = colors.pin_font_name();
+    let pin_size = colors.clamped_pin_font_size();
     let mut raw = format!(
         "|HEADER=Protel for Windows - Schematic Library Editor Binary File Version 5.0\
          |WEIGHT={n}|MINORVERSION=2|UNIQUEID={uid}|FONTIDCOUNT={font_count}\
@@ -263,55 +258,71 @@ fn write_named(w: &mut BinWriter, pairs: &[(String, String)]) {
 
 fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin, colors: SchColors) {
     let style = colors.pin_style(&pin.pin_type, &pin.name);
-    // 立创官方一律二进制管脚（线色），蓝字交给 PinTextData。
-    // Altium 经典仍用 ASCII + 黑体，不写 PinTextData。
-    if colors == SchColors::easyeda() || !style.uses_local_font() {
+    // 立创官方：线/字分色靠 PinTextData（二进制 COLOR 只管脚线）。
+    // Altium 经典 / 自定义：ASCII RECORD=2 + FONT 表（嘉立创官方 SchDoc 路径）。
+    if colors.follows_easyeda_pins() {
         write_pin_binary(w, pin, style.line);
-    } else {
+    } else if style.uses_local_font() {
         write_pin_ascii(w, pin, colors, style);
+    } else {
+        write_pin_binary(w, pin, style.line);
     }
 }
 
-/// 仅立创官方：名/号颜色跟线不同时写本地字体（官方 SVG 普通脚蓝字）。
-fn pin_text_data(symbol: &SymbolIr, colors: SchColors) -> Option<Vec<u8>> {
-    if colors != SchColors::easyeda() || symbol.pins.is_empty() {
+/// AD 真实 SchLib：`|HEADER=PinTextData|Weight=N` + 按管脚序号索引的 zlib 条目。
+/// BOTH 格式 14 字节：`0x10 + font_id(i16) + COLORREF(u32)` × 名/号。
+fn pin_text_data_stream(symbol: &SymbolIr, colors: SchColors) -> Option<Vec<u8>> {
+    if symbol.pins.is_empty() {
         return None;
     }
-    let styles: Vec<_> = symbol
-        .pins
-        .iter()
-        .map(|p| colors.pin_style(&p.pin_type, &p.name))
-        .collect();
-    if !styles.iter().any(|s| s.uses_local_font()) {
+    let easy = colors.follows_easyeda_pins();
+    let mut entries = Vec::new();
+    for (i, pin) in symbol.pins.iter().enumerate() {
+        let style = colors.pin_style(&pin.pin_type, &pin.name);
+        // 立创：所有脚都写，电源/地也用同一套 Verdana 字号。
+        // 其它方案：仅二进制管脚写，ASCII 管脚靠 FONT 表。
+        if !easy && style.uses_local_font() {
+            continue;
+        }
+        entries.push((
+            i,
+            colors.font_id_for(style.name) as i16,
+            style.name,
+            colors.font_id_for(style.number) as i16,
+            style.number,
+        ));
+    }
+    if entries.is_empty() {
         return None;
     }
+    Some(encode_pin_text_data(&entries))
+}
 
+fn encode_pin_text_data(entries: &[(usize, i16, i32, i16, i32)]) -> Vec<u8> {
     let mut w = BinWriter::new();
-    w.write_params(&[
-        ("HEADER", "PinTextData".into()),
-        ("Weight", symbol.pins.len().to_string()),
-    ]);
-    for (i, style) in styles.iter().enumerate() {
-        let mut payload = BinWriter::new();
-        let mut pairs: Vec<(&str, String)> = Vec::new();
-        if style.name != style.line {
-            let font = colors.font_id_for(style.name);
-            pairs.push(("NAME.FONTMODE", "1".into()));
-            pairs.push(("NAME.CUSTOMFONTID", font.to_string()));
-            pairs.push(("NAME.CUSTOMCOLOR", style.name.to_string()));
-            pairs.push(("NAME_CUSTOMFONTID", font.to_string()));
-        }
-        if style.number != style.line {
-            let font = colors.font_id_for(style.number);
-            pairs.push(("DESIGNATOR.FONTMODE", "1".into()));
-            pairs.push(("DESIGNATOR.CUSTOMFONTID", font.to_string()));
-            pairs.push(("DESIGNATOR.CUSTOMCOLOR", style.number.to_string()));
-            pairs.push(("DESIGNATOR_CUSTOMFONTID", font.to_string()));
-        }
-        payload.write_unicode_params(&pairs);
-        w.write_compressed_named(&i.to_string(), &payload.into_vec());
+    let header = format!("|HEADER=PinTextData|Weight={}", entries.len());
+    let header_bytes = header.as_bytes();
+    w.write_i32((header_bytes.len() + 1) as i32);
+    w.write_bytes(header_bytes);
+    w.write_u8(0);
+    for (index, name_font, name_color, des_font, des_color) in entries {
+        w.write_compressed_named(
+            &index.to_string(),
+            &pin_text_both_attrs(*name_font, *name_color, *des_font, *des_color),
+        );
     }
-    Some(w.into_vec())
+    w.into_vec()
+}
+
+fn pin_text_both_attrs(name_font: i16, name_color: i32, des_font: i16, des_color: i32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(14);
+    b.push(0x10);
+    b.extend_from_slice(&name_font.to_le_bytes());
+    b.extend_from_slice(&(name_color as u32).to_le_bytes());
+    b.push(0x10);
+    b.extend_from_slice(&des_font.to_le_bytes());
+    b.extend_from_slice(&(des_color as u32).to_le_bytes());
+    b
 }
 
 /// 线/名/号同色时走二进制管脚（立创电源/地，或黑白）。
@@ -393,4 +404,20 @@ fn dxp_num(mm: f64) -> i32 {
     (mm / 0.254).round() as i32
 }
 
-// expose normalize_angle - I'll add pub(crate) in easyeda instead of this
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pin_text_both_matches_ad_library() {
+        // TPS7A2012PDBVR.SchLib：font 2、黑字
+        assert_eq!(
+            pin_text_both_attrs(2, 0, 2, 0),
+            [0x10, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        let blue = 16_711_680i32;
+        let raw = pin_text_both_attrs(2, blue, 2, blue);
+        assert_eq!(&raw[3..7], &blue.to_le_bytes());
+        assert_eq!(&raw[10..14], &blue.to_le_bytes());
+    }
+}

@@ -15,7 +15,12 @@ pub struct SchColors {
     pub pin_number: i32,
     pub designator: i32,
     pub comment: i32,
+    /// 管脚名/号字号（Altium 点）。立创官方 7，经典 10。
+    pub pin_font_size: i32,
 }
+
+pub const PIN_FONT_SIZE_MIN: i32 = 6;
+pub const PIN_FONT_SIZE_MAX: i32 = 16;
 
 /// 单只管脚的线色、名色、号色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,10 +85,12 @@ impl SchColors {
             pin_number: Self::rgb(0, 0, 0),
             designator: Self::rgb(0, 0, 255),
             comment: Self::rgb(0, 0, 255),
+            pin_font_size: 10,
         }
     }
 
-    /// 立创商城官方符号预览（标准版 SVG），不是专业版某个蓝框主题。
+    /// 立创商城官方符号预览。普通脚线 `#880000`、字 `#0000FF`（SchLib 走 PinTextData）；
+    /// 电源整脚红、地整脚黑。外壳 `#880000`。管脚字统一 Verdana 7。
     pub const fn easyeda() -> Self {
         Self {
             body: Self::rgb(0x88, 0, 0),
@@ -92,6 +99,7 @@ impl SchColors {
             pin_number: Self::rgb(0, 0, 255),
             designator: Self::rgb(0, 0, 128),
             comment: Self::rgb(0, 0, 128),
+            pin_font_size: 7,
         }
     }
 
@@ -112,7 +120,26 @@ impl SchColors {
             pin_number: 0,
             designator: 0,
             comment: 0,
+            pin_font_size: 10,
         }
+    }
+
+    pub fn clamped_pin_font_size(self) -> i32 {
+        self.pin_font_size.clamp(PIN_FONT_SIZE_MIN, PIN_FONT_SIZE_MAX)
+    }
+
+    pub fn pin_font_name(self) -> &'static str {
+        if self.follows_easyeda_pins() {
+            "Verdana"
+        } else {
+            "Times New Roman"
+        }
+    }
+
+    /// 脚线/脚字是立创官方那套时，按电源/地分色。字号不参与比较。
+    pub fn follows_easyeda_pins(self) -> bool {
+        let e = Self::easyeda();
+        self.pin == e.pin && self.pin_name == e.pin_name && self.pin_number == e.pin_number
     }
 
     pub fn as_hex(c: i32) -> String {
@@ -135,7 +162,7 @@ impl SchColors {
 
     /// 立创官方方案按电气类型改色；其它方案用这一套固定色。
     pub fn pin_style(self, pin_type: &str, pin_name: &str) -> PinStyle {
-        if self == Self::easyeda() {
+        if self.follows_easyeda_pins() {
             return easyeda_pin_style(pin_type, pin_name);
         }
         PinStyle {
@@ -145,17 +172,19 @@ impl SchColors {
         }
     }
 
-    /// FileHeader 里 FONT2 起的管脚字颜色（顺序即 FONTID）。
+    /// FileHeader 里 FONT2 起的管脚字颜色（顺序即 FONTID）。同一字号，颜色分槽。
     pub fn pin_text_fonts(self) -> Vec<i32> {
-        if self == Self::easyeda() {
-            return vec![self.pin_name, Self::easyeda_power(), Self::easyeda_ground()];
-        }
         let mut fonts = Vec::new();
-        if self.pin_name != self.pin {
-            fonts.push(self.pin_name);
-        }
-        if self.pin_number != self.pin && self.pin_number != self.pin_name {
-            fonts.push(self.pin_number);
+        let mut push = |c: i32| {
+            if !fonts.contains(&c) {
+                fonts.push(c);
+            }
+        };
+        push(self.pin_name);
+        push(self.pin_number);
+        if self.follows_easyeda_pins() {
+            push(Self::easyeda_power());
+            push(Self::easyeda_ground());
         }
         fonts
     }
@@ -287,6 +316,8 @@ mod tests {
         assert_eq!(c.pin_number, 0);
         assert_eq!(c.designator, 16_711_680);
         assert_eq!(c.comment, 16_711_680);
+        assert_eq!(c.pin_font_size, 10);
+        assert_eq!(c.pin_font_name(), "Times New Roman");
         assert_eq!(SchColors::to_rgb(128), [128, 0, 0]);
         assert_eq!(SchColors::to_rgb(16_711_680), [0, 0, 255]);
     }
@@ -301,13 +332,31 @@ mod tests {
         assert_eq!(SchColors::as_hex(c.body), "#880000");
         assert_eq!(SchColors::as_hex(c.pin_name), "#0000FF");
         assert_eq!(SchColors::as_hex(SchColors::easyeda_power()), "#FF0000");
+        assert_eq!(c.pin_font_size, 7);
+        assert_eq!(c.pin_font_name(), "Verdana");
+        assert_eq!(
+            c.pin_text_fonts(),
+            vec![16_711_680, 255, 0],
+            "蓝 / 电源红 / 地黑，同一字号"
+        );
+        assert!(c.pin_style("", "S").uses_local_font());
+        let mut sized = c;
+        sized.pin_font_size = 12;
+        assert!(sized.follows_easyeda_pins());
+        assert_eq!(sized.clamped_pin_font_size(), 12);
     }
 
     #[test]
     fn official_svg_only_power_and_ground_differ() {
         let sig = easyeda_pin_style("", "S");
-        assert_eq!(sig.line, 0x88);
-        assert_eq!(sig.name, 16_711_680);
+        assert_eq!(
+            sig,
+            PinStyle {
+                line: 0x88,
+                name: 16_711_680,
+                number: 16_711_680,
+            }
+        );
         assert_eq!(easyeda_pin_style("IN", "GPIO0").name, 16_711_680);
         assert_eq!(easyeda_pin_style("OUT", "TXD").name, 16_711_680);
         assert_eq!(easyeda_pin_style("BI", "D+").name, 16_711_680);

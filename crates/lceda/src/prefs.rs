@@ -179,6 +179,12 @@ fn json_sch_colors(v: Option<&Value>) -> SchColors {
     if let Some(n) = hex_or_int(v.get("comment")) {
         c.comment = n;
     }
+    if let Some(n) = v.get("pin_font_size").and_then(Value::as_i64) {
+        c.pin_font_size = (n as i32).clamp(
+            lceda_core::altium::PIN_FONT_SIZE_MIN,
+            lceda_core::altium::PIN_FONT_SIZE_MAX,
+        );
+    }
     c
 }
 
@@ -228,6 +234,7 @@ pub fn save(prefs: &Prefs) {
             "pin_number": SchColors::as_hex(prefs.sch_custom.pin_number),
             "designator": SchColors::as_hex(prefs.sch_custom.designator),
             "comment": SchColors::as_hex(prefs.sch_custom.comment),
+            "pin_font_size": prefs.sch_custom.clamped_pin_font_size(),
         },
     });
     if let Some(f) = prefs.photo_frac {

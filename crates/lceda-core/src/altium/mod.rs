@@ -3,7 +3,9 @@ pub mod pcblib;
 pub mod sch_color;
 pub mod schlib;
 
-pub use sch_color::{PinStyle, SchColorScheme, SchColors};
+pub use sch_color::{
+    PIN_FONT_SIZE_MAX, PIN_FONT_SIZE_MIN, PinStyle, SchColorScheme, SchColors,
+};
 
 use crate::error::Result;
 use crate::ir::{FootprintIr, SymbolIr};
@@ -142,24 +144,35 @@ mod tests {
             text.contains("Color=136") || text.contains("COLOR=136"),
             "立创官方外壳 #880000=136, got {text}"
         );
-        assert!(data.windows(4).any(|w| w == 136i32.to_le_bytes()), "signal pin line #880000");
-        assert!(cfb.exists("RES/PinTextData"), "普通脚蓝字走 PinTextData");
+        assert!(
+            data.windows(4).any(|w| w == 136i32.to_le_bytes()),
+            "普通脚线 COLOR 暗红 136"
+        );
+        assert!(
+            cfb.exists("RES/PinTextData"),
+            "立创官方普通脚靠 PinTextData 写蓝字"
+        );
         let mut pin_text = Vec::new();
         cfb.open_stream("RES/PinTextData")
             .unwrap()
             .read_to_end(&mut pin_text)
             .unwrap();
         let decoded = decode_pin_text_data(&pin_text);
-        assert!(
-            decoded.iter().any(|s| s.contains("NAME.CUSTOMCOLOR=16711680")),
-            "官方普通脚字蓝: {decoded:?}"
-        );
+        assert_eq!(decoded.len(), 1, "{decoded:?}");
+        assert_eq!(decoded[0].0, "0");
+        assert_eq!(decoded[0].1, 16_711_680, "name blue");
+        assert_eq!(decoded[0].2, 16_711_680, "designator blue");
         let mut hdr = Vec::new();
         cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
         let hdr = String::from_utf8_lossy(&hdr);
+        assert!(hdr.contains("FONTIDCOUNT=4"), "{hdr}");
         assert!(hdr.contains("FONTNAME2=Verdana"), "{hdr}");
         assert!(hdr.contains("SIZE2=7"), "{hdr}");
-        assert!(hdr.contains("COLOR2=16711680"), "官方管脚字蓝: {hdr}");
+        assert!(hdr.contains("SIZE3=7"), "{hdr}");
+        assert!(hdr.contains("SIZE4=7"), "{hdr}");
+        assert!(hdr.contains("COLOR2=16711680"), "{hdr}");
+        assert!(hdr.contains("COLOR3=255"), "电源红字: {hdr}");
+        assert!(hdr.contains("COLOR4=0"), "地黑字: {hdr}");
     }
 
     #[test]
@@ -402,6 +415,37 @@ mod tests {
         assert!(text.matches("Region").count() >= 2);
     }
 
+    fn decode_pin_text_data(data: &[u8]) -> Vec<(String, i32, i32)> {
+        use flate2::read::ZlibDecoder;
+        use std::io::Read as _;
+        assert!(data.len() >= 4);
+        let header_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let header = String::from_utf8_lossy(&data[4..4 + header_len]);
+        assert!(header.contains("HEADER=PinTextData"), "{header}");
+        let mut cur = 4 + header_len;
+        let mut out = Vec::new();
+        while cur + 8 <= data.len() {
+            let rec_len = u32::from_le_bytes([data[cur], data[cur + 1], data[cur + 2], 0]) as usize;
+            let rest = &data[cur + 4..cur + 4 + rec_len];
+            assert_eq!(rest[0], 0xD0);
+            let slen = rest[1] as usize;
+            let key = String::from_utf8_lossy(&rest[2..2 + slen]).into_owned();
+            let clen = u32::from_le_bytes(rest[2 + slen..6 + slen].try_into().unwrap()) as usize;
+            let mut raw = Vec::new();
+            ZlibDecoder::new(&rest[6 + slen..6 + slen + clen])
+                .read_to_end(&mut raw)
+                .unwrap();
+            assert_eq!(raw.len(), 14, "BOTH format: {raw:?}");
+            assert_eq!(raw[0], 0x10);
+            assert_eq!(raw[7], 0x10);
+            let name = i32::from_le_bytes(raw[3..7].try_into().unwrap());
+            let des = i32::from_le_bytes(raw[10..14].try_into().unwrap());
+            out.push((key, name, des));
+            cur += 4 + rec_len;
+        }
+        out
+    }
+
     fn sample_symbol(name: &str) -> SymbolIr {
         SymbolIr {
             name: name.into(),
@@ -568,18 +612,20 @@ mod tests {
         let mut data = Vec::new();
         cfb.open_stream("U/Data").unwrap().read_to_end(&mut data).unwrap();
         assert!(data.windows(4).any(|w| w == 255i32.to_le_bytes()), "VCC red binary");
-        assert!(data.windows(4).any(|w| w == 136i32.to_le_bytes()), "TXD maroon line");
-        assert!(cfb.exists("U/PinTextData"));
+        assert!(
+            data.windows(4).any(|w| w == 136i32.to_le_bytes()),
+            "TXD line maroon binary"
+        );
         let mut pin_text = Vec::new();
         cfb.open_stream("U/PinTextData")
             .unwrap()
             .read_to_end(&mut pin_text)
             .unwrap();
         let decoded = decode_pin_text_data(&pin_text);
-        assert!(
-            decoded.iter().any(|s| s.contains("NAME.CUSTOMCOLOR=16711680")),
-            "{decoded:?}"
-        );
+        assert_eq!(decoded.len(), 3, "电源/地/信号都写 PinTextData: {decoded:?}");
+        assert_eq!(decoded[0], ("0".into(), 255, 255), "VCC 红");
+        assert_eq!(decoded[1], ("1".into(), 0, 0), "GND 黑");
+        assert_eq!(decoded[2], ("2".into(), 16_711_680, 16_711_680), "TXD 蓝");
     }
 
     #[test]
@@ -603,54 +649,23 @@ mod tests {
         let hdr = String::from_utf8_lossy(&hdr);
         assert!(hdr.contains("COLOR2=0"), "{hdr}");
         assert!(hdr.contains("COLOR3=32768"), "{hdr}");
+        assert!(hdr.contains("SIZE2=10"), "{hdr}");
     }
 
-    fn decode_pin_text_data(raw: &[u8]) -> Vec<String> {
-        use flate2::read::ZlibDecoder;
-        let mut out = Vec::new();
-        if raw.len() < 4 {
-            return out;
-        }
-        let header_len = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
-        let mut i = 4 + header_len;
-        while i + 4 <= raw.len() {
-            let size = (u32::from_le_bytes(raw[i..i + 4].try_into().unwrap()) & 0x00FF_FFFF) as usize;
-            i += 4;
-            if size == 0 || i + size > raw.len() {
-                break;
-            }
-            let block = &raw[i..i + size];
-            i += size;
-            if block.first() != Some(&0xD0) || block.len() < 3 {
-                continue;
-            }
-            let name_len = block[1] as usize;
-            let comp_off = 2 + name_len;
-            if block.len() < comp_off + 4 {
-                continue;
-            }
-            let comp_len =
-                u32::from_le_bytes(block[comp_off..comp_off + 4].try_into().unwrap()) as usize;
-            if block.len() < comp_off + 4 + comp_len {
-                continue;
-            }
-            let comp = &block[comp_off + 4..comp_off + 4 + comp_len];
-            let mut dec = ZlibDecoder::new(comp);
-            let mut payload = Vec::new();
-            if dec.read_to_end(&mut payload).is_err() || payload.len() < 4 {
-                continue;
-            }
-            let n = i32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-            if n == 0 || payload.len() < 4 + n {
-                continue;
-            }
-            let u16s: Vec<u16> = payload[4..4 + n]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            out.push(String::from_utf16_lossy(&u16s).trim_end_matches('\0').into());
-        }
-        out
+    #[test]
+    fn writes_schlib_custom_pin_font_size() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-fontsize");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("RES.SchLib");
+        let mut colors = SchColors::altium_classic();
+        colors.pin_font_size = 8;
+        write_schlib_with_colors(&path, &sample_symbol("RES"), colors).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        let hdr = String::from_utf8_lossy(&hdr);
+        assert!(hdr.contains("SIZE2=8"), "custom pin size: {hdr}");
+        assert!(hdr.contains("FONTNAME2=Times New Roman"), "{hdr}");
     }
 }
 
