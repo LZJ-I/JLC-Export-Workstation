@@ -61,6 +61,9 @@ pub enum Cmd {
         /// 用器件型号覆盖立创原来的封装名（默认保留原名）
         #[arg(long)]
         rename_footprint: bool,
+        /// 原理图颜色：altium（默认）/ easyeda / mono
+        #[arg(long = "sch-color")]
+        sch_color: Option<String>,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -92,6 +95,9 @@ pub enum Cmd {
         /// 用器件型号覆盖立创原来的封装名（默认保留原名）
         #[arg(long)]
         rename_footprint: bool,
+        /// 原理图颜色：altium（默认）/ easyeda / mono
+        #[arg(long = "sch-color")]
+        sch_color: Option<String>,
         /// 将本次批量的 AD/KiCad 合成一个库（不追加已有文件）
         #[arg(long)]
         merge: bool,
@@ -118,7 +124,10 @@ pub fn run() -> Result<i32> {
 
     match cli.cmd {
         None | Some(Cmd::Gui) => {
-            gui::run(lang)?;
+            let Some(instance) = crate::instance::acquire() else {
+                return Ok(0);
+            };
+            gui::run(lang, instance)?;
             Ok(0)
         }
         Some(Cmd::Search { keyword, limit }) => {
@@ -160,6 +169,7 @@ pub fn run() -> Result<i32> {
             no_ad_3d,
             no_kicad_3d,
             rename_footprint,
+            sch_color,
             output,
             force,
         }) => {
@@ -176,6 +186,7 @@ pub fn run() -> Result<i32> {
                 !no_ad_3d,
                 !no_kicad_3d,
                 rename_footprint,
+                sch_color.as_deref(),
                 output,
                 force,
             );
@@ -195,6 +206,7 @@ pub fn run() -> Result<i32> {
             no_ad_3d,
             no_kicad_3d,
             rename_footprint,
+            sch_color,
             merge,
             output,
             force,
@@ -217,6 +229,7 @@ pub fn run() -> Result<i32> {
                 !no_ad_3d,
                 !no_kicad_3d,
                 rename_footprint,
+                sch_color.as_deref(),
                 output,
                 force,
             );
@@ -251,9 +264,14 @@ fn build_req(
     ad_embed_3d: bool,
     kicad_attach_3d: bool,
     rename_footprint: bool,
+    sch_color: Option<&str>,
     output: PathBuf,
     force: bool,
 ) -> ExportRequest {
+    let prefs = crate::prefs::load();
+    let scheme = sch_color
+        .map(lceda_core::altium::SchColorScheme::parse)
+        .unwrap_or(prefs.sch_scheme);
     let mut req = ExportRequest {
         step,
         obj,
@@ -269,6 +287,7 @@ fn build_req(
         rename_footprint,
         merge: false,
         merge_name: "lceda".into(),
+        sch_colors: scheme.colors(prefs.sch_custom),
     };
     if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
     {

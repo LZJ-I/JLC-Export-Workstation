@@ -3,7 +3,10 @@
 mod cli;
 mod gui;
 mod i18n;
+mod instance;
+mod library;
 mod prefs;
+mod sponsor;
 mod update;
 
 fn main() {

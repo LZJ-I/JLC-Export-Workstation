@@ -1,33 +1,124 @@
 use super::preview3d::{self, GpuPreview};
-use super::theme::{self, ACCENT, LABEL, SECONDARY, WELL, WINDOW_BG};
+use super::theme::{self, ACCENT};
 use crate::i18n::{self, Lang};
+use crate::instance::InstanceGuard;
+use crate::library::{part_from_item, Library, SavedPart, UNCAT};
+use crate::prefs::ThemeMode;
+use crate::sponsor;
 use crate::update::{self, CheckResult, UpdateInfo, UpdatePhase, UpdateProgress};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use eframe::egui_glow::glow;
 use lceda_core::client::LcedaClient;
+use lceda_core::altium::{SchColorScheme, SchColors};
 use lceda_core::export::{ExportRequest, export};
 use lceda_core::mesh::{self, Mesh};
 use lceda_core::models::SearchItem;
 use poll_promise::Promise;
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
 type ExportPromise = Promise<lceda_core::Result<String>>;
 type PreviewPromise = Promise<PreviewData>;
 type UpdatePromise = Promise<CheckResult>;
 type ApplyPromise = Promise<Result<(), String>>;
+type SponsorPromise = Promise<Result<sponsor::Pack, String>>;
+type SponsorQrPromise = Promise<Result<(String, Vec<u8>), String>>;
+type ResolvePromise = Promise<Result<(String, SearchItem), String>>;
 
 const GAP: f32 = 10.0;
 const BTN_H: f32 = 32.0;
 const CARD_PAD: f32 = 12.0;
-
-const ICON_PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
+const NAV_W: f32 = 196.0;
+const NAV_COLLAPSED: f32 = 56.0;
+const PARTS_MIN: f32 = 200.0;
+const PARTS_MAX: f32 = 480.0;
+const RIGHT_MIN: f32 = 508.0;
+const PHOTO_MIN: f32 = 168.0;
+const ACTIONS_MIN: f32 = 300.0;
+const TOP_MIN: f32 = 188.0;
+const MESH_MIN: f32 = 168.0;
+const WIN_CORNER: u8 = 12;
 
 #[derive(Clone, Copy)]
+enum PartAct {
+    None,
+    Export,
+    Queue,
+    Fav,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavPage {
+    Search,
+    Favorites,
+    Queue,
+    Sponsor,
+    Settings,
+    About,
+}
+
+impl NavPage {
+    #[allow(dead_code)]
+    fn title(self, lang: Lang) -> &'static str {
+        match self {
+            Self::Search => i18n::t(lang, "search"),
+            Self::Favorites => i18n::t(lang, "favorites"),
+            Self::Queue => i18n::t(lang, "queue"),
+            Self::Sponsor => i18n::t(lang, "sponsor"),
+            Self::Settings => i18n::t(lang, "settings"),
+            Self::About => i18n::t(lang, "about"),
+        }
+    }
+}
+
+const ICON_PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
+const PAY_WECHAT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/pay/wechat.png"));
+const PAY_ALIPAY: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/pay/alipay.png"));
+const PAY_AFDIAN: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/pay/afdian.png"));
+const FLAG_CN: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/region/cn.png"));
+const FLAG_WORLD: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/region/world.png"));
+const SIDEBAR_ICON_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/sidebar.png"));
+const NAV_SEARCH_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/search.png"));
+const NAV_FAV_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/star-full.png"));
+const NAV_QUEUE_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/list-flat.png"));
+const NAV_SPONSOR_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/heart.png"));
+const NAV_SETTINGS_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/settings-gear.png"));
+const NAV_ABOUT_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/info.png"));
+
+struct PayTex {
+    wechat: TextureHandle,
+    alipay: TextureHandle,
+    afdian: TextureHandle,
+    cn: TextureHandle,
+    world: TextureHandle,
+}
+
+#[derive(Clone)]
+struct NavTex {
+    sidebar: TextureHandle,
+    search: TextureHandle,
+    fav: TextureHandle,
+    queue: TextureHandle,
+    sponsor: TextureHandle,
+    settings: TextureHandle,
+    about: TextureHandle,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct BatchOpts {
     step: bool,
     obj: bool,
@@ -73,6 +164,7 @@ impl BatchOpts {
             rename_footprint: false,
             merge: false,
             merge_name: "lceda".into(),
+            sch_colors: SchColors::default(),
         }
     }
 }
@@ -83,20 +175,29 @@ struct PreviewData {
     mesh_note: Option<String>,
 }
 
-pub fn run(lang: Lang) -> anyhow::Result<()> {
+pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(ICON_PNG).ok();
+    let prefs = crate::prefs::load();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(i18n::t(lang, "app_title"))
-        .with_inner_size([1180.0, 760.0])
+        .with_inner_size([prefs.win_w, prefs.win_h])
         .with_min_inner_size([960.0, 620.0])
-        .with_transparent(false)
-        .with_decorations(true);
+        .with_transparent(true)
+        .with_decorations(false);
+    if prefs.always_on_top {
+        viewport = viewport.with_always_on_top();
+    }
+    if prefs.win_max {
+        viewport = viewport.with_maximized(true);
+    } else if let (Some(x), Some(y)) = (prefs.win_x, prefs.win_y) {
+        viewport = viewport.with_position([x, y]);
+    }
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions {
         viewport,
-        centered: true,
+        centered: prefs.win_x.is_none() || prefs.win_y.is_none(),
         ..Default::default()
     };
     eframe::run_native(
@@ -105,7 +206,7 @@ pub fn run(lang: Lang) -> anyhow::Result<()> {
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(App::new(lang, cc.gl.clone())))
+            Ok(Box::new(App::new(lang, cc.gl.clone(), instance)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -130,12 +231,49 @@ struct App {
     pitch: f32,
     zoom: f32,
     alert: Option<String>,
-    show_about: bool,
+    page: NavPage,
+    theme: ThemeMode,
+    always_on_top: bool,
+    dark_applied: Option<bool>,
+    instance: InstanceGuard,
+    nav_expanded: bool,
+    nav_anim_w: f32,
+    brand_tex: Option<TextureHandle>,
+    nav_tex: Option<NavTex>,
+    pay_tex: Option<PayTex>,
+    sponsor_click_guard: bool,
+    lib: Library,
+    detail: Option<SearchItem>,
+    cache: HashMap<String, SearchItem>,
+    resolve: Option<ResolvePromise>,
+    fav_cat: String,
+    fav_inside: bool,
+    fav_pick: bool,
+    show_new_cat: bool,
+    show_rename_cat: bool,
+    show_import_cat: bool,
+    new_cat_name: String,
+    sponsor_job: Option<SponsorPromise>,
+    sponsor_pack: Option<sponsor::Pack>,
+    sponsor_note: Option<String>,
+    sponsor_qr_job: Option<SponsorQrPromise>,
+    sponsor_qr: Option<(String, TextureHandle)>,
+    sponsor_qr_title: String,
+    sponsor_popup: bool,
     show_welcome: bool,
     welcome_hide: bool,
     hide_welcome: bool,
-    show_settings: bool,
     show_batch: bool,
+    export_ids_pending: Option<Vec<String>>,
+    parts_width: f32,
+    photo_frac: Option<f32>,
+    top_frac: Option<f32>,
+    win_x: Option<f32>,
+    win_y: Option<f32>,
+    win_w: f32,
+    win_h: f32,
+    win_max: bool,
+    win_round_sig: Option<(i32, i32, bool)>,
     batch_opts: BatchOpts,
     about_note: Option<String>,
     gpu: Option<Arc<egui::mutex::Mutex<GpuPreview>>>,
@@ -154,10 +292,12 @@ struct App {
     kicad_attach_3d: bool,
     rename_footprint: bool,
     batch_merge: bool,
+    sch_scheme: SchColorScheme,
+    sch_custom: SchColors,
 }
 
 impl App {
-    fn new(lang: Lang, gl: Option<Arc<glow::Context>>) -> Self {
+    fn new(lang: Lang, gl: Option<Arc<glow::Context>>, instance: InstanceGuard) -> Self {
         update::cleanup_old_binary();
         let out_dir = default_out_dir();
         let logs = vec![
@@ -169,6 +309,7 @@ impl App {
         });
         let skip_update = env::var("LCEDA_SHOT").is_ok();
         let prefs = crate::prefs::load();
+        let out_dir = prefs.out_dir.clone().unwrap_or(out_dir);
         Self {
             lang,
             lang_pinned: prefs.lang.is_some(),
@@ -188,13 +329,66 @@ impl App {
             pitch: 0.55,
             zoom: 1.0,
             alert: None,
-            show_about: false,
+            page: if !prefs.hide_welcome && !skip_update {
+                NavPage::Settings
+            } else {
+                NavPage::Search
+            },
+            theme: env::var("LCEDA_THEME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| ThemeMode::parse(&s))
+                .unwrap_or(prefs.theme),
+            always_on_top: prefs.always_on_top,
+            dark_applied: None,
+            instance,
+            nav_expanded: true,
+            nav_anim_w: NAV_W,
+            brand_tex: None,
+            nav_tex: None,
+            pay_tex: None,
+            sponsor_click_guard: false,
+            lib: Library::load(),
+            detail: None,
+            cache: HashMap::new(),
+            resolve: None,
+            fav_cat: UNCAT.into(),
+            fav_inside: false,
+            fav_pick: false,
+            show_new_cat: false,
+            show_rename_cat: false,
+            show_import_cat: false,
+            new_cat_name: String::new(),
+            sponsor_job: None,
+            sponsor_pack: None,
+            sponsor_note: None,
+            sponsor_qr_job: None,
+            sponsor_qr: None,
+            sponsor_qr_title: String::new(),
+            sponsor_popup: false,
             show_welcome: !prefs.hide_welcome && !skip_update,
             welcome_hide: true,
             hide_welcome: prefs.hide_welcome,
-            show_settings: false,
             show_batch: false,
-            batch_opts: BatchOpts::default(),
+            export_ids_pending: None,
+            parts_width: prefs.parts_width,
+            photo_frac: prefs.photo_frac,
+            top_frac: prefs.top_frac,
+            win_x: prefs.win_x,
+            win_y: prefs.win_y,
+            win_w: prefs.win_w,
+            win_h: prefs.win_h,
+            win_max: prefs.win_max,
+            win_round_sig: None,
+            batch_opts: BatchOpts {
+                step: prefs.export_step,
+                obj: prefs.export_obj,
+                ad: prefs.export_ad,
+                kicad: prefs.export_kicad,
+                pads: prefs.export_pads,
+                datasheet: prefs.export_datasheet,
+                source: prefs.export_source,
+            },
             about_note: None,
             gpu,
             update_check: if skip_update {
@@ -216,6 +410,8 @@ impl App {
             kicad_attach_3d: prefs.kicad_attach_3d,
             rename_footprint: prefs.rename_footprint,
             batch_merge: prefs.batch_merge,
+            sch_scheme: prefs.sch_scheme,
+            sch_custom: prefs.sch_custom,
         }
     }
 
@@ -248,7 +444,7 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 let add_text = |ui: &mut egui::Ui| {
                     ui.add(
-                        egui::Label::new(egui::RichText::new(&msg).color(LABEL))
+                        egui::Label::new(egui::RichText::new(&msg).color(theme::label()))
                             .wrap()
                             .halign(egui::Align::Min),
                     );
@@ -263,6 +459,9 @@ impl App {
                 }
                 ui.add_space(8.0);
                 if dialog_ok_row(ui, i18n::t(self.lang, "ok")) {
+                    close = true;
+                }
+                if consume_dialog_confirm(ui, true) {
                     close = true;
                 }
             });
@@ -283,11 +482,15 @@ impl App {
             ui.set_width(width - 8.0);
             ui.spacing_mut().item_spacing.y = 6.0;
             ui.add(
-                egui::Label::new(egui::RichText::new(i18n::t(lang, "welcome_p1")).color(LABEL))
+                egui::Label::new(egui::RichText::new(i18n::t(lang, "welcome_p1")).color(theme::label()))
                     .wrap(),
             );
             ui.add(
-                egui::Label::new(egui::RichText::new(i18n::t(lang, "welcome_p2")).color(LABEL))
+                egui::Label::new(egui::RichText::new(i18n::t(lang, "welcome_p2")).color(theme::label()))
+                    .wrap(),
+            );
+            ui.add(
+                egui::Label::new(egui::RichText::new(i18n::t(lang, "welcome_p3")).color(theme::label()))
                     .wrap(),
             );
             ui.add_space(4.0);
@@ -301,6 +504,9 @@ impl App {
                     if theme::pill_button(ui, i18n::t(lang, "open_repo"), true, false).clicked() {
                         open_repo = true;
                     }
+                    if consume_dialog_confirm(ui, true) {
+                        close = true;
+                    }
                 });
             });
         });
@@ -311,17 +517,68 @@ impl App {
             self.show_welcome = false;
             self.hide_welcome = self.welcome_hide;
             self.persist_prefs();
+            self.goto(NavPage::Settings);
         }
     }
 
-    fn show_about(&mut self, ctx: &egui::Context) {
-        if !self.show_about {
-            return;
+    fn goto(&mut self, page: NavPage) {
+        self.page = page;
+        if page == NavPage::Favorites {
+            self.fav_inside = false;
         }
-        let mut close = false;
+        if page == NavPage::Sponsor {
+            self.ensure_sponsor();
+        }
+    }
+
+    fn ensure_sponsor(&mut self) {
+        if self.sponsor_pack.is_none() && self.sponsor_job.is_none() {
+            self.sponsor_note = None;
+            self.sponsor_job = Some(Promise::spawn_thread("sponsor", sponsor::load));
+        }
+    }
+
+    fn open_channel_qr(&mut self, ch: &sponsor::Channel) {
+        if let Some(rel) = ch.image.clone() {
+            let title = sponsor::title(ch, self.lang == Lang::Zh).to_string();
+            self.sponsor_note = None;
+            self.sponsor_qr = None;
+            self.sponsor_qr_title = title.clone();
+            self.sponsor_popup = true;
+            self.sponsor_click_guard = true;
+            self.sponsor_qr_job = Some(Promise::spawn_thread("sponsor-qr", move || {
+                sponsor::fetch_image(&rel)
+                    .map(|bytes| (title, bytes))
+                    .ok_or_else(|| "无法加载收款码".into())
+            }));
+        } else if let Some(url) = &ch.url {
+            let _ = webbrowser::open(url);
+        } else {
+            self.sponsor_note = Some(i18n::t(self.lang, "sponsor_no_qr").into());
+        }
+    }
+
+    fn want_dark(&self, ctx: &egui::Context) -> bool {
+        match self.theme {
+            ThemeMode::Dark => true,
+            ThemeMode::Light => false,
+            ThemeMode::Auto => matches!(ctx.system_theme(), Some(egui::Theme::Dark)),
+        }
+    }
+
+    fn apply_theme(&mut self, ctx: &egui::Context) {
+        let dark = self.want_dark(ctx);
+        if self.dark_applied != Some(dark) {
+            theme::apply_visuals(ctx, dark);
+            self.dark_applied = Some(dark);
+        }
+    }
+
+    fn page_about(&mut self, ui: &mut egui::Ui) {
         let mut open_repo = false;
+        let mut open_issues = false;
+        let mut open_license = false;
         let mut check = false;
-        let width = 420.0;
         let checking = self.update_check.is_some();
         let can_check = self.update_job.is_none() && self.update.is_none();
         let check_label = if checking {
@@ -329,89 +586,590 @@ impl App {
         } else {
             i18n::t(self.lang, "check_update")
         };
-        fit_window(i18n::t(self.lang, "about"), "lceda_about_fit", width).show(ctx, |ui| {
-            ui.set_width(width - 8.0);
-            ui.spacing_mut().item_spacing.y = 4.0;
-            ui.label(
-                egui::RichText::new(i18n::t(self.lang, "app_title"))
-                    .color(LABEL)
-                    .size(18.0)
-                    .strong(),
-            );
-            ui.add_space(6.0);
-            kv_line(ui, i18n::t(self.lang, "about_ver"), update::current_version());
-            kv_line(ui, i18n::t(self.lang, "about_author"), "LZJ-I");
-            kv_line(ui, i18n::t(self.lang, "about_repo"), update::REPO);
-            kv_line(ui, i18n::t(self.lang, "about_license"), "CC BY-NC-4.0");
-            if let Some(note) = &self.about_note {
-                ui.add_space(6.0);
-                ui.add(egui::Label::new(egui::RichText::new(note).color(SECONDARY)).wrap());
-            }
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::pill_button(ui, i18n::t(self.lang, "ok"), true, true).clicked() {
-                        close = true;
+        let lang = self.lang;
+        egui::ScrollArea::vertical()
+            .id_salt("about_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                theme::show_card(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "about_intro_title"))
+                            .color(theme::label())
+                            .size(16.0)
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(i18n::t(lang, "about_intro")).color(theme::secondary()),
+                        )
+                        .wrap(),
+                    );
+                });
+                ui.add_space(10.0);
+                theme::show_card(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(i18n::t(lang, "about_ver"))
+                                .color(theme::label())
+                                .strong(),
+                        );
+                        if ui
+                            .link(egui::RichText::new(format!("({check_label})")).color(ACCENT))
+                            .clicked()
+                            && can_check
+                        {
+                            check = true;
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(format!("v{}", update::current_version()))
+                            .color(theme::secondary()),
+                    );
+                    if let Some(note) = &self.about_note {
+                        ui.add(egui::Label::new(egui::RichText::new(note).color(theme::secondary())).wrap());
                     }
-                    if theme::pill_button(ui, i18n::t(self.lang, "open_repo"), true, false).clicked()
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{}:", i18n::t(lang, "about_repo")))
+                                .color(theme::label())
+                                .strong(),
+                        );
+                        if ui.link(update::REPO).clicked() {
+                            open_repo = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{}:", i18n::t(lang, "about_author")))
+                                .color(theme::label())
+                                .strong(),
+                        );
+                        ui.label(egui::RichText::new("LZJ-I").color(theme::secondary()));
+                    });
+                    ui.separator();
+                    if ui
+                        .link(egui::RichText::new(i18n::t(lang, "about_issues")).color(theme::label()))
+                        .clicked()
                     {
-                        open_repo = true;
-                    }
-                    if theme::pill_button(ui, check_label, can_check, false).clicked() {
-                        check = true;
+                        open_issues = true;
                     }
                 });
+                ui.add_space(10.0);
+                theme::show_card(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "about_love"))
+                            .color(theme::label())
+                            .size(15.0)
+                            .strong(),
+                    );
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(i18n::t(lang, "about_star")).color(theme::secondary()),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(i18n::t(lang, "about_copyright"))
+                                    .color(theme::secondary())
+                                    .size(12.0),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(4.0);
+                        if ui
+                            .link(
+                                egui::RichText::new(i18n::t(lang, "about_license_name"))
+                                    .color(ACCENT)
+                                    .size(12.0),
+                            )
+                            .clicked()
+                        {
+                            open_license = true;
+                        }
+                    });
+                });
             });
-        });
         if check {
             self.request_update_check(true);
         }
         if open_repo {
             let _ = webbrowser::open(update::REPO_URL);
         }
-        if close {
-            self.show_about = false;
-            self.about_note = None;
+        if open_issues {
+            let _ = webbrowser::open(&format!("{}/issues", update::REPO_URL));
+        }
+        if open_license {
+            let _ = webbrowser::open("https://creativecommons.org/licenses/by-nc/4.0/");
         }
     }
 
-    fn show_settings(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
-            return;
-        }
-        let mut close = false;
-        let mut persist = false;
+    fn page_settings(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        let width = 460.0;
-        fit_window(i18n::t(lang, "settings"), "lceda_settings_fit", width).show(ctx, |ui| {
-            ui.set_width(width - 8.0);
-            ui.label(egui::RichText::new(i18n::t(lang, "settings_3d_hint")).color(SECONDARY));
-            ui.add_space(8.0);
-            let before_ad = self.ad_embed_3d;
-            let before_kicad = self.kicad_attach_3d;
-            let before_fp = self.rename_footprint;
-            ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
-            ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new(i18n::t(lang, "settings_fp_hint")).color(SECONDARY));
-            ui.checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
-            if self.ad_embed_3d != before_ad
-                || self.kicad_attach_3d != before_kicad
-                || self.rename_footprint != before_fp
-            {
+        let mut persist = false;
+        let mut theme_changed = false;
+        let mut browse = false;
+        let mut open_dir = false;
+        egui::ScrollArea::vertical()
+            .id_salt("settings_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                theme::show_card(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "lang_label"))
+                            .strong()
+                            .color(theme::label()),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(!self.lang_pinned, i18n::t(lang, "lang_follow"))
+                            .clicked()
+                        {
+                            self.lang_pinned = false;
+                            self.lang = Lang::detect();
+                            persist = true;
+                        }
+                        if ui
+                            .selectable_label(self.lang_pinned && self.lang == Lang::Zh, "中文")
+                            .clicked()
+                        {
+                            self.lang_pinned = true;
+                            self.lang = Lang::Zh;
+                            persist = true;
+                        }
+                        if ui
+                            .selectable_label(self.lang_pinned && self.lang == Lang::En, "English")
+                            .clicked()
+                        {
+                            self.lang_pinned = true;
+                            self.lang = Lang::En;
+                            persist = true;
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "theme_label"))
+                            .strong()
+                            .color(theme::label()),
+                    );
+                    ui.horizontal(|ui| {
+                        for (mode, key) in [
+                            (ThemeMode::Auto, "theme_auto"),
+                            (ThemeMode::Light, "theme_light"),
+                            (ThemeMode::Dark, "theme_dark"),
+                        ] {
+                            if ui
+                                .selectable_label(self.theme == mode, i18n::t(lang, key))
+                                .clicked()
+                            {
+                                self.theme = mode;
+                                theme_changed = true;
+                                persist = true;
+                            }
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "output"))
+                            .strong()
+                            .color(theme::label()),
+                    );
+                    let path_w = ui.available_width();
+                    let path = ui.add_sized(
+                        egui::vec2(path_w, 28.0),
+                        egui::TextEdit::singleline(&mut self.out_dir)
+                            .desired_width(path_w)
+                            .hint_text(i18n::t(lang, "output_hint")),
+                    );
+                    if path.lost_focus() {
+                        persist = true;
+                    }
+                    ui.horizontal(|ui| {
+                        if theme::pill_button(ui, i18n::t(lang, "browse"), true, false).clicked() {
+                            browse = true;
+                        }
+                        if theme::pill_button(ui, i18n::t(lang, "open_folder"), true, true).clicked()
+                        {
+                            open_dir = true;
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "defaults_label"))
+                            .strong()
+                            .color(theme::label()),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(i18n::t(lang, "defaults_hint"))
+                                .color(theme::secondary())
+                                .small(),
+                        )
+                        .wrap(),
+                    );
+                    let before = self.batch_opts;
+                    ui.checkbox(&mut self.batch_opts.step, i18n::t(lang, "download_step"));
+                    ui.checkbox(&mut self.batch_opts.obj, i18n::t(lang, "download_obj"));
+                    ui.checkbox(&mut self.batch_opts.ad, i18n::t(lang, "export_ad"));
+                    ui.checkbox(&mut self.batch_opts.kicad, i18n::t(lang, "export_kicad"));
+                    ui.checkbox(&mut self.batch_opts.pads, i18n::t(lang, "export_pads"));
+                    ui.checkbox(&mut self.batch_opts.datasheet, i18n::t(lang, "datasheet"));
+                    ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
+                    if before != self.batch_opts {
+                        persist = true;
+                    }
+                    ui.add_space(14.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "settings_3d_hint")).color(theme::secondary()),
+                    );
+                    ui.add_space(8.0);
+                    let before_ad = self.ad_embed_3d;
+                    let before_kicad = self.kicad_attach_3d;
+                    let before_fp = self.rename_footprint;
+                    let before_merge = self.batch_merge;
+                    ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
+                    ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "settings_fp_hint")).color(theme::secondary()),
+                    );
+                    ui.checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(i18n::t(lang, "batch_merge_hint"))
+                                .color(theme::secondary())
+                                .small(),
+                        )
+                        .wrap(),
+                    );
+                    if self.ad_embed_3d != before_ad
+                        || self.kicad_attach_3d != before_kicad
+                        || self.rename_footprint != before_fp
+                        || self.batch_merge != before_merge
+                    {
+                        persist = true;
+                    }
+                });
+                ui.add_space(10.0);
+                if self.sch_color_card(ui) {
+                    persist = true;
+                }
+            });
+        if browse {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                self.out_dir = dir.display().to_string();
                 persist = true;
             }
-            ui.add_space(10.0);
-            if dialog_ok_row(ui, i18n::t(lang, "ok")) {
-                close = true;
-            }
-        });
+        }
+        if open_dir {
+            self.open_out_dir();
+        }
+        if theme_changed {
+            self.dark_applied = None;
+        }
         if persist {
             self.persist_prefs();
         }
-        if close {
-            self.show_settings = false;
+    }
+
+    fn sch_color_card(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut persist = false;
+        theme::show_card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "sch_color_label"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(i18n::t(lang, "sch_color_hint"))
+                        .color(theme::secondary())
+                        .small(),
+                )
+                .wrap(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                for (scheme, key) in [
+                    (SchColorScheme::AltiumClassic, "sch_color_altium"),
+                    (SchColorScheme::EasyEda, "sch_color_easyeda"),
+                    (SchColorScheme::Mono, "sch_color_mono"),
+                    (SchColorScheme::Custom, "sch_color_custom"),
+                ] {
+                    if ui
+                        .selectable_label(self.sch_scheme == scheme, i18n::t(lang, key))
+                        .clicked()
+                    {
+                        if scheme == SchColorScheme::Custom
+                            && self.sch_scheme != SchColorScheme::Custom
+                        {
+                            self.sch_custom = self.sch_scheme.colors(self.sch_custom);
+                        }
+                        self.sch_scheme = scheme;
+                        persist = true;
+                    }
+                }
+            });
+            if self.sch_scheme == SchColorScheme::Custom {
+                ui.add_space(8.0);
+                let mut custom = self.sch_custom;
+                let mut dirty = false;
+                ui.columns(2, |cols| {
+                    dirty |= sch_color_row(&mut cols[0], i18n::t(lang, "sch_color_body"), &mut custom.body);
+                    dirty |= sch_color_row(&mut cols[1], i18n::t(lang, "sch_color_pin"), &mut custom.pin);
+                    dirty |= sch_color_row(
+                        &mut cols[0],
+                        i18n::t(lang, "sch_color_pin_name"),
+                        &mut custom.pin_name,
+                    );
+                    dirty |= sch_color_row(
+                        &mut cols[1],
+                        i18n::t(lang, "sch_color_pin_number"),
+                        &mut custom.pin_number,
+                    );
+                    dirty |= sch_color_row(
+                        &mut cols[0],
+                        i18n::t(lang, "sch_color_designator"),
+                        &mut custom.designator,
+                    );
+                    dirty |= sch_color_row(
+                        &mut cols[1],
+                        i18n::t(lang, "sch_color_comment"),
+                        &mut custom.comment,
+                    );
+                });
+                if dirty {
+                    self.sch_custom = custom;
+                    persist = true;
+                }
+            }
+            ui.add_space(10.0);
+            sch_color_preview(ui, self.resolved_sch_colors());
+        });
+        persist
+    }
+
+    fn page_sponsor(&mut self, ui: &mut egui::Ui) {
+        let mut clicked: Option<usize> = None;
+        let zh = self.lang == Lang::Zh;
+        let lang = self.lang;
+        egui::ScrollArea::vertical()
+            .id_salt("sponsor_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                theme::show_card(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "donate_title"))
+                            .color(theme::label())
+                            .size(16.0)
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+                    donate_para(
+                        ui,
+                        Color32::from_rgb(16, 185, 129),
+                        i18n::t(lang, "donate_license"),
+                    );
+                    ui.add_space(12.0);
+                    donate_para(
+                        ui,
+                        Color32::from_rgb(59, 130, 246),
+                        i18n::t(lang, "donate_maintain"),
+                    );
+                    ui.add_space(12.0);
+                    donate_para(
+                        ui,
+                        Color32::from_rgb(249, 115, 22),
+                        i18n::t(lang, "donate_purpose"),
+                    );
+                    ui.add_space(12.0);
+                    donate_para(
+                        ui,
+                        Color32::from_rgb(236, 72, 153),
+                        i18n::t(lang, "donate_thanks"),
+                    );
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.add_space(14.0);
+                    ui.label(
+                        egui::RichText::new(format!("{}:", i18n::t(lang, "sponsor_pay")))
+                            .color(theme::label())
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
+                    if let Some(err) = &self.sponsor_note {
+                        if !self.sponsor_popup {
+                            ui.label(egui::RichText::new(err).color(theme::secondary()).size(12.0));
+                        }
+                    } else if self.sponsor_job.is_some() {
+                        ui.label(
+                            egui::RichText::new(i18n::t(lang, "sponsor_loading")).color(theme::secondary()),
+                        );
+                    }
+                    if let Some(pack) = &self.sponsor_pack {
+                        if self.pay_tex.is_none() {
+                            self.pay_tex = load_pay_tex(ui.ctx());
+                        }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 16.0;
+                            for (i, ch) in pack.channels.iter().enumerate() {
+                                let hint = if ch.image.is_some() {
+                                    i18n::t(lang, "donate_scan")
+                                } else {
+                                    i18n::t(lang, "donate_visit")
+                                };
+                                let Some(tex) = &self.pay_tex else {
+                                    break;
+                                };
+                                let brand = match ch.id.as_str() {
+                                    "alipay" => &tex.alipay,
+                                    "afdian" => &tex.afdian,
+                                    _ => &tex.wechat,
+                                };
+                                let flag = match ch.id.as_str() {
+                                    "wechat" | "alipay" | "afdian" => &tex.cn,
+                                    _ => &tex.world,
+                                };
+                                if theme::pay_icon(
+                                    ui,
+                                    brand,
+                                    Some(flag),
+                                    sponsor::title(ch, zh),
+                                    hint,
+                                )
+                                .clicked()
+                                {
+                                    clicked = Some(i);
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+        if let Some(i) = clicked {
+            if let Some(ch) = self.sponsor_pack.as_ref().and_then(|p| p.channels.get(i)) {
+                let ch = ch.clone();
+                self.open_channel_qr(&ch);
+            }
         }
+    }
+
+    fn tick_nav_anim(&mut self, ctx: &egui::Context) {
+        let target = if self.nav_expanded {
+            NAV_W
+        } else {
+            NAV_COLLAPSED
+        };
+        let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.05);
+        let t = 1.0 - (-12.0 * dt).exp();
+        self.nav_anim_w += (target - self.nav_anim_w) * t;
+        if (self.nav_anim_w - target).abs() < 0.5 {
+            self.nav_anim_w = target;
+        } else {
+            ctx.request_repaint();
+        }
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let expanded = self.nav_anim_w > 118.0;
+        ui.set_min_height(ui.available_height());
+        ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
+        let tip = i18n::t(
+            self.lang,
+            if expanded {
+                "nav_collapse"
+            } else {
+                "nav_expand"
+            },
+        );
+        if self.nav_tex.is_none() {
+            self.nav_tex = load_nav_tex(ui.ctx());
+        }
+        let icons = self.nav_tex.clone();
+        if theme::menu_toggle(ui, icons.as_ref().map(|t| &t.sidebar))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            self.nav_expanded = !self.nav_expanded;
+        }
+        let go = |ui: &mut egui::Ui, icon: Option<&TextureHandle>, text: &str, on: bool| {
+            theme::nav_icon_item(ui, icon, text, on, expanded).clicked()
+        };
+        if go(
+            ui,
+            icons.as_ref().map(|t| &t.search),
+            i18n::t(self.lang, "search"),
+            self.page == NavPage::Search,
+        ) {
+            self.goto(NavPage::Search);
+        }
+        if go(
+            ui,
+            icons.as_ref().map(|t| &t.fav),
+            i18n::t(self.lang, "favorites"),
+            self.page == NavPage::Favorites,
+        ) {
+            self.goto(NavPage::Favorites);
+        }
+        let queue_label = if self.lib.queue.is_empty() {
+            i18n::t(self.lang, "queue").to_string()
+        } else {
+            format!("{} ({})", i18n::t(self.lang, "queue"), self.lib.queue.len())
+        };
+        if go(
+            ui,
+            icons.as_ref().map(|t| &t.queue),
+            &queue_label,
+            self.page == NavPage::Queue,
+        ) {
+            self.goto(NavPage::Queue);
+        }
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            if go(
+                ui,
+                icons.as_ref().map(|t| &t.about),
+                i18n::t(self.lang, "about"),
+                self.page == NavPage::About,
+            ) {
+                self.about_note = None;
+                self.goto(NavPage::About);
+            }
+            if go(
+                ui,
+                icons.as_ref().map(|t| &t.settings),
+                i18n::t(self.lang, "settings"),
+                self.page == NavPage::Settings,
+            ) {
+                self.goto(NavPage::Settings);
+            }
+            ui.add_space(6.0);
+            ui.add(egui::Separator::default().spacing(8.0));
+            if go(
+                ui,
+                icons.as_ref().map(|t| &t.sponsor),
+                i18n::t(self.lang, "sponsor"),
+                self.page == NavPage::Sponsor,
+            ) {
+                self.goto(NavPage::Sponsor);
+            }
+        });
     }
 
     fn show_batch_dialog(&mut self, ctx: &egui::Context) {
@@ -424,7 +1182,7 @@ impl App {
         let width = 400.0;
         fit_window(i18n::t(lang, "batch_title"), "lceda_batch_fit", width).show(ctx, |ui| {
             ui.set_width(width - 8.0);
-            ui.label(egui::RichText::new(i18n::t(lang, "batch_hint")).color(SECONDARY));
+            ui.label(egui::RichText::new(i18n::t(lang, "batch_hint")).color(theme::secondary()));
             ui.add_space(8.0);
             egui::Grid::new("batch_opts")
                 .num_columns(2)
@@ -446,6 +1204,14 @@ impl App {
                 ui.add_space(4.0);
                 let before = self.batch_merge;
                 ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(i18n::t(lang, "batch_merge_hint"))
+                            .color(theme::secondary())
+                            .small(),
+                    )
+                    .wrap(),
+                );
                 if self.batch_merge != before {
                     self.persist_prefs();
                 }
@@ -459,25 +1225,35 @@ impl App {
                     if theme::pill_button(ui, i18n::t(lang, "batch_cancel"), true, false).clicked() {
                         close = true;
                     }
+                    if consume_dialog_confirm(ui, true) {
+                        start = true;
+                    }
                 });
             });
         });
         if start {
             if !self.batch_opts.any() {
                 self.alert(i18n::t(self.lang, "batch_none"));
-            } else if self.start_batch() {
+            } else {
+                self.persist_prefs();
+                match self.export_ids_pending.take() {
+                    Some(ids) if ids.is_empty() => self.export_selected(),
+                    Some(ids) => self.export_ids(ids),
+                    None => {}
+                }
                 close = true;
             }
         }
         if close {
             self.show_batch = false;
+            self.export_ids_pending = None;
         }
     }
 
     fn request_update_check(&mut self, manual: bool) {
         if self.update.is_some() || self.update_job.is_some() {
             if manual {
-                self.show_about = false;
+                self.about_note = None;
             }
             return;
         }
@@ -513,12 +1289,12 @@ impl App {
             .max_height(if tall { 520.0 } else { 800.0 })
             .show(ctx, |ui| {
                 ui.set_width(width - 8.0);
-                ui.add(egui::Label::new(egui::RichText::new(body).color(LABEL)).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(body).color(theme::label())).wrap());
                 if !notes.is_empty() {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(i18n::t(lang, "update_notes"))
-                            .color(SECONDARY)
+                            .color(theme::secondary())
                             .size(12.0),
                     );
                     ui.add_space(4.0);
@@ -553,7 +1329,7 @@ impl App {
                             (i18n::t(lang, key), g.fraction, g.indeterminate)
                         })
                         .unwrap_or((i18n::t(lang, "update_downloading"), 0.0, true));
-                    ui.label(egui::RichText::new(label).color(SECONDARY));
+                    ui.label(egui::RichText::new(label).color(theme::secondary()));
                     ui.add_space(4.0);
                     if indeterminate {
                         ui.add(egui::ProgressBar::new(0.0).animate(true));
@@ -591,6 +1367,13 @@ impl App {
                             {
                                 later = true;
                             }
+                            if consume_dialog_confirm(ui, true) {
+                                if info.zip_url.is_some() {
+                                    now = true;
+                                } else {
+                                    open = true;
+                                }
+                            }
                         }
                     });
                 });
@@ -614,97 +1397,168 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.search.is_some() || self.job.is_some()
+        self.search.is_some() || self.job.is_some() || self.resolve.is_some()
     }
 
     fn selected_item(&self) -> Option<&SearchItem> {
-        self.selected.and_then(|i| self.items.get(i))
+        self.detail.as_ref()
+    }
+
+    fn display_manufacturer(&self, item: &SearchItem) -> String {
+        let from_item = item.manufacturer_label();
+        if !from_item.is_empty() {
+            return from_item;
+        }
+        if let Some(id) = item.lcsc_id() {
+            if let Some(mfr) = self.lib.saved_manufacturer(&id) {
+                return mfr.to_string();
+            }
+        }
+        "—".into()
     }
 }
 
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [
-            WINDOW_BG.r() as f32 / 255.0,
-            WINDOW_BG.g() as f32 / 255.0,
-            WINDOW_BG.b() as f32 / 255.0,
-            1.0,
-        ]
+        if self.win_max {
+            let c = theme::window_bg();
+            [
+                c.r() as f32 / 255.0,
+                c.g() as f32 / 255.0,
+                c.b() as f32 / 255.0,
+                1.0,
+            ]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_theme(ctx);
+        let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let screen = ctx.input(|i| i.screen_rect());
+        let sig = (
+            screen.width().round() as i32,
+            screen.height().round() as i32,
+            maxed,
+        );
+        if self.win_round_sig != Some(sig) {
+            if crate::instance::apply_window_rounding(maxed, screen.width()) {
+                self.win_round_sig = Some(sig);
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        paint_window_shell(ctx, maxed);
+        if self.instance.wakeup.swap(false, Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        ctx.request_repaint_after(Duration::from_millis(300));
         self.poll_jobs(ctx);
+        self.show_title_bar(ctx);
+        self.tick_nav_anim(ctx);
 
-        egui::TopBottomPanel::top("bar")
-            .exact_height(56.0)
+        let nav_w = self.nav_anim_w;
+        let nav_pad = if self.nav_expanded { 10 } else { 8 };
+        egui::SidePanel::left("nav")
+            .exact_width(12.0 + nav_w)
+            .resizable(false)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::fill())
-                    .inner_margin(egui::Margin::symmetric(16, 10))
-                    .stroke(egui::Stroke::new(1.0_f32, theme::hairline())),
+                    .fill(shell_panel_fill(maxed))
+                    .inner_margin(egui::Margin {
+                        left: 12,
+                        right: 0,
+                        top: 12,
+                        bottom: 12,
+                    }),
             )
             .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.heading(egui::RichText::new(i18n::t(self.lang, "app_title")).color(LABEL));
-                    ui.add_space(12.0);
-                    ui.label(
-                        egui::RichText::new(i18n::t(self.lang, "no_dotnet"))
-                            .color(SECONDARY)
-                            .small(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let label = if self.lang == Lang::Zh {
-                            "中文 / EN"
-                        } else {
-                            "EN / 中文"
-                        };
-                        if theme::pill_button(ui, label, true, false).clicked() {
-                            self.lang = self.lang.toggle();
-                            self.lang_pinned = true;
-                            self.persist_prefs();
-                        }
-                        ui.add_space(6.0);
-                        if theme::pill_button(ui, i18n::t(self.lang, "about"), true, false).clicked()
-                        {
-                            self.show_about = true;
-                            self.about_note = None;
-                        }
-                        ui.add_space(6.0);
-                        if theme::pill_button(ui, i18n::t(self.lang, "settings"), true, false).clicked()
-                        {
-                            self.show_settings = true;
-                        }
+                egui::Frame::new()
+                    .fill(theme::fill())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::hairline()))
+                    .corner_radius(12)
+                    .inner_margin(egui::Margin::same(nav_pad))
+                    .show(ui, |ui| {
+                        ui.set_min_height(ui.available_height());
+                        self.sidebar(ui);
                     });
+            });
+
+        if matches!(self.page, NavPage::Search | NavPage::Favorites | NavPage::Queue) {
+            let win_w = ctx.input(|i| i.screen_rect().width());
+            let parts_max = clamp_parts_max(win_w, 12.0 + nav_w);
+            let parts_min = PARTS_MIN.min(parts_max);
+            let parts = egui::SidePanel::left("parts")
+                .resizable(true)
+                .default_width(self.parts_width.clamp(parts_min, parts_max))
+                .min_width(parts_min)
+                .max_width(parts_max)
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(shell_panel_fill(maxed))
+                        .inner_margin(egui::Margin {
+                            left: 12,
+                            right: 4,
+                            top: 12,
+                            bottom: 12,
+                        }),
+                )
+                .show(ctx, |ui| {
+                    self.left_pane(ui);
                 });
-            });
+            paint_parts_split(ctx, parts.response.rect, parts.response.dragged());
+            if parts.response.drag_stopped() {
+                let w = parts.response.rect.width().clamp(parts_min, parts_max);
+                if (w - self.parts_width).abs() > 0.5 {
+                    self.parts_width = w;
+                    self.persist_prefs();
+                }
+            }
+        }
 
-        egui::SidePanel::left("parts")
-            .resizable(true)
-            .default_width(380.0)
-            .min_width(300.0)
-            .max_width(520.0)
-            .frame(egui::Frame::new().inner_margin(12.0).fill(WINDOW_BG))
-            .show(ctx, |ui| {
-                self.left_pane(ui);
-            });
-
+        let center_margin = if matches!(self.page, NavPage::Search | NavPage::Favorites | NavPage::Queue)
+        {
+            egui::Margin {
+                left: 4,
+                right: 12,
+                top: 12,
+                bottom: 12,
+            }
+        } else {
+            egui::Margin::same(12)
+        };
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().inner_margin(12.0).fill(WINDOW_BG))
-            .show(ctx, |ui| {
-                self.right_pane(ui);
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(center_margin)
+                    .fill(shell_panel_fill(maxed)),
+            )
+            .show(ctx, |ui| match self.page {
+                NavPage::Search | NavPage::Favorites | NavPage::Queue => self.right_pane(ui),
+                NavPage::Sponsor => self.page_sponsor(ui),
+                NavPage::Settings => self.page_settings(ui),
+                NavPage::About => self.page_about(ui),
             });
         self.show_alert(ctx);
         self.show_welcome(ctx);
-        self.show_about(ctx);
-        self.show_settings(ctx);
         self.show_batch_dialog(ctx);
+        self.show_sponsor_qr(ctx);
+        self.show_fav_pick(ctx);
+        self.show_cat_dialog(ctx);
         if !self.show_welcome {
             self.show_update(ctx);
         }
         self.tick_debug_shot(ctx);
+        self.persist_window(ctx);
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
+        self.persist_prefs();
         if let (Some(gl), Some(gpu)) = (gl, self.gpu.take()) {
             gpu.lock().destroy(gl);
         }
@@ -720,6 +1574,12 @@ impl App {
                         self.log(format!("{}: {}", i18n::t(self.lang, "search"), items.len()));
                         self.items = items;
                         self.selected = if self.items.is_empty() { None } else { Some(0) };
+                        self.detail = self.items.first().cloned();
+                        if let Some(item) = &self.detail {
+                            if let Some(id) = item.lcsc_id() {
+                                self.cache.insert(id, item.clone());
+                            }
+                        }
                         if self.items.is_empty() {
                             self.alert(i18n::t(self.lang, "no_results"));
                         } else {
@@ -768,13 +1628,12 @@ impl App {
                 match result {
                     CheckResult::Available(info) => {
                         self.update = Some(info);
-                        self.show_about = false;
                         self.about_note = None;
                     }
                     CheckResult::UpToDate if manual => {
                         let note = i18n::t(self.lang, "already_latest")
                             .replace("{ver}", update::current_version());
-                        if self.show_about {
+                        if self.page == NavPage::About {
                             self.about_note = Some(note);
                         } else {
                             self.alert(note);
@@ -782,7 +1641,7 @@ impl App {
                     }
                     CheckResult::Failed if manual => {
                         let note = i18n::t(self.lang, "update_check_fail").to_string();
-                        if self.show_about {
+                        if self.page == NavPage::About {
                             self.about_note = Some(note);
                         } else {
                             self.alert(note);
@@ -810,81 +1669,440 @@ impl App {
                 ctx.request_repaint();
             }
         }
+        if let Some(p) = &self.sponsor_job {
+            if p.ready().is_some() {
+                match self.sponsor_job.take().unwrap().block_and_take() {
+                    Ok(pack) => {
+                        self.sponsor_note = None;
+                        self.sponsor_pack = Some(pack);
+                    }
+                    Err(e) => {
+                        self.sponsor_note = Some(e);
+                        self.sponsor_pack = None;
+                    }
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(p) = &self.sponsor_qr_job {
+            if p.ready().is_some() {
+                match self.sponsor_qr_job.take().unwrap().block_and_take() {
+                    Ok((title, bytes)) => {
+                        self.sponsor_qr = load_named_texture(ctx, "sponsor-qr", &bytes)
+                            .map(|tex| (title, tex));
+                        if self.sponsor_qr.is_none() {
+                            self.sponsor_note = Some("无法显示收款码".into());
+                        }
+                    }
+                    Err(e) => {
+                        self.sponsor_note = Some(e);
+                        self.sponsor_qr = None;
+                    }
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(p) = &self.resolve {
+            if p.ready().is_some() {
+                match self.resolve.take().unwrap().block_and_take() {
+                    Ok((lcsc, mut item)) => {
+                        if item.manufacturer.is_empty() {
+                            if let Some(mfr) = self.lib.saved_manufacturer(&lcsc) {
+                                item.manufacturer = mfr.to_string();
+                            }
+                        }
+                        self.cache.insert(lcsc, item.clone());
+                        self.detail = Some(item);
+                        self.queue_preview();
+                    }
+                    Err(e) => self.alert(format!("{}: {e}", i18n::t(self.lang, "error"))),
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
     }
 
     fn left_pane(&mut self, ui: &mut egui::Ui) {
+        match self.page {
+            NavPage::Search => self.left_search(ui),
+            NavPage::Favorites => self.left_favorites(ui),
+            NavPage::Queue => self.left_queue(ui),
+            _ => {}
+        }
+    }
+
+    fn left_search(&mut self, ui: &mut egui::Ui) {
+        let mut submitted = false;
+        let mut clicked = None;
+        let mut ctx_idx = None;
+        let mut ctx_act = PartAct::None;
         theme::card_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
-            ui.label(
-                egui::RichText::new(i18n::t(self.lang, "keyword"))
-                    .strong()
-                    .color(LABEL),
-            );
             ui.horizontal(|ui| {
-                let edit = egui::TextEdit::singleline(&mut self.keyword)
-                    .hint_text(i18n::t(self.lang, "keyword_hint"))
-                    .desired_width(ui.available_width() - 76.0);
-                let resp = ui.add(edit);
-                let go = theme::pill_button(ui, i18n::t(self.lang, "search"), !self.busy(), true).clicked();
-                if (go || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))) && !self.busy()
+                let btn_w = 64.0;
+                let edit_w = (ui.available_width() - btn_w - 8.0).max(80.0);
+                let r = theme::search_field(
+                    ui,
+                    &mut self.keyword,
+                    i18n::t(self.lang, "keyword_hint"),
+                    "mid_search",
+                    egui::vec2(edit_w, 32.0),
+                );
+                if (r.has_focus() || r.lost_focus())
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && !self.dialog_open()
                 {
-                    self.do_search();
+                    submitted = true;
+                }
+                if theme::pill_button(ui, i18n::t(self.lang, "search"), !self.busy(), true).clicked()
+                {
+                    submitted = true;
                 }
             });
             ui.add_space(8.0);
             ui.label(egui::RichText::new(i18n::t(self.lang, "components")).strong());
             egui::ScrollArea::vertical().id_salt("part_list").show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                let mut clicked = None;
                 for (idx, item) in self.items.iter().enumerate() {
                     let selected = self.selected == Some(idx);
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 44.0),
-                        egui::Sense::click(),
-                    );
-                    let bg = if selected {
-                        Color32::from_rgba_unmultiplied(0, 122, 255, 36)
-                    } else if resp.hovered() {
-                        WELL
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    if bg != Color32::TRANSPARENT {
-                        ui.painter().rect_filled(rect, 8.0, bg);
-                    }
-                    ui.painter().text(
-                        egui::pos2(rect.left() + 10.0, rect.top() + 6.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("{}.  {}", item.index, item.name()),
-                        egui::FontId::proportional(14.0),
-                        LABEL,
-                    );
                     let mut sub = item.lcsc_id().unwrap_or_default();
+                    let mfr = item.manufacturer_label();
+                    if !mfr.is_empty() {
+                        if !sub.is_empty() {
+                            sub.push_str("  ");
+                        }
+                        sub.push_str(&mfr);
+                    }
                     if item.model_uuid.is_some() {
                         if !sub.is_empty() {
                             sub.push_str("  ·  ");
                         }
                         sub.push_str("3D");
                     }
-                    if !sub.is_empty() {
-                        ui.painter().text(
-                            egui::pos2(rect.left() + 10.0, rect.top() + 24.0),
-                            egui::Align2::LEFT_TOP,
-                            sub,
-                            egui::FontId::proportional(12.0),
-                            SECONDARY,
-                        );
-                    }
-                    if resp.clicked() {
+                    let resp = paint_part_row(
+                        ui,
+                        &format!("{}.  {}", item.index, item.name()),
+                        &sub,
+                        selected,
+                    );
+                    if resp.double_clicked() {
+                        clicked = Some(idx);
+                        ctx_act = PartAct::Queue;
+                    } else if resp.clicked() {
                         clicked = Some(idx);
                     }
-                }
-                if let Some(idx) = clicked {
-                    self.selected = Some(idx);
-                    self.queue_preview();
+                    resp.context_menu(|ui| {
+                        theme::prepare_menu(ui);
+                        if ui.button(i18n::t(self.lang, "export_default")).clicked() {
+                            ctx_idx = Some(idx);
+                            ctx_act = PartAct::Export;
+                            ui.close();
+                        }
+                        if ui.button(i18n::t(self.lang, "add_queue")).clicked() {
+                            ctx_idx = Some(idx);
+                            ctx_act = PartAct::Queue;
+                            ui.close();
+                        }
+                        if ui.button(i18n::t(self.lang, "add_fav")).clicked() {
+                            ctx_idx = Some(idx);
+                            ctx_act = PartAct::Fav;
+                            ui.close();
+                        }
+                    });
                 }
             });
         });
+        if submitted && !self.busy() {
+            self.do_search();
+        }
+        if let Some(idx) = clicked.or(ctx_idx) {
+            self.select_search(idx);
+        }
+        match ctx_act {
+            PartAct::Export => self.ask_export_selected(),
+            PartAct::Queue => self.add_to_queue(),
+            PartAct::Fav => self.add_to_fav(),
+            PartAct::None => {}
+        }
+    }
+
+    fn left_favorites(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let mut persist = false;
+        let mut export_cat = false;
+        let mut export_part: Option<String> = None;
+        let mut pick: Option<String> = None;
+        let mut remove: Option<String> = None;
+        let mut select_cat: Option<String> = None;
+        let mut enter_cat: Option<String> = None;
+        let mut leave = false;
+        let mut open_new = false;
+        let mut open_import = false;
+        let mut open_rename = false;
+        let mut delete = false;
+        let cats: Vec<(String, String, usize)> = self
+            .lib
+            .cats
+            .iter()
+            .map(|c| {
+                let name = if c.id == UNCAT {
+                    i18n::t(lang, "uncategorized").to_string()
+                } else {
+                    c.name.clone()
+                };
+                (c.id.clone(), name, self.lib.favs_in(&c.id).len())
+            })
+            .collect();
+        let parts: Vec<(String, String, String)> = self
+            .lib
+            .favs_in(&self.fav_cat)
+            .into_iter()
+            .map(|p| (p.lcsc.clone(), p.name.clone(), p.manufacturer.clone()))
+            .collect();
+        let selected_lcsc = self.detail.as_ref().and_then(|d| d.lcsc_id());
+        let cat_title = cats
+            .iter()
+            .find(|(id, _, _)| id == &self.fav_cat)
+            .map(|(_, name, _)| name.clone())
+            .unwrap_or_else(|| i18n::t(lang, "favorites").to_string());
+        let unit = i18n::t(lang, "fav_item_unit");
+        theme::card_frame().show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
+            if self.fav_inside {
+                ui.horizontal(|ui| {
+                    if theme::pill_button(ui, i18n::t(lang, "fav_back"), true, false).clicked() {
+                        leave = true;
+                    }
+                    ui.label(egui::RichText::new(cat_title).strong());
+                });
+                ui.add_space(8.0);
+                if parts.is_empty() {
+                    ui.label(egui::RichText::new(i18n::t(lang, "fav_empty")).color(theme::secondary()));
+                }
+                egui::ScrollArea::vertical().id_salt("fav_list").show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (lcsc, name, mfr) in &parts {
+                        let selected = selected_lcsc.as_deref() == Some(lcsc.as_str());
+                        let resp = paint_part_row(ui, name, &format!("{lcsc}  {mfr}"), selected);
+                        if resp.clicked() {
+                            pick = Some(lcsc.clone());
+                        }
+                        resp.context_menu(|ui| {
+                            theme::prepare_menu(ui);
+                            if ui
+                                .add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "export_default")))
+                                .clicked()
+                            {
+                                export_part = Some(lcsc.clone());
+                                ui.close();
+                            }
+                            if ui.button(i18n::t(lang, "remove_item")).clicked() {
+                                remove = Some(lcsc.clone());
+                                ui.close();
+                            }
+                        });
+                    }
+                });
+            } else {
+                ui.label(egui::RichText::new(i18n::t(lang, "favorites")).strong());
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().id_salt("fav_tree").show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (id, name, n) in &cats {
+                        let selected = self.fav_cat == *id;
+                        let r = paint_part_row(ui, name, &format!("{n} {unit}"), selected);
+                        if r.double_clicked() {
+                            enter_cat = Some(id.clone());
+                        } else if r.clicked() {
+                            select_cat = Some(id.clone());
+                        }
+                        r.context_menu(|ui| {
+                            theme::prepare_menu(ui);
+                            if ui.button(i18n::t(lang, "new_cat")).clicked() {
+                                open_new = true;
+                                ui.close();
+                            }
+                            if ui.button(i18n::t(lang, "import_cat")).clicked() {
+                                open_import = true;
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "export_cat")))
+                                .clicked()
+                            {
+                                select_cat = Some(id.clone());
+                                export_cat = true;
+                                ui.close();
+                            }
+                            if id != UNCAT {
+                                if ui.button(i18n::t(lang, "rename_cat")).clicked() {
+                                    select_cat = Some(id.clone());
+                                    open_rename = true;
+                                    ui.close();
+                                }
+                                if ui.button(i18n::t(lang, "del_cat")).clicked() {
+                                    select_cat = Some(id.clone());
+                                    delete = true;
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    let leftover = ui.allocate_response(
+                        egui::vec2(ui.available_width(), ui.available_height().max(24.0)),
+                        egui::Sense::click(),
+                    );
+                    leftover.context_menu(|ui| {
+                        theme::prepare_menu(ui);
+                        if ui.button(i18n::t(lang, "new_cat")).clicked() {
+                            open_new = true;
+                            ui.close();
+                        }
+                        if ui.button(i18n::t(lang, "import_cat")).clicked() {
+                            open_import = true;
+                            ui.close();
+                        }
+                    });
+                });
+            }
+        });
+        if let Some(id) = select_cat {
+            self.fav_cat = id;
+        }
+        if let Some(id) = enter_cat {
+            self.fav_cat = id;
+            self.fav_inside = true;
+        }
+        if leave {
+            self.fav_inside = false;
+        }
+        if open_new {
+            self.new_cat_name.clear();
+            self.show_new_cat = true;
+        }
+        if open_import {
+            self.new_cat_name.clear();
+            self.show_import_cat = true;
+        }
+        if open_rename && self.fav_cat != UNCAT {
+            self.new_cat_name = self
+                .lib
+                .cat(&self.fav_cat)
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            self.show_rename_cat = true;
+        }
+        if delete && self.fav_cat != UNCAT {
+            self.lib.remove_cat(&self.fav_cat.clone());
+            self.fav_cat = UNCAT.into();
+            self.fav_inside = false;
+            persist = true;
+        }
+        if let Some(lcsc) = remove {
+            self.lib.remove_fav(&lcsc);
+            persist = true;
+        }
+        if persist {
+            self.lib.save();
+        }
+        if export_cat {
+            let ids = self
+                .lib
+                .favs_in(&self.fav_cat)
+                .into_iter()
+                .map(|p| p.lcsc.clone())
+                .collect();
+            self.ask_export_ids(ids);
+        }
+        if let Some(lcsc) = export_part {
+            self.ask_export_ids(vec![lcsc]);
+        }
+        if let Some(lcsc) = pick {
+            self.select_saved(&lcsc);
+        }
+    }
+
+    fn left_queue(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let mut export = false;
+        let mut clear = false;
+        let mut import = false;
+        let mut pick: Option<String> = None;
+        let mut remove: Option<String> = None;
+        let parts: Vec<(String, String, String)> = self
+            .lib
+            .queue
+            .iter()
+            .map(|p| (p.lcsc.clone(), p.name.clone(), p.manufacturer.clone()))
+            .collect();
+        let selected_lcsc = self.detail.as_ref().and_then(|d| d.lcsc_id());
+        theme::card_frame().show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
+            ui.horizontal(|ui| {
+                if theme::pill_button(ui, i18n::t(lang, "queue_import"), !self.busy(), false).clicked()
+                {
+                    import = true;
+                }
+                if theme::pill_button(
+                    ui,
+                    i18n::t(lang, "export_default"),
+                    !parts.is_empty() && !self.busy(),
+                    true,
+                )
+                .clicked()
+                {
+                    export = true;
+                }
+                if theme::pill_button(ui, i18n::t(lang, "queue_clear"), !parts.is_empty(), false)
+                    .clicked()
+                {
+                    clear = true;
+                }
+            });
+            ui.add_space(8.0);
+            if parts.is_empty() {
+                ui.label(egui::RichText::new(i18n::t(lang, "queue_empty")).color(theme::secondary()));
+            }
+            egui::ScrollArea::vertical().id_salt("queue_list").show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for (lcsc, name, mfr) in &parts {
+                    let selected = selected_lcsc.as_deref() == Some(lcsc.as_str());
+                    let title = if name.is_empty() { lcsc.as_str() } else { name.as_str() };
+                    let resp = paint_part_row(ui, title, &format!("{lcsc}  {mfr}"), selected);
+                    if resp.clicked() {
+                        pick = Some(lcsc.clone());
+                    }
+                    resp.context_menu(|ui| {
+                        theme::prepare_menu(ui);
+                        if ui.button(i18n::t(lang, "remove_item")).clicked() {
+                            remove = Some(lcsc.clone());
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        });
+        if clear {
+            self.lib.clear_queue();
+            self.lib.save();
+        }
+        if let Some(lcsc) = remove {
+            self.lib.remove_queue(&lcsc);
+            self.lib.save();
+        }
+        if import {
+            self.import_queue_file();
+        }
+        if export {
+            let ids = self.lib.queue.iter().map(|p| p.lcsc.clone()).collect();
+            self.ask_export_ids(ids);
+        }
+        if let Some(lcsc) = pick {
+            self.select_saved(&lcsc);
+        }
     }
 
     fn right_pane(&mut self, ui: &mut egui::Ui) {
@@ -899,16 +2117,34 @@ impl App {
                 ui.set_min_size(area.size());
                 ui.set_max_size(area.size());
 
-                let mut top_h = (area.height() * 0.38).clamp(280.0, 320.0);
-                let min_bottom = 220.0;
-                if area.height() < top_h + GAP + min_bottom {
-                    top_h = (area.height() - GAP - min_bottom).max(240.0);
-                }
-                let mut photo_w = (top_h * 0.78).clamp(200.0, 252.0);
-                let min_actions = 260.0;
-                if area.width() - photo_w - GAP < min_actions {
-                    photo_w = (area.width() - GAP - min_actions).max(168.0);
-                }
+                let title_h = 22.0;
+                let meta_h = if self.selected_item().is_some() { 68.0 } else { 0.0 };
+                let pad = CARD_PAD * 2.0;
+                let min_top = if meta_h > 0.0 { TOP_MIN } else { 160.0 };
+                let auto_photo = clamp_photo_w(
+                    {
+                        let max_photo_w = (area.width() - GAP - ACTIONS_MIN).clamp(PHOTO_MIN, 300.0);
+                        let max_top = (area.height() - GAP - MESH_MIN).max(min_top);
+                        let well = (max_photo_w - pad)
+                            .min(max_top - pad - title_h - meta_h - 8.0)
+                            .max(80.0);
+                        well + pad
+                    },
+                    area.width(),
+                );
+                let auto_top = clamp_top_h(
+                    pad + title_h + 8.0 + (auto_photo - pad).max(80.0) + meta_h,
+                    area.height(),
+                    min_top,
+                );
+                let mut photo_w = self
+                    .photo_frac
+                    .map(|f| clamp_photo_w(area.width() * f, area.width()))
+                    .unwrap_or(auto_photo);
+                let mut top_h = self
+                    .top_frac
+                    .map(|f| clamp_top_h(area.height() * f, area.height(), min_top))
+                    .unwrap_or(auto_top);
 
                 let top = egui::Rect::from_min_size(area.min, egui::vec2(area.width(), top_h));
                 let photo = egui::Rect::from_min_size(top.min, egui::vec2(photo_w, top_h));
@@ -924,6 +2160,30 @@ impl App {
                 self.photo_card(ui, photo);
                 self.action_card(ui, actions);
                 self.mesh_card(ui, mesh);
+
+                let v_gap = egui::Rect::from_min_max(
+                    egui::pos2(photo.max.x, top.min.y + 8.0),
+                    egui::pos2(actions.min.x, top.max.y - 8.0),
+                );
+                let h_gap = egui::Rect::from_min_max(
+                    egui::pos2(area.min.x + 8.0, top.max.y),
+                    egui::pos2(area.max.x - 8.0, mesh.min.y),
+                );
+                let (dx, v_done) = drag_split(ui, "split_photo", v_gap, true);
+                let (dy, h_done) = drag_split(ui, "split_top", h_gap, false);
+                if dx != 0.0 && area.width() > 1.0 {
+                    photo_w = clamp_photo_w(photo_w + dx, area.width());
+                    self.photo_frac = Some(photo_w / area.width());
+                    ui.ctx().request_repaint();
+                }
+                if dy != 0.0 && area.height() > 1.0 {
+                    top_h = clamp_top_h(top_h + dy, area.height(), min_top);
+                    self.top_frac = Some(top_h / area.height());
+                    ui.ctx().request_repaint();
+                }
+                if v_done || h_done {
+                    self.persist_prefs();
+                }
             },
         );
         ui.advance_cursor_after_rect(area);
@@ -931,23 +2191,30 @@ impl App {
 
     fn photo_card(&self, ui: &mut egui::Ui, rect: egui::Rect) {
         card_shell(ui, rect, "photo", |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // 1 顶栏
             ui.horizontal(|ui| {
+                ui.set_height(22.0);
                 ui.label(egui::RichText::new(i18n::t(self.lang, "preview")).strong());
                 if self.image_tex.is_some() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new(i18n::t(self.lang, "preview_zoom"))
-                                .color(SECONDARY)
+                                .color(theme::secondary())
                                 .small(),
                         );
                     });
                 }
             });
-            let h = ui.max_rect().height();
-            let reserved = 28.0 + if self.selected_item().is_some() { 78.0 } else { 10.0 };
-            let well_h = (h - reserved).max(80.0);
-            let well_w = ui.max_rect().width();
-            let (well, _) = ui.allocate_exact_size(egui::vec2(well_w, well_h), egui::Sense::hover());
+            ui.add_space(6.0);
+            let has_item = self.selected_item().is_some();
+            let footer_h = if has_item { 58.0 } else { 0.0 };
+            let gap = if has_item { 8.0 } else { 0.0 };
+            // 2 方图：先扣掉底部两行，剩下做 1:1
+            let well_s = ui
+                .available_width()
+                .min((ui.available_height() - footer_h - gap).max(80.0));
+            let (well, _) = ui.allocate_exact_size(egui::vec2(well_s, well_s), egui::Sense::hover());
             paint_well(ui, well);
             let painter = ui.painter_at(well);
             if self.preview.is_some() && self.image_tex.is_none() {
@@ -956,11 +2223,11 @@ impl App {
                     egui::Align2::CENTER_CENTER,
                     i18n::t(self.lang, "loading"),
                     egui::FontId::proportional(14.0),
-                    SECONDARY,
+                    theme::secondary(),
                 );
             } else if let Some(tex) = &self.image_tex {
                 let size = tex.size_vec2();
-                let inner = well.shrink(8.0);
+                let inner = well.shrink(2.0);
                 let scale = (inner.width() / size.x).min(inner.height() / size.y);
                 let draw = size * scale;
                 let img_rect = egui::Rect::from_center_size(inner.center(), draw).intersect(inner);
@@ -981,34 +2248,40 @@ impl App {
                     egui::Align2::CENTER_CENTER,
                     i18n::t(self.lang, "preview_none"),
                     egui::FontId::proportional(13.0),
-                    SECONDARY,
+                    theme::secondary(),
                 );
             }
             if let Some(item) = self.selected_item() {
-                ui.add_space(6.0);
-                ui.add(
-                    egui::Label::new(egui::RichText::new(item.name()).color(LABEL).size(14.0).strong())
-                        .truncate(),
-                );
-                if let Some(id) = item.lcsc_id() {
-                    ui.label(egui::RichText::new(id).color(ACCENT).small());
-                }
+                ui.add_space(8.0);
+                // 3 型号
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(format!(
-                            "{}  {}",
-                            i18n::t(self.lang, "manufacturer"),
-                            if item.manufacturer.is_empty() {
-                                "—"
-                            } else {
-                                &item.manufacturer
-                            }
-                        ))
-                        .color(SECONDARY)
-                        .small(),
+                        egui::RichText::new(item.name())
+                            .color(theme::label())
+                            .size(13.5)
+                            .strong(),
                     )
                     .truncate(),
                 );
+                ui.add_space(2.0);
+                let id = item.lcsc_id().unwrap_or_default();
+                if !id.is_empty() {
+                    ui.label(egui::RichText::new(id).color(ACCENT).size(12.0));
+                    ui.add_space(2.0);
+                }
+                let mfr = self.display_manufacturer(item);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(
+                        egui::RichText::new(i18n::t(self.lang, "manufacturer"))
+                            .color(theme::secondary())
+                            .size(12.0),
+                    );
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(mfr).color(theme::label()).size(12.0))
+                            .truncate(),
+                    );
+                });
             }
         });
     }
@@ -1021,7 +2294,7 @@ impl App {
                     if self.mesh.is_some() {
                         ui.label(
                             egui::RichText::new(i18n::t(self.lang, "drag_orbit"))
-                                .color(SECONDARY)
+                                .color(theme::secondary())
                                 .small(),
                         );
                     }
@@ -1058,7 +2331,7 @@ impl App {
                     egui::Align2::CENTER_CENTER,
                     i18n::t(self.lang, "loading"),
                     egui::FontId::proportional(14.0),
-                    SECONDARY,
+                    theme::secondary(),
                 );
             } else if let (Some(gpu), Some(mesh)) = (self.gpu.clone(), self.mesh.clone()) {
                 ui.painter().add(preview3d::paint_callback(
@@ -1068,6 +2341,7 @@ impl App {
                     self.yaw,
                     self.pitch,
                     self.zoom,
+                    theme::well(),
                 ));
             } else if let Some(mesh) = self.mesh.as_ref() {
                 let image = rasterize_mesh(
@@ -1099,7 +2373,7 @@ impl App {
                     egui::Align2::CENTER_CENTER,
                     msg,
                     egui::FontId::proportional(13.0),
-                    SECONDARY,
+                    theme::secondary(),
                 );
             }
         });
@@ -1119,97 +2393,95 @@ impl App {
         let en = !self.busy() && has_item;
         let lang = self.lang;
 
+        let mut export = false;
+        let mut queue = false;
+        let mut fav = false;
         let mut step = false;
         let mut obj = false;
         let mut ad = false;
         let mut kicad = false;
+        let mut pads = false;
         let mut datasheet = false;
         let mut page = false;
-        let mut pads = false;
-        let mut batch = false;
-        let mut browse = false;
-        let mut open = false;
+        let in_queue = self
+            .selected_item()
+            .and_then(|i| i.lcsc_id())
+            .is_some_and(|id| self.lib.in_queue(&id));
+        let queue_label = if in_queue {
+            i18n::t(lang, "added_queue")
+        } else {
+            i18n::t(lang, "add_queue")
+        };
 
         card_shell(ui, rect, "actions", |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
             ui.set_width(ui.available_width());
-            let pairs = [
-                (
-                    i18n::t(lang, "download_step"),
-                    en && has3d,
-                    true,
-                    i18n::t(lang, "download_obj"),
-                    en && has3d,
-                    false,
-                ),
-                (
-                    i18n::t(lang, "export_ad"),
-                    en && has_ad,
-                    true,
-                    i18n::t(lang, "export_kicad"),
-                    en && has_ad,
-                    true,
-                ),
-                (
-                    i18n::t(lang, "datasheet"),
-                    en && has_ds,
-                    false,
-                    i18n::t(lang, "open_page"),
-                    has_item,
-                    false,
-                ),
-                (
-                    i18n::t(lang, "export_pads"),
-                    en && has_ad,
-                    true,
-                    i18n::t(lang, "batch"),
-                    !self.busy(),
-                    false,
-                ),
-            ];
-            let clicks = action_grid(ui, "action_btns", &pairs);
-            step = clicks[0].0;
-            obj = clicks[0].1;
-            ad = clicks[1].0;
-            kicad = clicks[1].1;
-            datasheet = clicks[2].0;
-            page = clicks[2].1;
-            pads = clicks[3].0;
-            batch = clicks[3].1;
-
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(i18n::t(lang, "output")).strong().color(LABEL));
-            let path_w = ui.available_width();
-            ui.add_sized(
-                egui::vec2(path_w, 28.0),
-                egui::TextEdit::singleline(&mut self.out_dir)
-                    .desired_width(path_w)
-                    .clip_text(true)
-                    .hint_text(i18n::t(lang, "output_hint")),
-            );
-            let path_clicks = action_grid(
+            let clicks = action_grid(
                 ui,
-                "path_btns",
-                &[(
-                    i18n::t(lang, "browse"),
-                    true,
-                    false,
-                    i18n::t(lang, "open_folder"),
-                    true,
-                    true,
-                )],
+                "main_btns",
+                &[
+                    (
+                        i18n::t(lang, "export_default"),
+                        en,
+                        true,
+                        queue_label,
+                        en,
+                        in_queue,
+                    ),
+                    (
+                        i18n::t(lang, "add_fav"),
+                        en,
+                        false,
+                        i18n::t(lang, "open_page"),
+                        has_item,
+                        false,
+                    ),
+                    (
+                        i18n::t(lang, "export_ad"),
+                        en && has_ad,
+                        true,
+                        i18n::t(lang, "export_kicad"),
+                        en && has_ad,
+                        true,
+                    ),
+                    (
+                        i18n::t(lang, "export_pads"),
+                        en && has_ad,
+                        true,
+                        i18n::t(lang, "download_step"),
+                        en && has3d,
+                        true,
+                    ),
+                    (
+                        i18n::t(lang, "datasheet"),
+                        en && has_ds,
+                        false,
+                        i18n::t(lang, "download_obj"),
+                        en && has3d,
+                        false,
+                    ),
+                ],
             );
-            browse = path_clicks[0].0;
-            open = path_clicks[0].1;
+            export = clicks[0].0;
+            queue = clicks[0].1 && !in_queue;
+            fav = clicks[1].0;
+            page = clicks[1].1;
+            ad = clicks[2].0;
+            kicad = clicks[2].1;
+            pads = clicks[3].0;
+            step = clicks[3].1;
+            datasheet = clicks[4].0;
+            obj = clicks[4].1;
         });
 
-        if browse {
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                self.out_dir = dir.display().to_string();
-            }
+        if export {
+            self.ask_export_selected();
         }
-        if open {
-            self.open_out_dir();
+        if queue {
+            self.add_to_queue();
+        }
+        if fav {
+            self.add_to_fav();
         }
         if step {
             self.require_export(has_item, has3d, i18n::t(self.lang, "no_3d_dl"), |req| {
@@ -1254,13 +2526,6 @@ impl App {
                 self.alert(i18n::t(self.lang, "select_first"));
             }
         }
-        if batch {
-            if self.busy() {
-                self.alert(i18n::t(self.lang, "working"));
-            } else {
-                self.show_batch = true;
-            }
-        }
     }
 
     fn open_out_dir(&mut self) {
@@ -1282,6 +2547,414 @@ impl App {
         }
         self.log(i18n::t(self.lang, "searching"));
         self.search = Some(Promise::spawn_thread("search", move || LcedaClient::new().search(&kw)));
+    }
+
+    fn select_search(&mut self, idx: usize) {
+        self.selected = Some(idx);
+        self.detail = self.items.get(idx).cloned();
+        if let Some(item) = &self.detail {
+            if let Some(id) = item.lcsc_id() {
+                self.cache.insert(id, item.clone());
+            }
+        }
+        self.queue_preview();
+    }
+
+    fn select_saved(&mut self, lcsc: &str) {
+        if let Some(item) = self.cache.get(lcsc).cloned() {
+            self.detail = Some(item);
+            self.queue_preview();
+            return;
+        }
+        if self.resolve.is_some() {
+            return;
+        }
+        let q = lcsc.to_string();
+        self.resolve = Some(Promise::spawn_thread("resolve", move || {
+            let items = LcedaClient::new().search(&q).map_err(|e| e.to_string())?;
+            let item = items
+                .into_iter()
+                .next()
+                .ok_or_else(|| "没有找到器件".to_string())?;
+            Ok((q, item))
+        }));
+    }
+
+    fn ask_export_selected(&mut self) {
+        if self.selected_item().is_none() {
+            self.alert(i18n::t(self.lang, "select_first"));
+            return;
+        }
+        self.export_ids_pending = Some(Vec::new());
+        self.show_batch = true;
+    }
+
+    fn ask_export_ids(&mut self, ids: Vec<String>) {
+        if ids.is_empty() {
+            self.alert(i18n::t(self.lang, "batch_none"));
+            return;
+        }
+        self.export_ids_pending = Some(ids);
+        self.show_batch = true;
+    }
+
+    fn export_selected(&mut self) {
+        let Some(item) = self.selected_item() else {
+            self.alert(i18n::t(self.lang, "select_first"));
+            return;
+        };
+        let has3d = item.model_uuid.is_some();
+        let has_ad = item.has_symbol_or_footprint();
+        let has_ds = item.datasheet_url().is_some();
+        let mut opts = self.batch_opts;
+        if !has3d {
+            opts.step = false;
+            opts.obj = false;
+        }
+        if !has_ad {
+            opts.ad = false;
+            opts.kicad = false;
+            opts.pads = false;
+        }
+        if !has_ds {
+            opts.datasheet = false;
+        }
+        if !opts.any() {
+            self.alert(i18n::t(self.lang, "batch_none"));
+            return;
+        }
+        self.run_export(|req| {
+            req.step = opts.step;
+            req.obj = opts.obj;
+            req.ad = opts.ad;
+            req.kicad = opts.kicad;
+            req.pads = opts.pads;
+            req.datasheet = opts.datasheet;
+            req.source_json = opts.source || opts.ad || opts.kicad || opts.pads;
+        });
+    }
+
+    fn add_to_queue(&mut self) {
+        let Some(item) = self.selected_item().cloned() else {
+            self.alert(i18n::t(self.lang, "select_first"));
+            return;
+        };
+        let Some(part) = part_from_item(&item, UNCAT) else {
+            self.alert(i18n::t(self.lang, "select_first"));
+            return;
+        };
+        if self.lib.add_queue(part) {
+            self.lib.save();
+        }
+    }
+
+    fn add_to_fav(&mut self) {
+        if self.selected_item().is_none() {
+            self.alert(i18n::t(self.lang, "select_first"));
+            return;
+        }
+        if self.lib.cats.len() <= 1 {
+            self.save_fav(UNCAT);
+        } else {
+            self.fav_pick = true;
+        }
+    }
+
+    fn save_fav(&mut self, cat_id: &str) {
+        let Some(item) = self.selected_item().cloned() else {
+            self.alert(i18n::t(self.lang, "select_first"));
+            return;
+        };
+        let Some(part) = part_from_item(&item, cat_id) else {
+            self.alert(i18n::t(self.lang, "select_first"));
+            return;
+        };
+        self.lib.add_fav(part);
+        self.lib.save();
+        self.alert(i18n::t(self.lang, "added_fav"));
+    }
+
+    fn export_ids(&mut self, ids: Vec<String>) {
+        if self.busy() {
+            self.alert(i18n::t(self.lang, "working"));
+            return;
+        }
+        if ids.is_empty() {
+            self.alert(i18n::t(self.lang, "batch_none"));
+            return;
+        }
+        if !self.batch_opts.any() {
+            self.alert(i18n::t(self.lang, "batch_none"));
+            return;
+        }
+        let out_dir = PathBuf::from(self.out_dir.trim());
+        if let Err(e) = std::fs::create_dir_all(&out_dir) {
+            self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
+            return;
+        }
+        let mut req = self.batch_opts.request(out_dir.clone());
+        req.ad_embed_3d = self.ad_embed_3d;
+        req.kicad_attach_3d = self.kicad_attach_3d;
+        req.rename_footprint = self.rename_footprint;
+        req.sch_colors = self.resolved_sch_colors();
+        req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
+        self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
+        self.job = Some(Promise::spawn_thread("export-ids", move || {
+            let client = LcedaClient::new();
+            let mut lines = Vec::new();
+            let mut fail = 0;
+            for (kw, result) in lceda_core::export::export_batch(&client, &ids, &req) {
+                match result {
+                    Ok(paths) => lines.push(format!("OK {kw}\n{}", format_paths(&paths, &out_dir))),
+                    Err(e) => {
+                        fail += 1;
+                        lines.push(format!("FAIL {kw}: {e}"));
+                    }
+                }
+            }
+            lines.push(format!("done, failed={fail}"));
+            Ok(lines.join("\n"))
+        }));
+    }
+
+    fn import_queue_file(&mut self) {
+        let Some(file) = rfd::FileDialog::new()
+            .add_filter("text", &["txt", "csv", "list"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            self.alert(i18n::t(self.lang, "error"));
+            return;
+        };
+        let ids = lceda_core::models::parse_id_list(&text);
+        let mut added = 0;
+        for id in ids {
+            if self.lib.add_queue(SavedPart {
+                lcsc: id.clone(),
+                name: id,
+                manufacturer: String::new(),
+                cat_id: UNCAT.into(),
+            }) {
+                added += 1;
+            }
+        }
+        self.lib.save();
+        self.alert(format!("{}: {added}", i18n::t(self.lang, "added_queue")));
+    }
+
+    fn show_sponsor_qr(&mut self, ctx: &egui::Context) {
+        if !self.sponsor_popup {
+            return;
+        }
+        let mut close = false;
+        let title = if self.sponsor_qr_title.is_empty() {
+            i18n::t(self.lang, "donate_scan").to_string()
+        } else {
+            self.sponsor_qr_title.clone()
+        };
+        let size = 288.0;
+        let shown = egui::Window::new(title)
+            .id(egui::Id::new("lceda_sponsor_qr"))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .default_width(size)
+            .min_width(size)
+            .max_width(size)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::fill())
+                    .stroke(egui::Stroke::new(1.0_f32, theme::hairline()))
+                    .corner_radius(12)
+                    .inner_margin(egui::Margin::same(8))
+                    .shadow(egui::Shadow::NONE),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(size - 16.0);
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                if let Some((_, tex)) = &self.sponsor_qr {
+                    let side = size - 16.0;
+                    let r = ui.add(egui::Image::new((tex.id(), egui::vec2(side, side))));
+                    if r.clicked() {
+                        close = true;
+                    }
+                } else if let Some(err) = &self.sponsor_note {
+                    ui.add(egui::Label::new(egui::RichText::new(err).color(theme::secondary())).wrap());
+                } else {
+                    ui.allocate_ui(egui::vec2(size - 16.0, size - 16.0), |ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                egui::RichText::new(i18n::t(self.lang, "sponsor_loading"))
+                                    .color(theme::secondary()),
+                            );
+                        });
+                    });
+                }
+                if consume_dialog_confirm(ui, true) {
+                    close = true;
+                }
+            });
+        if let Some(inner) = shown {
+            if self.sponsor_click_guard {
+                self.sponsor_click_guard = false;
+            } else if inner.response.clicked_elsewhere() {
+                close = true;
+            }
+        }
+        if close {
+            self.sponsor_popup = false;
+        }
+    }
+
+    fn show_fav_pick(&mut self, ctx: &egui::Context) {
+        if !self.fav_pick {
+            return;
+        }
+        let mut close = false;
+        let mut chosen: Option<String> = None;
+        let cats: Vec<(String, String)> = self
+            .lib
+            .cats
+            .iter()
+            .map(|c| {
+                let name = if c.id == UNCAT {
+                    i18n::t(self.lang, "uncategorized").to_string()
+                } else {
+                    self.lib.cat_path(&c.id)
+                };
+                (c.id.clone(), name)
+            })
+            .collect();
+        let lang = self.lang;
+        let width = 360.0;
+        fit_window(i18n::t(lang, "pick_cat"), "lceda_fav_pick", width).show(ctx, |ui| {
+            ui.set_width(width - 8.0);
+            for (id, name) in &cats {
+                if theme::pill_button(ui, name, true, false).clicked() {
+                    chosen = Some(id.clone());
+                }
+            }
+            ui.add_space(8.0);
+            if theme::pill_button(ui, i18n::t(lang, "batch_cancel"), true, false).clicked() {
+                close = true;
+            }
+            if consume_dialog_confirm(ui, true) {
+                chosen = Some(UNCAT.into());
+            }
+        });
+        if let Some(id) = chosen {
+            self.save_fav(&id);
+            self.fav_pick = false;
+        }
+        if close {
+            self.fav_pick = false;
+        }
+    }
+
+    fn show_cat_dialog(&mut self, ctx: &egui::Context) {
+        let creating = self.show_new_cat || self.show_import_cat;
+        if !creating && !self.show_rename_cat {
+            return;
+        }
+        let mut close = false;
+        let mut ok = false;
+        let lang = self.lang;
+        let title = if self.show_import_cat {
+            i18n::t(lang, "import_cat")
+        } else if self.show_rename_cat {
+            i18n::t(lang, "rename_cat")
+        } else {
+            i18n::t(lang, "new_cat")
+        };
+        let width = 360.0;
+        fit_window(title, "lceda_cat_dlg", width).show(ctx, |ui| {
+            ui.set_width(width - 8.0);
+            if self.show_import_cat {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(i18n::t(lang, "import_cat_hint")).color(theme::secondary()),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+            }
+            ui.add_sized(
+                egui::vec2(ui.available_width(), 30.0),
+                egui::TextEdit::singleline(&mut self.new_cat_name)
+                    .hint_text(i18n::t(lang, "cat_name")),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::pill_button(ui, i18n::t(lang, "create"), true, true).clicked() {
+                        ok = true;
+                    }
+                    if theme::pill_button(ui, i18n::t(lang, "batch_cancel"), true, false).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if consume_dialog_confirm(ui, false) {
+                ok = true;
+            }
+        });
+        if ok {
+            if self.show_rename_cat {
+                self.lib.rename_cat(&self.fav_cat.clone(), &self.new_cat_name);
+                self.lib.save();
+            } else if let Some(id) = self.lib.add_root(&self.new_cat_name) {
+                self.fav_cat = id.clone();
+                if self.show_import_cat {
+                    self.import_ids_to_fav(&id);
+                }
+                self.lib.save();
+            }
+            self.new_cat_name.clear();
+            self.show_new_cat = false;
+            self.show_rename_cat = false;
+            self.show_import_cat = false;
+        }
+        if close {
+            self.show_new_cat = false;
+            self.show_rename_cat = false;
+            self.show_import_cat = false;
+            self.new_cat_name.clear();
+        }
+    }
+
+    fn import_ids_to_fav(&mut self, cat_id: &str) {
+        let Some(file) = rfd::FileDialog::new()
+            .add_filter("text", &["txt", "csv", "list"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            self.alert(i18n::t(self.lang, "error"));
+            return;
+        };
+        for id in lceda_core::models::parse_id_list(&text) {
+            self.lib.add_fav(SavedPart {
+                lcsc: id.clone(),
+                name: id,
+                manufacturer: String::new(),
+                cat_id: cat_id.into(),
+            });
+        }
+    }
+
+    fn dialog_open(&self) -> bool {
+        self.alert.is_some()
+            || self.show_welcome
+            || self.show_batch
+            || self.sponsor_popup
+            || self.fav_pick
+            || self.show_new_cat
+            || self.show_rename_cat
+            || self.show_import_cat
+            || self.update.is_some()
     }
 
     fn queue_preview(&mut self) {
@@ -1361,12 +3034,119 @@ impl App {
         req.ad_embed_3d = self.ad_embed_3d;
         req.kicad_attach_3d = self.kicad_attach_3d;
         req.rename_footprint = self.rename_footprint;
+        req.sch_colors = self.resolved_sch_colors();
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("export", move || {
             let client = LcedaClient::new();
             let paths = export(&client, &item, &req)?;
             Ok(format_paths(&paths, &out_dir))
         }));
+    }
+
+    fn show_title_bar(&mut self, ctx: &egui::Context) {
+        let dark = self.want_dark(ctx);
+        let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let mut persist = false;
+        let mut theme_changed = false;
+        let mut pin_changed = false;
+        egui::TopBottomPanel::top("caption")
+            .exact_height(36.0)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::fill())
+                    .corner_radius(title_bar_radius(maxed))
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
+            .show(ctx, |ui| {
+                if self.brand_tex.is_none() {
+                    self.brand_tex = load_named_texture(ui.ctx(), "brand", ICON_PNG);
+                }
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.horizontal(|ui| {
+                    ui.set_height(32.0);
+                    if let Some(tex) = &self.brand_tex {
+                        ui.add(
+                            egui::Image::new((tex.id(), egui::vec2(18.0, 18.0)))
+                                .fit_to_exact_size(egui::vec2(18.0, 18.0)),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(i18n::t(self.lang, "app_title"))
+                            .color(theme::label())
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("v{}", update::current_version()))
+                            .color(theme::secondary())
+                            .size(11.0),
+                    );
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let controls = 40.0 + 32.0 * 3.0 + 8.0;
+                    let drag_w = (ui.available_width() - controls).max(16.0);
+                    let (_, drag) = ui.allocate_exact_size(egui::vec2(drag_w, 32.0), egui::Sense::click_and_drag());
+                    if drag.drag_started() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if drag.double_clicked() {
+                        let maxed = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
+                    }
+                    if theme::theme_switch(ui, dark)
+                        .on_hover_text(i18n::t(self.lang, "theme_toggle"))
+                        .clicked()
+                    {
+                        self.theme = if dark {
+                            ThemeMode::Light
+                        } else {
+                            ThemeMode::Dark
+                        };
+                        theme_changed = true;
+                        persist = true;
+                    }
+                    let tip = if self.always_on_top {
+                        i18n::t(self.lang, "win_unpin")
+                    } else {
+                        i18n::t(self.lang, "win_pin")
+                    };
+                    if theme::pin_button(ui, self.always_on_top)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.always_on_top = !self.always_on_top;
+                        pin_changed = true;
+                        persist = true;
+                    }
+                    if theme::caption_min(ui)
+                        .on_hover_text(i18n::t(self.lang, "win_min"))
+                        .clicked()
+                    {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                    if theme::caption_close(ui)
+                        .on_hover_text(i18n::t(self.lang, "win_close"))
+                        .clicked()
+                    {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+        if theme_changed {
+            self.dark_applied = None;
+        }
+        if pin_changed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.always_on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }));
+        }
+        if persist {
+            self.persist_prefs();
+        }
     }
 
     fn persist_prefs(&self) {
@@ -1381,9 +3161,73 @@ impl App {
             } else {
                 None
             },
+            theme: self.theme,
+            always_on_top: self.always_on_top,
+            out_dir: Some(self.out_dir.clone()).filter(|s| !s.is_empty()),
+            export_step: self.batch_opts.step,
+            export_obj: self.batch_opts.obj,
+            export_ad: self.batch_opts.ad,
+            export_kicad: self.batch_opts.kicad,
+            export_pads: self.batch_opts.pads,
+            export_datasheet: self.batch_opts.datasheet,
+            export_source: self.batch_opts.source,
+            win_x: self.win_x,
+            win_y: self.win_y,
+            win_w: self.win_w,
+            win_h: self.win_h,
+            win_max: self.win_max,
+            parts_width: self.parts_width,
+            photo_frac: self.photo_frac,
+            top_frac: self.top_frac,
+            sch_scheme: self.sch_scheme,
+            sch_custom: self.sch_custom,
         });
     }
 
+    fn resolved_sch_colors(&self) -> SchColors {
+        self.sch_scheme.colors(self.sch_custom)
+    }
+
+    fn persist_window(&mut self, ctx: &egui::Context) {
+        let (outer, inner, maxed) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.inner_rect, v.maximized.unwrap_or(false))
+        });
+        let mut dirty = false;
+        if self.win_max != maxed {
+            self.win_max = maxed;
+            dirty = true;
+        }
+        if !maxed {
+            if let Some(outer) = outer {
+                let x = outer.min.x;
+                let y = outer.min.y;
+                if self.win_x.is_none_or(|o| (o - x).abs() > 1.0)
+                    || self.win_y.is_none_or(|o| (o - y).abs() > 1.0)
+                {
+                    self.win_x = Some(x);
+                    self.win_y = Some(y);
+                    dirty = true;
+                }
+            }
+            if let Some(inner) = inner {
+                if inner.width() >= 960.0 && inner.height() >= 620.0 {
+                    let w = inner.width().min(4000.0);
+                    let h = inner.height().min(3000.0);
+                    if (self.win_w - w).abs() > 4.0 || (self.win_h - h).abs() > 4.0 {
+                        self.win_w = w;
+                        self.win_h = h;
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.persist_prefs();
+        }
+    }
+
+    #[allow(dead_code)]
     fn start_batch(&mut self) -> bool {
         let Some(file) = rfd::FileDialog::new()
             .add_filter("text", &["txt", "csv", "list"])
@@ -1400,6 +3244,7 @@ impl App {
         req.ad_embed_3d = self.ad_embed_3d;
         req.kicad_attach_3d = self.kicad_attach_3d;
         req.rename_footprint = self.rename_footprint;
+        req.sch_colors = self.resolved_sch_colors();
         req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("batch", move || {
@@ -1474,11 +3319,49 @@ impl App {
     }
 }
 
-fn kv_line(ui: &mut egui::Ui, key: &str, value: &str) {
+fn donate_para(ui: &mut egui::Ui, mark: Color32, text: &str) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("{key}：")).color(SECONDARY));
-        ui.label(egui::RichText::new(value).color(LABEL));
+        let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+        ui.painter().rect_filled(dot, 2.0, mark);
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).color(theme::secondary()))
+                .wrap(),
+        );
     });
+}
+
+fn paint_part_row(ui: &mut egui::Ui, title: &str, sub: &str, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 44.0),
+        egui::Sense::click(),
+    );
+    let bg = if selected {
+        Color32::from_rgba_unmultiplied(0, 122, 255, 36)
+    } else if resp.hovered() {
+        theme::well()
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 8.0, bg);
+    }
+    ui.painter().text(
+        egui::pos2(rect.left() + 10.0, rect.top() + 6.0),
+        egui::Align2::LEFT_TOP,
+        title,
+        egui::FontId::proportional(14.0),
+        theme::label(),
+    );
+    if !sub.is_empty() {
+        ui.painter().text(
+            egui::pos2(rect.left() + 10.0, rect.top() + 24.0),
+            egui::Align2::LEFT_TOP,
+            sub,
+            egui::FontId::proportional(12.0),
+            theme::secondary(),
+        );
+    }
+    resp
 }
 
 fn fit_window<'a>(
@@ -1496,6 +3379,22 @@ fn fit_window<'a>(
         .min_width(width)
         .max_width(width)
         .min_height(0.0)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::fill())
+                .stroke(egui::Stroke::new(1.0_f32, theme::hairline()))
+                .corner_radius(12)
+                .inner_margin(egui::Margin::same(12))
+                .shadow(egui::Shadow::NONE),
+        )
+}
+
+fn consume_dialog_confirm(ui: &mut egui::Ui, allow_space: bool) -> bool {
+    ui.input_mut(|i| {
+        let enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        let space = allow_space && i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+        enter || space
+    })
 }
 
 fn dialog_ok_row(ui: &mut egui::Ui, ok: &str) -> bool {
@@ -1531,9 +3430,157 @@ fn card_shell(ui: &mut egui::Ui, rect: egui::Rect, id: &'static str, add: impl F
     );
 }
 
+fn bgr_color(c: i32) -> Color32 {
+    let [r, g, b] = SchColors::to_rgb(c);
+    Color32::from_rgb(r, g, b)
+}
+
+fn sch_color_row(ui: &mut egui::Ui, label: &str, color: &mut i32) -> bool {
+    let mut rgb = SchColors::to_rgb(*color);
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui.color_edit_button_srgb(&mut rgb).changed() {
+            *color = SchColors::from_rgb(rgb);
+            changed = true;
+        }
+        ui.label(egui::RichText::new(label).color(theme::label()).size(12.0));
+    });
+    changed
+}
+
+fn sch_color_preview(ui: &mut egui::Ui, colors: SchColors) {
+    let w = ui.available_width().max(200.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 148.0), egui::Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 8.0, theme::well());
+    p.rect_stroke(
+        rect,
+        8.0,
+        egui::Stroke::new(1.0_f32, theme::hairline()),
+        egui::StrokeKind::Inside,
+    );
+    let body = egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 6.0), egui::vec2(96.0, 78.0));
+    let body_c = bgr_color(colors.body);
+    let pin_c = bgr_color(colors.pin);
+    let name_c = bgr_color(colors.pin_name);
+    let num_c = bgr_color(colors.pin_number);
+    p.rect_stroke(body, 0.0, egui::Stroke::new(1.6_f32, body_c), egui::StrokeKind::Inside);
+    p.circle_stroke(
+        egui::pos2(body.left() + 9.0, body.top() + 9.0),
+        2.4,
+        egui::Stroke::new(1.2_f32, body_c),
+    );
+    let left = ["V+", "S", "D+", "D-", "GND"];
+    let right = ["#OE", "HSD2+", "HSD2-", "HSD1+", "HSD1-"];
+    let font = egui::FontId::proportional(9.0);
+    for i in 0..5 {
+        let y = body.top() + 12.0 + i as f32 * 13.0;
+        p.line_segment(
+            [egui::pos2(body.left() - 18.0, y), egui::pos2(body.left(), y)],
+            egui::Stroke::new(1.3_f32, pin_c),
+        );
+        p.circle_stroke(
+            egui::pos2(body.left() - 18.0, y),
+            2.0,
+            egui::Stroke::new(1.0_f32, pin_c),
+        );
+        p.text(
+            egui::pos2(body.left() - 24.0, y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{}", i + 1),
+            font.clone(),
+            num_c,
+        );
+        p.text(
+            egui::pos2(body.left() + 5.0, y),
+            egui::Align2::LEFT_CENTER,
+            left[i],
+            font.clone(),
+            name_c,
+        );
+        p.line_segment(
+            [egui::pos2(body.right(), y), egui::pos2(body.right() + 18.0, y)],
+            egui::Stroke::new(1.3_f32, pin_c),
+        );
+        p.circle_stroke(
+            egui::pos2(body.right() + 18.0, y),
+            2.0,
+            egui::Stroke::new(1.0_f32, pin_c),
+        );
+        p.text(
+            egui::pos2(body.right() + 24.0, y),
+            egui::Align2::LEFT_CENTER,
+            format!("{}", 10 - i),
+            font.clone(),
+            num_c,
+        );
+        p.text(
+            egui::pos2(body.right() - 5.0, y),
+            egui::Align2::RIGHT_CENTER,
+            right[i],
+            font.clone(),
+            name_c,
+        );
+    }
+    p.text(
+        egui::pos2(body.left(), body.top() - 8.0),
+        egui::Align2::LEFT_BOTTOM,
+        "U?",
+        egui::FontId::proportional(12.0),
+        bgr_color(colors.designator),
+    );
+    p.text(
+        egui::pos2(body.left(), body.bottom() + 6.0),
+        egui::Align2::LEFT_TOP,
+        "PART",
+        egui::FontId::proportional(12.0),
+        bgr_color(colors.comment),
+    );
+}
+
+fn title_bar_radius(maximized: bool) -> egui::CornerRadius {
+    if maximized {
+        egui::CornerRadius::ZERO
+    } else {
+        egui::CornerRadius {
+            nw: WIN_CORNER,
+            ne: WIN_CORNER,
+            sw: 0,
+            se: 0,
+        }
+    }
+}
+
+fn shell_panel_fill(maximized: bool) -> Color32 {
+    if maximized {
+        theme::window_bg()
+    } else {
+        Color32::TRANSPARENT
+    }
+}
+
+fn paint_window_shell(ctx: &egui::Context, maximized: bool) {
+    let rect = ctx.screen_rect();
+    let radius = if maximized {
+        egui::CornerRadius::ZERO
+    } else {
+        egui::CornerRadius::same(WIN_CORNER)
+    };
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    painter.rect_filled(rect, radius, theme::window_bg());
+    if !maximized {
+        painter.rect_stroke(
+            rect.shrink(0.5),
+            radius,
+            egui::Stroke::new(1.0_f32, theme::hairline()),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
 fn paint_well(ui: &egui::Ui, rect: egui::Rect) {
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 10.0, WELL);
+    p.rect_filled(rect, 10.0, theme::well());
     p.rect_stroke(
         rect,
         10.0,
@@ -1675,6 +3722,113 @@ fn load_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<TextureHandle> {
     Some(ctx.load_texture("part", color, TextureOptions::LINEAR))
 }
 
+fn load_named_texture(ctx: &egui::Context, name: &str, bytes: &[u8]) -> Option<TextureHandle> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+    Some(ctx.load_texture(name, color, TextureOptions::LINEAR))
+}
+
+fn load_nav_tex(ctx: &egui::Context) -> Option<NavTex> {
+    Some(NavTex {
+        sidebar: load_named_texture(ctx, "nav_sidebar", SIDEBAR_ICON_PNG)?,
+        search: load_named_texture(ctx, "nav_search", NAV_SEARCH_PNG)?,
+        fav: load_named_texture(ctx, "nav_fav", NAV_FAV_PNG)?,
+        queue: load_named_texture(ctx, "nav_queue", NAV_QUEUE_PNG)?,
+        sponsor: load_named_texture(ctx, "nav_sponsor", NAV_SPONSOR_PNG)?,
+        settings: load_named_texture(ctx, "nav_settings", NAV_SETTINGS_PNG)?,
+        about: load_named_texture(ctx, "nav_about", NAV_ABOUT_PNG)?,
+    })
+}
+
+fn clamp_parts_max(window_w: f32, nav_w: f32) -> f32 {
+    (window_w - nav_w - RIGHT_MIN).clamp(PARTS_MIN, PARTS_MAX)
+}
+
+fn clamp_photo_w(w: f32, area_w: f32) -> f32 {
+    let max = (area_w - GAP - ACTIONS_MIN).max(PHOTO_MIN);
+    w.clamp(PHOTO_MIN.min(max), max)
+}
+
+fn clamp_top_h(h: f32, area_h: f32, min_top: f32) -> f32 {
+    let max = (area_h - GAP - MESH_MIN).max(min_top);
+    h.clamp(min_top.min(max), max)
+}
+
+fn split_grip_rect(gap: egui::Rect, vertical: bool) -> egui::Rect {
+    if vertical {
+        egui::Rect::from_center_size(
+            gap.center(),
+            egui::vec2(3.0, (gap.height() * 0.32).clamp(24.0, 72.0)),
+        )
+    } else {
+        egui::Rect::from_center_size(
+            gap.center(),
+            egui::vec2((gap.width() * 0.32).clamp(24.0, 120.0), 3.0),
+        )
+    }
+}
+
+fn paint_split_grip(painter: &egui::Painter, gap: egui::Rect, vertical: bool, hot: bool) {
+    painter.rect_filled(
+        split_grip_rect(gap, vertical),
+        2.0,
+        if hot { ACCENT } else { theme::hairline() },
+    );
+}
+
+fn paint_parts_split(ctx: &egui::Context, panel: egui::Rect, dragged: bool) {
+    let gap = egui::Rect::from_min_max(
+        egui::pos2(panel.right() - 5.0, panel.top() + 16.0),
+        egui::pos2(panel.right() + 5.0, panel.bottom() - 16.0),
+    );
+    let hot = dragged
+        || ctx
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| gap.contains(p));
+    if !hot {
+        return;
+    }
+    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("parts_split"),
+    ));
+    paint_split_grip(&painter, gap, true, true);
+}
+
+fn drag_split(ui: &mut egui::Ui, id: &'static str, gap: egui::Rect, vertical: bool) -> (f32, bool) {
+    if gap.width() < 1.0 || gap.height() < 1.0 {
+        return (0.0, false);
+    }
+    let resp = ui.interact(gap, egui::Id::new(id), egui::Sense::drag());
+    let hot = resp.hovered() || resp.dragged();
+    if hot {
+        ui.ctx().set_cursor_icon(if vertical {
+            egui::CursorIcon::ResizeHorizontal
+        } else {
+            egui::CursorIcon::ResizeVertical
+        });
+        paint_split_grip(ui.painter(), gap, vertical, true);
+    }
+    let delta = if vertical {
+        resp.drag_delta().x
+    } else {
+        resp.drag_delta().y
+    };
+    (delta, resp.drag_stopped())
+}
+
+fn load_pay_tex(ctx: &egui::Context) -> Option<PayTex> {
+    Some(PayTex {
+        wechat: load_named_texture(ctx, "pay_wechat", PAY_WECHAT)?,
+        alipay: load_named_texture(ctx, "pay_alipay", PAY_ALIPAY)?,
+        afdian: load_named_texture(ctx, "pay_afdian", PAY_AFDIAN)?,
+        cn: load_named_texture(ctx, "flag_cn", FLAG_CN)?,
+        world: load_named_texture(ctx, "flag_world", FLAG_WORLD)?,
+    })
+}
+
 /// 立创商城式局部放大：图上跟一块取景框，旁边用同一张图的 UV 裁切放大。
 fn paint_photo_zoom(
     ui: &egui::Ui,
@@ -1759,11 +3913,12 @@ fn rasterize_mesh(
     let w = (rect.width() * ppp).round().max(1.0) as usize;
     let h = (rect.height() * ppp).round().max(1.0) as usize;
     let mut pixels = vec![0_u8; w * h * 4];
+    let bg = theme::well();
     for px in pixels.chunks_exact_mut(4) {
-        px[0] = 236;
-        px[1] = 236;
-        px[2] = 241;
-        px[3] = 255;
+        px[0] = bg.r();
+        px[1] = bg.g();
+        px[2] = bg.b();
+        px[3] = bg.a();
     }
     if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
         return ColorImage::from_rgba_unmultiplied([w, h], &pixels);
@@ -1879,4 +4034,37 @@ fn rasterize_mesh(
         }
     }
     ColorImage::from_rgba_unmultiplied([w, h], &pixels)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn parts_min_keeps_lcsc_prefix() {
+        assert!(PARTS_MIN >= 200.0);
+        let max = clamp_parts_max(1180.0, 208.0);
+        assert!(max >= PARTS_MIN);
+        assert!(max <= PARTS_MAX);
+        assert!(1180.0 - 208.0 - max >= RIGHT_MIN - 1.0);
+        let tight = clamp_parts_max(960.0, 208.0);
+        assert!(tight >= PARTS_MIN);
+        assert!(960.0 - 208.0 - tight >= RIGHT_MIN - 1.0);
+    }
+
+    #[test]
+    fn photo_keeps_id_and_buttons() {
+        let w = clamp_photo_w(80.0, 800.0);
+        assert!(w >= PHOTO_MIN);
+        let wide = clamp_photo_w(700.0, 800.0);
+        assert!(wide + GAP + ACTIONS_MIN <= 800.0 + 0.5);
+    }
+
+    #[test]
+    fn top_keeps_preview_and_mesh() {
+        let h = clamp_top_h(40.0, 700.0, TOP_MIN);
+        assert!(h >= TOP_MIN);
+        let tall = clamp_top_h(680.0, 700.0, TOP_MIN);
+        assert!(tall + GAP + MESH_MIN <= 700.0 + 0.5);
+    }
 }

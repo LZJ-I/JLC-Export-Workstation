@@ -62,6 +62,7 @@ impl GpuPreview {
         yaw: f32,
         pitch: f32,
         zoom: f32,
+        bg: [f32; 4],
     ) {
         let vp = info.viewport_in_pixels();
         if vp.width_px <= 0 || vp.height_px <= 0 {
@@ -84,7 +85,7 @@ impl GpuPreview {
             gl.disable(glow::CULL_FACE);
             gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
             gl.scissor(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
-            gl.clear_color(236.0 / 255.0, 236.0 / 255.0, 241.0 / 255.0, 1.0);
+            gl.clear_color(bg[0], bg[1], bg[2], bg[3]);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
             gl.use_program(Some(self.program));
             gl.uniform_1_f32(gl.get_uniform_location(self.program, "u_yaw").as_ref(), yaw);
@@ -257,10 +258,17 @@ pub fn paint_callback(
     yaw: f32,
     pitch: f32,
     zoom: f32,
+    bg: egui::Color32,
 ) -> egui::PaintCallback {
+    let bg = [
+        bg.r() as f32 / 255.0,
+        bg.g() as f32 / 255.0,
+        bg.b() as f32 / 255.0,
+        bg.a() as f32 / 255.0,
+    ];
     let cb = egui_glow::CallbackFn::new(move |info, painter| {
         gpu.lock()
-            .paint(painter.gl(), &info, mesh.as_ref(), yaw, pitch, zoom);
+            .paint(painter.gl(), &info, mesh.as_ref(), yaw, pitch, zoom, bg);
     });
     egui::PaintCallback {
         rect,
