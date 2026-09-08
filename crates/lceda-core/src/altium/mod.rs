@@ -100,6 +100,34 @@ mod tests {
     }
 
     #[test]
+    fn writes_schlib_multiline_chinese_description() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-desc");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("CH343P.SchLib");
+        let mut symbol = sample_symbol("CH343P");
+        symbol.description =
+            "应用功能:USB转UART\nUSB协议版本:USB 2.0\n通道数:-\n数据速率:6Mbps".into();
+        write_schlib(&path, &symbol).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut data = Vec::new();
+        cfb.open_stream("CH343P/Data").unwrap().read_to_end(&mut data).unwrap();
+        let (text, _, _) = encoding_rs::GBK.decode(&data);
+        assert!(
+            text.contains("COMPONENTDESCRIPTION=应用功能:USB转UART\nUSB协议版本:USB 2.0"),
+            "Description must keep newlines: {text}"
+        );
+        assert!(
+            text.contains("数据速率:6Mbps"),
+            "missing last spec line: {text}"
+        );
+        let (gbk, _, _) = encoding_rs::GBK.encode("应用功能");
+        assert!(
+            data.windows(gbk.len()).any(|w| w == gbk.as_ref()),
+            "Chinese Description must be GBK"
+        );
+    }
+
+    #[test]
     fn writes_schlib_easyeda_colors() {
         let dir = std::env::temp_dir().join("lceda-test-sch-easyeda");
         let _ = std::fs::create_dir_all(&dir);

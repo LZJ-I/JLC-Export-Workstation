@@ -534,7 +534,7 @@ fn fetch_sources(
     let mut footprint_path = None;
     let mut symbol_ir = None;
     let mut footprint_ir = None;
-    let desc = item.name().to_string();
+    let desc = item.product_description();
     let meta: PartMeta = item.meta();
 
     if let Some(uuid) = item.symbol_uuid() {

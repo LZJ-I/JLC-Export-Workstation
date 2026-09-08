@@ -18,6 +18,9 @@ pub struct PartMeta {
 
 impl PartMeta {
     pub fn describe(&self, fallback: &str) -> String {
+        if fallback.contains('\n') {
+            return fallback.to_string();
+        }
         let mut parts = Vec::new();
         if !fallback.is_empty() {
             parts.push(fallback.to_string());
@@ -387,6 +390,23 @@ pub fn footprint_ir(name: &str, description: &str, src: EasyedaFootprint, meta: 
 mod tests {
     use super::*;
     use crate::easyeda::{EasyedaSymbol, SymbolPin, SymbolRect};
+
+    #[test]
+    fn describe_keeps_multiline_product_intro() {
+        let meta = PartMeta {
+            lcsc: "C2846043".into(),
+            manufacturer: "WCH".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            meta.describe("应用功能:USB转UART\nUSB协议版本:USB 2.0"),
+            "应用功能:USB转UART\nUSB协议版本:USB 2.0"
+        );
+        assert_eq!(
+            meta.describe("CH343P"),
+            "CH343P | LCSC C2846043 | WCH"
+        );
+    }
 
     #[test]
     fn snaps_side_pins_to_body_edge() {

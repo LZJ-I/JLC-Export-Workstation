@@ -132,7 +132,10 @@ fn footprint_mod_text(fp: &FootprintIr, step_rel: Option<&str>) -> String {
     out.push_str("  (generator \"lceda-assistant\")\n");
     out.push_str("  (layer \"F.Cu\")\n");
     if !fp.description.is_empty() {
-        out.push_str(&format!("  (descr {})\n", quoted(&fp.description)));
+        out.push_str(&format!(
+            "  (descr {})\n",
+            quoted(&fp.description.replace(['\r', '\n'], "; "))
+        ));
     }
     if !fp.meta.lcsc.is_empty() {
         out.push_str(&format!("  (tags {})\n", quoted(&fp.meta.lcsc)));

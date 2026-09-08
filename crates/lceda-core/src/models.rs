@@ -130,6 +130,26 @@ impl SearchItem {
             footprint_lib: String::new(),
         }
     }
+
+    /// 立创商品 `description`：分号改成换行。没有简介时回退型号。
+    pub fn product_description(&self) -> String {
+        let raw = string_or_num(&self.raw, "description").unwrap_or_default();
+        let intro = format_product_description(&raw);
+        if intro.is_empty() {
+            self.name().to_string()
+        } else {
+            intro
+        }
+    }
+}
+
+/// `应用功能:USB转UART;USB协议版本:USB 2.0;` → 换行，供 Altium Description。
+pub fn format_product_description(raw: &str) -> String {
+    raw.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -578,5 +598,39 @@ mod tests {
             item.export_stem(),
             "STM32F030C8T6_C23922_ST(意法半导体)"
         );
+    }
+
+    #[test]
+    fn product_description_splits_semicolons_to_newlines() {
+        assert_eq!(
+            format_product_description(
+                "应用功能:USB转UART;USB协议版本:USB 2.0;通道数:-;数据速率:6Mbps;"
+            ),
+            "应用功能:USB转UART\nUSB协议版本:USB 2.0\n通道数:-\n数据速率:6Mbps"
+        );
+        assert_eq!(format_product_description("  ; ; "), "");
+        let item = SearchItem {
+            index: 1,
+            display_title: "CH343P".into(),
+            title: String::new(),
+            manufacturer: String::new(),
+            model_uuid: None,
+            raw: serde_json::json!({
+                "description": "应用功能:USB转UART;USB协议版本:USB 2.0;通道数:-;数据速率:6Mbps;"
+            }),
+        };
+        assert_eq!(
+            item.product_description(),
+            "应用功能:USB转UART\nUSB协议版本:USB 2.0\n通道数:-\n数据速率:6Mbps"
+        );
+        let fallback = SearchItem {
+            index: 1,
+            display_title: "RS2227XN".into(),
+            title: String::new(),
+            manufacturer: String::new(),
+            model_uuid: None,
+            raw: serde_json::json!({}),
+        };
+        assert_eq!(fallback.product_description(), "RS2227XN");
     }
 }

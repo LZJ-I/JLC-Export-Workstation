@@ -2,7 +2,7 @@
 //! 布局对齐 OriginalCircuit.AltiumSharp 的 BinaryFormatWriter。
 
 use crate::error::{Error, Result};
-use encoding_rs::WINDOWS_1252;
+use encoding_rs::{GBK, WINDOWS_1252};
 use std::fs::File;
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -99,7 +99,8 @@ impl BinWriter {
     }
 
     pub fn write_cstring(&mut self, s: &str) {
-        let (bytes, _, _) = WINDOWS_1252.encode(s);
+        // SchLib 头已是 USEMBCS/ISBOC，商品简介是中文，参数按 GBK 写。
+        let (bytes, _, _) = GBK.encode(s);
         self.write_bytes(&bytes);
         self.write_u8(0);
     }
