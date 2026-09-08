@@ -3,7 +3,7 @@ pub mod pcblib;
 pub mod sch_color;
 pub mod schlib;
 
-pub use sch_color::{SchColorScheme, SchColors};
+pub use sch_color::{PinStyle, SchColorScheme, SchColors};
 
 use crate::error::Result;
 use crate::ir::{FootprintIr, SymbolIr};
@@ -81,6 +81,8 @@ mod tests {
         let mut hdr = Vec::new();
         cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
         assert!(hdr.len() > 32);
+        let hdr_text = String::from_utf8_lossy(&hdr);
+        assert!(hdr_text.contains("COLOR2=0"), "default classic black pin text: {hdr_text}");
         let mut data = Vec::new();
         cfb.open_stream("RES/Data").unwrap().read_to_end(&mut data).unwrap();
         let text = String::from_utf8_lossy(&data);
@@ -88,9 +90,13 @@ mod tests {
             text.contains("Color=128") || text.contains("COLOR=128"),
             "default SchLib must use Altium maroon 128, got {text}"
         );
-        assert!(text.contains("16711680"), "designator/comment must be blue 16711680: {text}");
+        assert!(text.contains("16711680"), "designator/comment blue 16711680: {text}");
         assert!(text.contains("NAME=Comment"), "{text}");
-        assert!(data.windows(4).any(|w| w == 128i32.to_le_bytes()), "pin COLORREF 128");
+        assert!(
+            text.contains("RECORD=2") && text.contains("NAME_CUSTOMFONTID"),
+            "classic pins are ASCII: {text}"
+        );
+        assert!(!cfb.exists("RES/PinTextData"));
     }
 
     #[test]
@@ -105,10 +111,19 @@ mod tests {
         cfb.open_stream("RES/Data").unwrap().read_to_end(&mut data).unwrap();
         let text = String::from_utf8_lossy(&data);
         assert!(
-            text.contains("Color=16711680") || text.contains("COLOR=16711680"),
-            "EasyEDA body is blue, got {text}"
+            text.contains("Color=136") || text.contains("COLOR=136"),
+            "立创官方外壳 #880000=136, got {text}"
         );
-        assert!(data.windows(4).any(|w| w == 0x0000_00FFi32.to_le_bytes()), "pin red");
+        assert!(text.contains("RECORD=2"), "{text}");
+        assert!(text.contains("NAME_CUSTOMFONTID=2"), "{text}");
+        assert!(!cfb.exists("RES/PinTextData"));
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        let hdr = String::from_utf8_lossy(&hdr);
+        assert!(hdr.contains("FONTIDCOUNT=4"), "{hdr}");
+        assert!(hdr.contains("COLOR2=16711680"), "官方管脚字蓝: {hdr}");
+        assert!(hdr.contains("COLOR3=255"), "电源红: {hdr}");
+        assert!(hdr.contains("COLOR4=0"), "地黑: {hdr}");
     }
 
     #[test]
@@ -448,6 +463,101 @@ mod tests {
         assert!(lib_text.contains("KIND=Protel_Advanced_PCB_Library"));
         assert!(cfb.exists("FPA/Data"));
         assert!(cfb.exists("FPB/Data"));
+    }
+
+    #[test]
+    fn writes_schlib_altium_classic_pin_text() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-classic");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("RES.SchLib");
+        write_schlib_with_colors(&path, &sample_symbol("RES"), SchColors::altium_classic()).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut data = Vec::new();
+        cfb.open_stream("RES/Data").unwrap().read_to_end(&mut data).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(
+            text.contains("RECORD=2") && text.contains("COLOR=128"),
+            "AD 经典按嘉立创官方导出写 ASCII 管脚: {text}"
+        );
+        assert!(text.contains("NAME_CUSTOMFONTID=2"), "{text}");
+        assert!(text.contains("DESIGNATOR_CUSTOMFONTID=2"), "{text}");
+        assert!(
+            !cfb.exists("RES/PinTextData"),
+            "官方导出不写 PinTextData"
+        );
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        let hdr = String::from_utf8_lossy(&hdr);
+        assert!(hdr.contains("FONTIDCOUNT=2"), "{hdr}");
+        assert!(hdr.contains("COLOR2=0"), "管脚字黑体: {hdr}");
+    }
+
+    #[test]
+    fn writes_schlib_easyeda_power_and_ground_pins() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-elec");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("U.SchLib");
+        let mut symbol = sample_symbol("U");
+        symbol.pins = vec![
+            IrPin {
+                number: "1".into(),
+                name: "VCC".into(),
+                x: 0.0,
+                y: 5.08,
+                length: 2.54,
+                rotation: 180.0,
+                pin_type: String::new(),
+            },
+            IrPin {
+                number: "2".into(),
+                name: "GND".into(),
+                x: 0.0,
+                y: 0.0,
+                length: 2.54,
+                rotation: 180.0,
+                pin_type: String::new(),
+            },
+            IrPin {
+                number: "3".into(),
+                name: "TXD".into(),
+                x: 5.08,
+                y: 2.54,
+                length: 2.54,
+                rotation: 0.0,
+                pin_type: "OUT".into(),
+            },
+        ];
+        write_schlib_with_colors(&path, &symbol, SchColors::easyeda()).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut data = Vec::new();
+        cfb.open_stream("U/Data").unwrap().read_to_end(&mut data).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("NAME=TXD") && text.contains("COLOR=136"), "{text}");
+        assert!(data.windows(4).any(|w| w == 255i32.to_le_bytes()), "VCC red binary");
+        assert!(data.windows(4).any(|w| w == 0i32.to_le_bytes()), "GND black binary");
+    }
+
+    #[test]
+    fn writes_schlib_custom_pin_text_colors() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-pintext");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("RES.SchLib");
+        let mut colors = SchColors::altium_classic();
+        colors.pin_name = SchColors::rgb(0, 0, 0);
+        colors.pin_number = SchColors::rgb(0, 128, 0);
+        write_schlib_with_colors(&path, &sample_symbol("RES"), colors).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut data = Vec::new();
+        cfb.open_stream("RES/Data").unwrap().read_to_end(&mut data).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("NAME_CUSTOMFONTID=2"), "{text}");
+        assert!(text.contains("DESIGNATOR_CUSTOMFONTID=3"), "{text}");
+        assert!(!cfb.exists("RES/PinTextData"));
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        let hdr = String::from_utf8_lossy(&hdr);
+        assert!(hdr.contains("COLOR2=0"), "{hdr}");
+        assert!(hdr.contains("COLOR3=32768"), "{hdr}");
     }
 }
 

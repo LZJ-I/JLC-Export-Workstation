@@ -51,8 +51,8 @@ cargo build --release -p lceda
 
 **设置** 里可改语言、外观、保存目录、导出勾选预勾、3D 附带、封装改名、批量合并，以及 **原理图颜色**（写入 Altium `.SchLib`）：
 
-- **Altium 经典**（默认）：外形和管脚暗红（`COLOR=128`），位号 / 型号蓝色，管脚字黑色——和 AD 自带库、手工建库一致
-- **立创 / EasyEDA**：蓝框红脚（以前软件导出的配色）
+- **Altium 经典**（默认）：外形和管脚暗红（`COLOR=128`），位号 / 型号蓝色，管脚字黑色
+- **立创官方**：商城符号预览——暗红框 `#880000`，普通脚蓝字，电源红、地黑（输入/输出不再另配色）
 - **黑白**：适合打印
 - **自定义**：逐项选色，旁边有预览
 
@@ -83,7 +83,7 @@ lceda get C2040 --step --ad --kicad --pads -o ./out
 lceda get C2040 --kicad --no-kicad-3d -o ./out
 lceda get C2040 --ad --no-ad-3d -o ./out
 lceda get C2040 --ad --rename-footprint -o ./out
-lceda get C2040 --ad --sch-color easyeda -o ./out
+lceda get C2040 --ad --sch-color altium -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out

@@ -406,6 +406,8 @@ mod tests {
         assert!(parse_version("0.5.1").unwrap() > parse_version("0.5.0").unwrap());
         assert!(parse_version("0.5.2").unwrap() > parse_version("0.5.1").unwrap());
         assert!(parse_version("0.5.3").unwrap() > parse_version("0.5.2").unwrap());
+        assert!(parse_version("0.6.0").unwrap() > parse_version("0.5.3").unwrap());
+        assert!(parse_version("0.7.0").unwrap() > parse_version("0.6.0").unwrap());
     }
 
     #[test]

@@ -142,6 +142,45 @@ impl BinWriter {
         let owned = raw.to_string();
         self.write_block(0, |w| w.write_cstring(&owned));
     }
+
+    /// UTF-16LE 参数块：`int32 字节数` + `|KEY=VAL|…` + 结尾 NUL。
+    /// 与 AltiumSharp `WriteUnicodeParameterBlock` / `PinSymbolLineWidth` 内层一致。
+    #[allow(dead_code)]
+    pub fn write_unicode_params(&mut self, pairs: &[(&str, String)]) {
+        let mut s = String::new();
+        for (k, v) in pairs {
+            s.push('|');
+            s.push_str(k);
+            s.push('=');
+            s.push_str(v);
+        }
+        let mut utf16: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        utf16.extend_from_slice(&[0, 0]);
+        self.write_i32(utf16.len() as i32);
+        self.write_bytes(&utf16);
+    }
+
+    /// OLE 压缩条目：`0xD0` + Pascal 名 + zlib 载荷。用于 PinFrac / PinTextData 等。
+    #[allow(dead_code)]
+    pub fn write_compressed_named(&mut self, name: &str, payload: &[u8]) {
+        let compressed = zlib_compress(payload);
+        let (name_bytes, _, _) = WINDOWS_1252.encode(name);
+        let name_len = name_bytes.len().min(255);
+        let block_size = 1 + 1 + name_len + 4 + compressed.len();
+        self.write_i32((block_size as i32) | 0x0100_0000);
+        self.write_u8(0xD0);
+        self.write_u8(name_len as u8);
+        self.write_bytes(&name_bytes[..name_len]);
+        self.write_i32(compressed.len() as i32);
+        self.write_bytes(&compressed);
+    }
+}
+
+#[allow(dead_code)]
+pub fn zlib_compress(data: &[u8]) -> Vec<u8> {
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data).expect("zlib compress");
+    enc.finish().expect("zlib finish")
 }
 
 impl Default for BinWriter {

@@ -28,7 +28,7 @@ pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchCol
         .map(|s| unique_altium_section_key(&s.name, &mut used))
         .collect();
     let mut cfb = CfbDoc::create(path)?;
-    cfb.stream("FileHeader", &file_header_many(&keys))?;
+    cfb.stream("FileHeader", &file_header_many(&keys, colors))?;
     cfb.stream("Storage", &empty_storage())?;
 
     let key_pairs: Vec<(String, String)> = symbols
@@ -48,16 +48,27 @@ pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchCol
     cfb.finish()
 }
 
-fn file_header_many(names: &[String]) -> Vec<u8> {
+fn file_header_many(names: &[String], colors: SchColors) -> Vec<u8> {
     let mut w = BinWriter::new();
     let uid = unique_id();
     let n = names.len();
+    let extra = colors.pin_text_fonts();
+    let font_count = 1 + extra.len();
     let mut raw = format!(
         "|HEADER=Protel for Windows - Schematic Library Editor Binary File Version 5.0\
-         |WEIGHT={n}|MINORVERSION=2|UNIQUEID={uid}|FONTIDCOUNT=1|FONTNAME1=Times New Roman|SIZE1=10\
-         |USEMBCS=T|ISBOC=T|SHEETSTYLE=9|SYSTEMFONT=1|BORDERON=T|DISPLAY_UNIT=0\
-         |COMPCOUNT={n}"
+         |WEIGHT={n}|MINORVERSION=2|UNIQUEID={uid}|FONTIDCOUNT={font_count}\
+         |FONTNAME1=Times New Roman|SIZE1=10"
     );
+    for (i, color) in extra.iter().enumerate() {
+        let id = i + 2;
+        raw.push_str(&format!(
+            "|FONTNAME{id}=Times New Roman|SIZE{id}=10|COLOR{id}={color}"
+        ));
+    }
+    raw.push_str(&format!(
+        "|USEMBCS=T|ISBOC=T|SHEETSTYLE=9|SYSTEMFONT=1|BORDERON=T|DISPLAY_UNIT=0\
+         |COMPCOUNT={n}"
+    ));
     for (i, name) in names.iter().enumerate() {
         raw.push_str(&format!("|LIBREF{i}={name}|PARTCOUNT{i}=2"));
     }
@@ -241,12 +252,21 @@ fn write_named(w: &mut BinWriter, pairs: &[(String, String)]) {
 }
 
 fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin, colors: SchColors) {
+    let style = colors.pin_style(&pin.pin_type, &pin.name);
+    if style.uses_local_font() {
+        write_pin_ascii(w, pin, colors, style);
+    } else {
+        write_pin_binary(w, pin, style.line);
+    }
+}
+
+/// 线/名/号同色时走二进制管脚（立创电源/地，或黑白）。
+fn write_pin_binary(w: &mut BinWriter, pin: &crate::ir::IrPin, color: i32) {
     let orient = pin_orient(pin.rotation);
     let loc_x = dxp_num(pin.x);
     let loc_y = dxp_num(pin.y);
     let len = dxp_num(pin.length.max(2.54));
-    let mut conglomerate = orient;
-    conglomerate |= 0x08 | 0x10; // show name + designator
+    let conglomerate = orient | 0x08 | 0x10; // show name + designator
     w.write_block(0x01, |w| {
         w.write_i32(2);
         w.write_u8(0);
@@ -263,13 +283,50 @@ fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin, colors: SchColors) {
         w.write_i16(len as i16);
         w.write_i16(loc_x as i16);
         w.write_i16(loc_y as i16);
-        w.write_i32(colors.pin);
+        w.write_i32(color);
         w.write_pascal_short(&pin.name);
         w.write_pascal_short(&pin.number);
         w.write_pascal_short("");
         w.write_pascal_short("");
         w.write_pascal_short("");
     });
+}
+
+/// 嘉立创官方预览 / AD 导出：ASCII RECORD=2。
+/// COLOR 只管脚线；名/号走 FONT 表（NAME_CUSTOMFONTID）。
+fn write_pin_ascii(
+    w: &mut BinWriter,
+    pin: &crate::ir::IrPin,
+    colors: SchColors,
+    style: super::sch_color::PinStyle,
+) {
+    let orient = pin_orient(pin.rotation);
+    let loc_x = dxp_num(pin.x);
+    let loc_y = dxp_num(pin.y);
+    let len = dxp_num(pin.length.max(2.54));
+    // bit5 与官方导出一致；bit3/4 显示名和号。
+    let conglomerate = 0x20 | 0x08 | 0x10 | orient;
+    let name_font = colors.font_id_for(style.name);
+    let number_font = colors.font_id_for(style.number);
+    w.write_params(&[
+        ("RECORD", "2".into()),
+        ("OWNERPARTID", "1".into()),
+        ("FORMALTYPE", "1".into()),
+        ("ELECTRICAL", "4".into()),
+        ("PINCONGLOMERATE", conglomerate.to_string()),
+        ("PINLENGTH", len.to_string()),
+        ("LOCATION.X", loc_x.to_string()),
+        ("LOCATION.Y", loc_y.to_string()),
+        ("COLOR", style.line.to_string()),
+        ("NAME", pin.name.replace('|', "_")),
+        ("DESIGNATOR", pin.number.replace('|', "_")),
+        ("NAME_CUSTOMFONTID", name_font.to_string()),
+        ("DESIGNATOR_CUSTOMFONTID", number_font.to_string()),
+        ("PINNAME_POSITIONCONGLOMERATE", "16".into()),
+        ("PINDESIGNATOR_POSITIONCONGLOMERATE", "16".into()),
+        ("SHOWPINNAME", "T".into()),
+        ("SHOWDESIGNATOR", "T".into()),
+    ]);
 }
 
 fn pin_orient(rotation_deg: f64) -> u8 {

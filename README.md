@@ -51,8 +51,8 @@ Dimmed buttons mean this part has no matching asset. Click anyway for a notice; 
 
 **Settings** controls language, appearance, the save folder, which boxes are pre-ticked on Export, 3D attach options, footprint renaming, batch merge, and **schematic colors** for Altium `.SchLib`:
 
-- **Altium classic** (default): maroon body and pins (`COLOR=128`), blue designator / comment, black pin text — the stock Altium / Protel library look
-- **LCSC / EasyEDA**: blue outline, red pins (the old JLC-Export default)
+- **Altium classic** (default): maroon body and pins (`COLOR=128`), blue designator / comment, black pin text
+- **LCSC official**: store symbol preview — maroon `#880000` body, blue pin text, red power, black ground (input/output share the signal colors)
 - **Black & white**: for print / IEEE-style sheets
 - **Custom**: pick each color; shown as a live preview
 
@@ -83,7 +83,7 @@ lceda get C2040 --step --ad --kicad --pads -o ./out
 lceda get C2040 --kicad --no-kicad-3d -o ./out
 lceda get C2040 --ad --no-ad-3d -o ./out
 lceda get C2040 --ad --rename-footprint -o ./out
-lceda get C2040 --ad --sch-color easyeda -o ./out
+lceda get C2040 --ad --sch-color altium -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out

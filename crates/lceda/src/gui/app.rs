@@ -64,6 +64,13 @@ enum NavPage {
     About,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Appearance,
+    Export,
+}
+
 impl NavPage {
     #[allow(dead_code)]
     fn title(self, lang: Lang) -> &'static str {
@@ -232,6 +239,7 @@ struct App {
     zoom: f32,
     alert: Option<String>,
     page: NavPage,
+    settings_tab: SettingsTab,
     theme: ThemeMode,
     always_on_top: bool,
     dark_applied: Option<bool>,
@@ -334,6 +342,7 @@ impl App {
             } else {
                 NavPage::Search
             },
+            settings_tab: SettingsTab::General,
             theme: env::var("LCEDA_THEME")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -717,156 +726,110 @@ impl App {
         let lang = self.lang;
         let mut persist = false;
         let mut theme_changed = false;
-        let mut browse = false;
-        let mut open_dir = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for (tab, key) in [
+                (SettingsTab::General, "settings_tab_general"),
+                (SettingsTab::Appearance, "settings_tab_appearance"),
+                (SettingsTab::Export, "settings_tab_export"),
+            ] {
+                if ui
+                    .selectable_label(self.settings_tab == tab, i18n::t(lang, key))
+                    .clicked()
+                {
+                    self.settings_tab = tab;
+                }
+            }
+        });
+        ui.add_space(8.0);
+        ui.add(egui::Separator::default().spacing(10.0));
         egui::ScrollArea::vertical()
             .id_salt("settings_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                theme::show_card(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(i18n::t(lang, "lang_label"))
-                            .strong()
-                            .color(theme::label()),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(!self.lang_pinned, i18n::t(lang, "lang_follow"))
-                            .clicked()
-                        {
-                            self.lang_pinned = false;
-                            self.lang = Lang::detect();
-                            persist = true;
-                        }
-                        if ui
-                            .selectable_label(self.lang_pinned && self.lang == Lang::Zh, "中文")
-                            .clicked()
-                        {
-                            self.lang_pinned = true;
-                            self.lang = Lang::Zh;
-                            persist = true;
-                        }
-                        if ui
-                            .selectable_label(self.lang_pinned && self.lang == Lang::En, "English")
-                            .clicked()
-                        {
-                            self.lang_pinned = true;
-                            self.lang = Lang::En;
-                            persist = true;
-                        }
-                    });
-                    ui.add_space(12.0);
-                    ui.label(
-                        egui::RichText::new(i18n::t(lang, "theme_label"))
-                            .strong()
-                            .color(theme::label()),
-                    );
-                    ui.horizontal(|ui| {
-                        for (mode, key) in [
-                            (ThemeMode::Auto, "theme_auto"),
-                            (ThemeMode::Light, "theme_light"),
-                            (ThemeMode::Dark, "theme_dark"),
-                        ] {
-                            if ui
-                                .selectable_label(self.theme == mode, i18n::t(lang, key))
-                                .clicked()
-                            {
-                                self.theme = mode;
-                                theme_changed = true;
-                                persist = true;
-                            }
-                        }
-                    });
-                    ui.add_space(12.0);
-                    ui.label(
-                        egui::RichText::new(i18n::t(lang, "output"))
-                            .strong()
-                            .color(theme::label()),
-                    );
-                    let path_w = ui.available_width();
-                    let path = ui.add_sized(
-                        egui::vec2(path_w, 28.0),
-                        egui::TextEdit::singleline(&mut self.out_dir)
-                            .desired_width(path_w)
-                            .hint_text(i18n::t(lang, "output_hint")),
-                    );
-                    if path.lost_focus() {
-                        persist = true;
+                match self.settings_tab {
+                    SettingsTab::General => {
+                        persist |= self.settings_general(ui);
                     }
-                    ui.horizontal(|ui| {
-                        if theme::pill_button(ui, i18n::t(lang, "browse"), true, false).clicked() {
-                            browse = true;
-                        }
-                        if theme::pill_button(ui, i18n::t(lang, "open_folder"), true, true).clicked()
-                        {
-                            open_dir = true;
-                        }
-                    });
-                    ui.add_space(12.0);
-                    ui.label(
-                        egui::RichText::new(i18n::t(lang, "defaults_label"))
-                            .strong()
-                            .color(theme::label()),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(i18n::t(lang, "defaults_hint"))
-                                .color(theme::secondary())
-                                .small(),
-                        )
-                        .wrap(),
-                    );
-                    let before = self.batch_opts;
-                    ui.checkbox(&mut self.batch_opts.step, i18n::t(lang, "download_step"));
-                    ui.checkbox(&mut self.batch_opts.obj, i18n::t(lang, "download_obj"));
-                    ui.checkbox(&mut self.batch_opts.ad, i18n::t(lang, "export_ad"));
-                    ui.checkbox(&mut self.batch_opts.kicad, i18n::t(lang, "export_kicad"));
-                    ui.checkbox(&mut self.batch_opts.pads, i18n::t(lang, "export_pads"));
-                    ui.checkbox(&mut self.batch_opts.datasheet, i18n::t(lang, "datasheet"));
-                    ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
-                    if before != self.batch_opts {
-                        persist = true;
+                    SettingsTab::Appearance => {
+                        persist |= self.settings_appearance(ui, &mut theme_changed);
                     }
-                    ui.add_space(14.0);
-                    ui.label(
-                        egui::RichText::new(i18n::t(lang, "settings_3d_hint")).color(theme::secondary()),
-                    );
-                    ui.add_space(8.0);
-                    let before_ad = self.ad_embed_3d;
-                    let before_kicad = self.kicad_attach_3d;
-                    let before_fp = self.rename_footprint;
-                    let before_merge = self.batch_merge;
-                    ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
-                    ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(i18n::t(lang, "settings_fp_hint")).color(theme::secondary()),
-                    );
-                    ui.checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
-                    ui.add_space(8.0);
-                    ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(i18n::t(lang, "batch_merge_hint"))
-                                .color(theme::secondary())
-                                .small(),
-                        )
-                        .wrap(),
-                    );
-                    if self.ad_embed_3d != before_ad
-                        || self.kicad_attach_3d != before_kicad
-                        || self.rename_footprint != before_fp
-                        || self.batch_merge != before_merge
-                    {
-                        persist = true;
+                    SettingsTab::Export => {
+                        persist |= self.settings_export(ui);
                     }
-                });
-                ui.add_space(10.0);
-                if self.sch_color_card(ui) {
+                }
+            });
+        if theme_changed {
+            self.dark_applied = None;
+        }
+        if persist {
+            self.persist_prefs();
+        }
+    }
+
+    fn settings_general(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut persist = false;
+        let mut browse = false;
+        let mut open_dir = false;
+        theme::show_card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "lang_label"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(!self.lang_pinned, i18n::t(lang, "lang_follow"))
+                    .clicked()
+                {
+                    self.lang_pinned = false;
+                    self.lang = Lang::detect();
+                    persist = true;
+                }
+                if ui
+                    .selectable_label(self.lang_pinned && self.lang == Lang::Zh, "中文")
+                    .clicked()
+                {
+                    self.lang_pinned = true;
+                    self.lang = Lang::Zh;
+                    persist = true;
+                }
+                if ui
+                    .selectable_label(self.lang_pinned && self.lang == Lang::En, "English")
+                    .clicked()
+                {
+                    self.lang_pinned = true;
+                    self.lang = Lang::En;
                     persist = true;
                 }
             });
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "output"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            let path_w = ui.available_width();
+            let path = ui.add_sized(
+                egui::vec2(path_w, 28.0),
+                egui::TextEdit::singleline(&mut self.out_dir)
+                    .desired_width(path_w)
+                    .hint_text(i18n::t(lang, "output_hint")),
+            );
+            if path.lost_focus() {
+                persist = true;
+            }
+            ui.horizontal(|ui| {
+                if theme::pill_button(ui, i18n::t(lang, "browse"), true, false).clicked() {
+                    browse = true;
+                }
+                if theme::pill_button(ui, i18n::t(lang, "open_folder"), true, true).clicked() {
+                    open_dir = true;
+                }
+            });
+        });
         if browse {
             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                 self.out_dir = dir.display().to_string();
@@ -876,12 +839,103 @@ impl App {
         if open_dir {
             self.open_out_dir();
         }
-        if theme_changed {
-            self.dark_applied = None;
-        }
-        if persist {
-            self.persist_prefs();
-        }
+        persist
+    }
+
+    fn settings_appearance(&mut self, ui: &mut egui::Ui, theme_changed: &mut bool) -> bool {
+        let lang = self.lang;
+        let mut persist = false;
+        theme::show_card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "theme_label"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            ui.horizontal(|ui| {
+                for (mode, key) in [
+                    (ThemeMode::Auto, "theme_auto"),
+                    (ThemeMode::Light, "theme_light"),
+                    (ThemeMode::Dark, "theme_dark"),
+                ] {
+                    if ui
+                        .selectable_label(self.theme == mode, i18n::t(lang, key))
+                        .clicked()
+                    {
+                        self.theme = mode;
+                        *theme_changed = true;
+                        persist = true;
+                    }
+                }
+            });
+        });
+        persist
+    }
+
+    fn settings_export(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut persist = false;
+        theme::show_card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "defaults_label"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(i18n::t(lang, "defaults_hint"))
+                        .color(theme::secondary())
+                        .small(),
+                )
+                .wrap(),
+            );
+            let before = self.batch_opts;
+            ui.checkbox(&mut self.batch_opts.step, i18n::t(lang, "download_step"));
+            ui.checkbox(&mut self.batch_opts.obj, i18n::t(lang, "download_obj"));
+            ui.checkbox(&mut self.batch_opts.ad, i18n::t(lang, "export_ad"));
+            ui.checkbox(&mut self.batch_opts.kicad, i18n::t(lang, "export_kicad"));
+            ui.checkbox(&mut self.batch_opts.pads, i18n::t(lang, "export_pads"));
+            ui.checkbox(&mut self.batch_opts.datasheet, i18n::t(lang, "datasheet"));
+            ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
+            if before != self.batch_opts {
+                persist = true;
+            }
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "settings_3d_hint")).color(theme::secondary()),
+            );
+            ui.add_space(8.0);
+            let before_ad = self.ad_embed_3d;
+            let before_kicad = self.kicad_attach_3d;
+            let before_fp = self.rename_footprint;
+            let before_merge = self.batch_merge;
+            ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
+            ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "settings_fp_hint")).color(theme::secondary()),
+            );
+            ui.checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(i18n::t(lang, "batch_merge_hint"))
+                        .color(theme::secondary())
+                        .small(),
+                )
+                .wrap(),
+            );
+            if self.ad_embed_3d != before_ad
+                || self.kicad_attach_3d != before_kicad
+                || self.rename_footprint != before_fp
+                || self.batch_merge != before_merge
+            {
+                persist = true;
+            }
+        });
+        ui.add_space(10.0);
+        persist |= self.sch_color_card(ui);
+        persist
     }
 
     fn sch_color_card(&mut self, ui: &mut egui::Ui) -> bool {
@@ -1492,11 +1546,10 @@ impl eframe::App for App {
             let win_w = ctx.input(|i| i.screen_rect().width());
             let parts_max = clamp_parts_max(win_w, 12.0 + nav_w);
             let parts_min = PARTS_MIN.min(parts_max);
+            let parts_w = self.parts_width.clamp(parts_min, parts_max);
             let parts = egui::SidePanel::left("parts")
-                .resizable(true)
-                .default_width(self.parts_width.clamp(parts_min, parts_max))
-                .min_width(parts_min)
-                .max_width(parts_max)
+                .resizable(false)
+                .exact_width(parts_w)
                 .show_separator_line(false)
                 .frame(
                     egui::Frame::new()
@@ -1511,13 +1564,13 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     self.left_pane(ui);
                 });
-            paint_parts_split(ctx, parts.response.rect, parts.response.dragged());
-            if parts.response.drag_stopped() {
-                let w = parts.response.rect.width().clamp(parts_min, parts_max);
-                if (w - self.parts_width).abs() > 0.5 {
-                    self.parts_width = w;
-                    self.persist_prefs();
-                }
+            let (dx, done) = parts_split_drag(ctx, parts.response.rect);
+            if dx != 0.0 {
+                self.parts_width = (parts_w + dx).clamp(parts_min, parts_max);
+                ctx.request_repaint();
+            }
+            if done {
+                self.persist_prefs();
             }
         }
 
@@ -3199,9 +3252,12 @@ impl App {
             dirty = true;
         }
         if !maxed {
-            if let Some(outer) = outer {
-                let x = outer.min.x;
-                let y = outer.min.y;
+            let pos = outer
+                .map(|r| r.min)
+                .or_else(|| inner.map(|r| r.min));
+            if let Some(pos) = pos {
+                let x = pos.x;
+                let y = pos.y;
                 if self.win_x.is_none_or(|o| (o - x).abs() > 1.0)
                     || self.win_y.is_none_or(|o| (o - y).abs() > 1.0)
                 {
@@ -3461,9 +3517,6 @@ fn sch_color_preview(ui: &mut egui::Ui, colors: SchColors) {
     );
     let body = egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 6.0), egui::vec2(96.0, 78.0));
     let body_c = bgr_color(colors.body);
-    let pin_c = bgr_color(colors.pin);
-    let name_c = bgr_color(colors.pin_name);
-    let num_c = bgr_color(colors.pin_number);
     p.rect_stroke(body, 0.0, egui::Stroke::new(1.6_f32, body_c), egui::StrokeKind::Inside);
     p.circle_stroke(
         egui::pos2(body.left() + 9.0, body.top() + 9.0),
@@ -3475,51 +3528,53 @@ fn sch_color_preview(ui: &mut egui::Ui, colors: SchColors) {
     let font = egui::FontId::proportional(9.0);
     for i in 0..5 {
         let y = body.top() + 12.0 + i as f32 * 13.0;
+        let ls = colors.pin_style("", left[i]);
+        let rs = colors.pin_style("", right[i]);
         p.line_segment(
             [egui::pos2(body.left() - 18.0, y), egui::pos2(body.left(), y)],
-            egui::Stroke::new(1.3_f32, pin_c),
+            egui::Stroke::new(1.3_f32, bgr_color(ls.line)),
         );
         p.circle_stroke(
             egui::pos2(body.left() - 18.0, y),
             2.0,
-            egui::Stroke::new(1.0_f32, pin_c),
+            egui::Stroke::new(1.0_f32, bgr_color(ls.line)),
         );
         p.text(
             egui::pos2(body.left() - 24.0, y),
             egui::Align2::RIGHT_CENTER,
             format!("{}", i + 1),
             font.clone(),
-            num_c,
+            bgr_color(ls.number),
         );
         p.text(
             egui::pos2(body.left() + 5.0, y),
             egui::Align2::LEFT_CENTER,
             left[i],
             font.clone(),
-            name_c,
+            bgr_color(ls.name),
         );
         p.line_segment(
             [egui::pos2(body.right(), y), egui::pos2(body.right() + 18.0, y)],
-            egui::Stroke::new(1.3_f32, pin_c),
+            egui::Stroke::new(1.3_f32, bgr_color(rs.line)),
         );
         p.circle_stroke(
             egui::pos2(body.right() + 18.0, y),
             2.0,
-            egui::Stroke::new(1.0_f32, pin_c),
+            egui::Stroke::new(1.0_f32, bgr_color(rs.line)),
         );
         p.text(
             egui::pos2(body.right() + 24.0, y),
             egui::Align2::LEFT_CENTER,
             format!("{}", 10 - i),
             font.clone(),
-            num_c,
+            bgr_color(rs.number),
         );
         p.text(
             egui::pos2(body.right() - 5.0, y),
             egui::Align2::RIGHT_CENTER,
             right[i],
             font.clone(),
-            name_c,
+            bgr_color(rs.name),
         );
     }
     p.text(
@@ -3777,24 +3832,31 @@ fn paint_split_grip(painter: &egui::Painter, gap: egui::Rect, vertical: bool, ho
     );
 }
 
-fn paint_parts_split(ctx: &egui::Context, panel: egui::Rect, dragged: bool) {
+fn parts_split_drag(ctx: &egui::Context, panel: egui::Rect) -> (f32, bool) {
     let gap = egui::Rect::from_min_max(
         egui::pos2(panel.right() - 5.0, panel.top() + 16.0),
         egui::pos2(panel.right() + 5.0, panel.bottom() - 16.0),
     );
-    let hot = dragged
-        || ctx
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|p| gap.contains(p));
-    if !hot {
-        return;
+    if gap.width() < 1.0 || gap.height() < 1.0 {
+        return (0.0, false);
     }
-    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("parts_split"),
-    ));
-    paint_split_grip(&painter, gap, true, true);
+    let mut delta = 0.0;
+    let mut done = false;
+    egui::Area::new(egui::Id::new("parts_split_area"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(gap.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (_rect, resp) = ui.allocate_exact_size(gap.size(), egui::Sense::drag());
+            let hot = resp.hovered() || resp.dragged();
+            if hot {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                paint_split_grip(ui.painter(), gap, true, true);
+            }
+            delta = resp.drag_delta().x;
+            done = resp.drag_stopped();
+        });
+    (delta, done)
 }
 
 fn drag_split(ui: &mut egui::Ui, id: &'static str, gap: egui::Rect, vertical: bool) -> (f32, bool) {
