@@ -57,6 +57,7 @@ mod tests {
         let symbol = SymbolIr {
             name: "RES".into(),
             description: "test".into(),
+            designator: "U?".into(),
             meta: Default::default(),
             pins: vec![IrPin {
                 number: "1".into(),
@@ -66,6 +67,7 @@ mod tests {
                 length: 2.54,
                 rotation: 270.0,
                 pin_type: String::new(),
+                ..Default::default()
             }],
             rects: vec![IrRect {
                 x1: -1.0,
@@ -109,6 +111,7 @@ mod tests {
         let mut symbol = sample_symbol("CH343P");
         symbol.description =
             "应用功能:USB转UART\nUSB协议版本:USB 2.0\n通道数:-\n数据速率:6Mbps".into();
+        symbol.designator = "U?".into();
         write_schlib(&path, &symbol).unwrap();
         let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
         let mut data = Vec::new();
@@ -127,6 +130,7 @@ mod tests {
             data.windows(gbk.len()).any(|w| w == gbk.as_ref()),
             "Chinese Description must be GBK"
         );
+        assert!(text.contains("TEXT=U?") && text.contains("NAME=Designator"), "{text}");
     }
 
     #[test]
@@ -450,6 +454,7 @@ mod tests {
         SymbolIr {
             name: name.into(),
             description: "test".into(),
+            designator: "U?".into(),
             meta: Default::default(),
             pins: vec![IrPin {
                 number: "1".into(),
@@ -459,6 +464,7 @@ mod tests {
                 length: 2.54,
                 rotation: 270.0,
                 pin_type: String::new(),
+                ..Default::default()
             }],
             rects: vec![IrRect {
                 x1: -1.0,
@@ -561,6 +567,8 @@ mod tests {
         );
         assert!(text.contains("NAME_CUSTOMFONTID=2"), "{text}");
         assert!(text.contains("DESIGNATOR_CUSTOMFONTID=2"), "{text}");
+        assert!(text.contains("SHOWPINNAME=T"), "{text}");
+        assert!(text.contains("SHOWDESIGNATOR=T"), "{text}");
         assert!(
             !cfb.exists("RES/PinTextData"),
             "官方导出不写 PinTextData"
@@ -570,6 +578,24 @@ mod tests {
         let hdr = String::from_utf8_lossy(&hdr);
         assert!(hdr.contains("FONTIDCOUNT=2"), "{hdr}");
         assert!(hdr.contains("COLOR2=0"), "管脚字黑体: {hdr}");
+    }
+
+    #[test]
+    fn hides_pin_name_when_easyeda_value_not_visible() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-hide-name");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("LED.SchLib");
+        let mut symbol = sample_symbol("LED");
+        symbol.pins[0].name = "KA1".into();
+        symbol.pins[0].show_name = false;
+        write_schlib_with_colors(&path, &symbol, SchColors::altium_classic()).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut data = Vec::new();
+        cfb.open_stream("LED/Data").unwrap().read_to_end(&mut data).unwrap();
+        let text = String::from_utf8_lossy(&data);
+        assert!(text.contains("SHOWPINNAME=F"), "{text}");
+        assert!(text.contains("SHOWDESIGNATOR=T"), "{text}");
+        assert!(text.contains("NAME=KA1"), "{text}");
     }
 
     #[test]
@@ -587,6 +613,7 @@ mod tests {
                 length: 2.54,
                 rotation: 180.0,
                 pin_type: String::new(),
+                ..Default::default()
             },
             IrPin {
                 number: "2".into(),
@@ -596,6 +623,7 @@ mod tests {
                 length: 2.54,
                 rotation: 180.0,
                 pin_type: String::new(),
+                ..Default::default()
             },
             IrPin {
                 number: "3".into(),
@@ -605,6 +633,7 @@ mod tests {
                 length: 2.54,
                 rotation: 0.0,
                 pin_type: "OUT".into(),
+                ..Default::default()
             },
         ];
         write_schlib_with_colors(&path, &symbol, SchColors::easyeda()).unwrap();
@@ -666,6 +695,19 @@ mod tests {
         let hdr = String::from_utf8_lossy(&hdr);
         assert!(hdr.contains("SIZE2=8"), "custom pin size: {hdr}");
         assert!(hdr.contains("FONTNAME2=Times New Roman"), "{hdr}");
+    }
+
+    #[test]
+    fn writes_schlib_mono_without_pintextdata() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-mono");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("RES.SchLib");
+        write_schlib_with_colors(&path, &sample_symbol("RES"), SchColors::mono()).unwrap();
+        let cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        assert!(
+            !cfb.exists("RES/PinTextData"),
+            "黑白线字同色，不写 PinTextData"
+        );
     }
 }
 

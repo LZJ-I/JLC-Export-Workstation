@@ -1,7 +1,58 @@
 use lceda_core::altium::{SchColorScheme, SchColors};
+use lceda_core::desc::{self, DescField};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportSection {
+    Format,
+    Schematic,
+    Description,
+}
+
+impl ExportSection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::Schematic => "schematic",
+            Self::Description => "description",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "schematic" => Self::Schematic,
+            "description" => Self::Description,
+            _ => Self::Format,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    General,
+    Appearance,
+    Export,
+}
+
+impl SettingsTab {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Appearance => "appearance",
+            Self::Export => "export",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "appearance" => Self::Appearance,
+            "export" => Self::Export,
+            _ => Self::General,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -28,7 +79,7 @@ impl ThemeMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Prefs {
     pub ad_embed_3d: bool,
     pub kicad_attach_3d: bool,
@@ -56,6 +107,10 @@ pub struct Prefs {
     pub top_frac: Option<f32>,
     pub sch_scheme: SchColorScheme,
     pub sch_custom: SchColors,
+    pub settings_tab: SettingsTab,
+    pub export_section: ExportSection,
+    pub desc_fields: Vec<DescField>,
+    pub nav_expanded: bool,
 }
 
 impl Default for Prefs {
@@ -87,6 +142,10 @@ impl Default for Prefs {
             top_frac: None,
             sch_scheme: SchColorScheme::default(),
             sch_custom: SchColors::altium_classic(),
+            settings_tab: SettingsTab::General,
+            export_section: ExportSection::Format,
+            desc_fields: DescField::library(),
+            nav_expanded: true,
         }
     }
 }
@@ -101,6 +160,10 @@ pub fn load() -> Prefs {
     let Ok(v) = serde_json::from_str::<Value>(&text) else {
         return Prefs::default();
     };
+    from_json(&v)
+}
+
+fn from_json(v: &Value) -> Prefs {
     Prefs {
         ad_embed_3d: v.get("ad_embed_3d").and_then(Value::as_bool).unwrap_or(true),
         kicad_attach_3d: v.get("kicad_attach_3d").and_then(Value::as_bool).unwrap_or(true),
@@ -139,20 +202,43 @@ pub fn load() -> Prefs {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         export_source: v.get("export_source").and_then(Value::as_bool).unwrap_or(false),
-        win_x: json_f32(&v, "win_x"),
-        win_y: json_f32(&v, "win_y"),
-        win_w: json_f32(&v, "win_w").unwrap_or(1180.0).clamp(960.0, 4000.0),
-        win_h: json_f32(&v, "win_h").unwrap_or(760.0).clamp(620.0, 3000.0),
+        win_x: json_f32(v, "win_x"),
+        win_y: json_f32(v, "win_y"),
+        win_w: json_f32(v, "win_w").unwrap_or(1180.0).clamp(960.0, 4000.0),
+        win_h: json_f32(v, "win_h").unwrap_or(760.0).clamp(620.0, 3000.0),
         win_max: v.get("win_max").and_then(Value::as_bool).unwrap_or(false),
-        parts_width: json_f32(&v, "parts_width").unwrap_or(340.0).clamp(200.0, 480.0),
-        photo_frac: json_f32(&v, "photo_frac").map(|n| n.clamp(0.15, 0.75)),
-        top_frac: json_f32(&v, "top_frac").map(|n| n.clamp(0.20, 0.80)),
+        parts_width: json_f32(v, "parts_width").unwrap_or(340.0).clamp(200.0, 480.0),
+        photo_frac: json_f32(v, "photo_frac").map(|n| n.clamp(0.15, 0.75)),
+        top_frac: json_f32(v, "top_frac").map(|n| n.clamp(0.20, 0.80)),
         sch_scheme: v
             .get("sch_color")
             .and_then(Value::as_str)
             .map(SchColorScheme::parse)
             .unwrap_or_default(),
         sch_custom: json_sch_colors(v.get("sch_custom")),
+        settings_tab: v
+            .get("settings_tab")
+            .and_then(Value::as_str)
+            .map(SettingsTab::parse)
+            .unwrap_or(SettingsTab::General),
+        export_section: v
+            .get("export_section")
+            .and_then(Value::as_str)
+            .map(ExportSection::parse)
+            .unwrap_or(ExportSection::Format),
+        desc_fields: v
+            .get("desc_fields")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                desc::parse_fields(
+                    &arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_else(DescField::library),
+        nav_expanded: v.get("nav_expanded").and_then(Value::as_bool).unwrap_or(true),
     }
 }
 
@@ -207,6 +293,10 @@ pub fn save(prefs: &Prefs) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let _ = fs::write(path, to_json(prefs).to_string());
+}
+
+fn to_json(prefs: &Prefs) -> Value {
     let mut body = json!({
         "ad_embed_3d": prefs.ad_embed_3d,
         "kicad_attach_3d": prefs.kicad_attach_3d,
@@ -227,6 +317,10 @@ pub fn save(prefs: &Prefs) {
         "win_max": prefs.win_max,
         "parts_width": prefs.parts_width,
         "sch_color": prefs.sch_scheme.as_str(),
+        "settings_tab": prefs.settings_tab.as_str(),
+        "export_section": prefs.export_section.as_str(),
+        "desc_fields": desc::field_ids(&prefs.desc_fields),
+        "nav_expanded": prefs.nav_expanded,
         "sch_custom": {
             "body": SchColors::as_hex(prefs.sch_custom.body),
             "pin": SchColors::as_hex(prefs.sch_custom.pin),
@@ -255,10 +349,101 @@ pub fn save(prefs: &Prefs) {
     if let Some(y) = prefs.win_y {
         body["win_y"] = json!(y);
     }
-    let _ = fs::write(path, body.to_string());
+    body
 }
 
 fn prefs_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "LZJ-I", "lceda-assistant")
         .map(|d| d.config_dir().join("prefs.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lceda_core::desc::DescField;
+
+    fn roundtrip(prefs: &Prefs) -> Prefs {
+        from_json(&to_json(prefs))
+    }
+
+    #[test]
+    fn default_prefs_survive_json() {
+        let prefs = Prefs::default();
+        assert_eq!(roundtrip(&prefs), prefs);
+    }
+
+    #[test]
+    fn desc_fields_keep_custom_order() {
+        let mut prefs = Prefs::default();
+        prefs.desc_fields = vec![
+            DescField::Package,
+            DescField::Lcsc,
+            DescField::Mpn,
+            DescField::Description,
+        ];
+        let restored = roundtrip(&prefs);
+        assert_eq!(restored.desc_fields, prefs.desc_fields);
+        assert_eq!(
+            desc::field_ids(&restored.desc_fields),
+            vec!["package", "lcsc", "mpn", "description"]
+        );
+    }
+
+    #[test]
+    fn settings_and_export_restore() {
+        let mut prefs = Prefs::default();
+        prefs.ad_embed_3d = false;
+        prefs.kicad_attach_3d = false;
+        prefs.rename_footprint = true;
+        prefs.batch_merge = true;
+        prefs.hide_welcome = true;
+        prefs.lang = Some("en".into());
+        prefs.theme = ThemeMode::Dark;
+        prefs.always_on_top = true;
+        prefs.out_dir = Some("D:/out".into());
+        prefs.export_step = false;
+        prefs.export_obj = true;
+        prefs.export_ad = false;
+        prefs.export_kicad = false;
+        prefs.export_pads = true;
+        prefs.export_datasheet = true;
+        prefs.export_source = true;
+        prefs.win_x = Some(12.0);
+        prefs.win_y = Some(34.0);
+        prefs.win_w = 1280.0;
+        prefs.win_h = 800.0;
+        prefs.win_max = true;
+        prefs.parts_width = 280.0;
+        prefs.photo_frac = Some(0.33);
+        prefs.top_frac = Some(0.45);
+        prefs.sch_scheme = SchColorScheme::Custom;
+        prefs.sch_custom.pin_font_size = 7;
+        prefs.settings_tab = SettingsTab::Export;
+        prefs.export_section = ExportSection::Description;
+        prefs.nav_expanded = false;
+
+        let restored = roundtrip(&prefs);
+        assert_eq!(restored, prefs);
+        assert!(!restored.ad_embed_3d);
+        assert_eq!(restored.lang.as_deref(), Some("en"));
+        assert_eq!(restored.theme, ThemeMode::Dark);
+        assert_eq!(restored.settings_tab, SettingsTab::Export);
+        assert_eq!(restored.export_section, ExportSection::Description);
+        assert!(!restored.nav_expanded);
+    }
+
+    #[test]
+    fn missing_new_keys_keep_old_defaults() {
+        let v = json!({
+            "ad_embed_3d": false,
+            "theme": "light",
+        });
+        let prefs = from_json(&v);
+        assert!(!prefs.ad_embed_3d);
+        assert_eq!(prefs.theme, ThemeMode::Light);
+        assert_eq!(prefs.settings_tab, SettingsTab::General);
+        assert_eq!(prefs.export_section, ExportSection::Format);
+        assert_eq!(prefs.desc_fields, DescField::library());
+        assert!(prefs.nav_expanded);
+    }
 }

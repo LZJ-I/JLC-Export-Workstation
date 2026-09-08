@@ -4,6 +4,7 @@
 
 pub mod altium;
 pub mod client;
+pub mod desc;
 pub mod easyeda;
 pub mod error;
 pub mod export;

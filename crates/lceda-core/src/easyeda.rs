@@ -23,6 +23,27 @@ pub struct SymbolPin {
     pub number: String,
     pub name: String,
     pub pin_type: String,
+    /// 立创 `ATTR.NAME.valueVisible`。缺省当显示。
+    pub show_name: bool,
+    /// 立创 `ATTR.NUMBER.valueVisible`。缺省当显示。
+    pub show_number: bool,
+}
+
+impl Default for SymbolPin {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            x: 0.0,
+            y: 0.0,
+            length: 20.0,
+            rotation: 0.0,
+            number: String::new(),
+            name: String::new(),
+            pin_type: String::new(),
+            show_name: true,
+            show_number: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +159,7 @@ pub fn parse_datastr(data_str: &str) -> Result<Vec<Value>> {
 pub fn parse_symbol(value: &Value) -> Result<EasyedaSymbol> {
     let rows = parse_component_json(value)?;
     let mut symbol = EasyedaSymbol::default();
-    let mut attrs: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut attrs: HashMap<String, HashMap<String, AttrEntry>> = HashMap::new();
 
     for row in &rows {
         match row_type(row).as_str() {
@@ -152,9 +173,7 @@ pub fn parse_symbol(value: &Value) -> Result<EasyedaSymbol> {
                         if v == 0.0 { 20.0 } else { v }
                     },
                     rotation: get_f64(row, 7),
-                    number: String::new(),
-                    name: String::new(),
-                    pin_type: String::new(),
+                    ..Default::default()
                 };
                 if !pin.id.is_empty() {
                     symbol.pins.push(pin);
@@ -165,7 +184,13 @@ pub fn parse_symbol(value: &Value) -> Result<EasyedaSymbol> {
                 let key = get_string(row, 3);
                 let val = get_string(row, 4);
                 if !parent.is_empty() && !key.is_empty() {
-                    attrs.entry(parent).or_default().insert(key, val);
+                    attrs.entry(parent).or_default().insert(
+                        key,
+                        AttrEntry {
+                            value: val,
+                            visible: json_bool(row.get(6)).unwrap_or(true),
+                        },
+                    );
                 }
             }
             "PART" => {
@@ -224,22 +249,84 @@ pub fn parse_symbol(value: &Value) -> Result<EasyedaSymbol> {
 
     for (i, pin) in symbol.pins.iter_mut().enumerate() {
         let map = attrs.get(&pin.id);
-        pin.number = map
-            .and_then(|m| m.get("NUMBER"))
-            .cloned()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| (i + 1).to_string());
-        pin.name = map
-            .and_then(|m| m.get("NAME"))
-            .cloned()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| pin.number.clone());
-        pin.pin_type = map
-            .and_then(|m| m.get("Pin Type"))
-            .cloned()
+        if let Some(a) = attr_get(map, &["NUMBER", "Pin Number"]) {
+            if !a.value.is_empty() {
+                pin.number = a.value.clone();
+            }
+            pin.show_number = a.visible;
+        }
+        if pin.number.is_empty() {
+            pin.number = (i + 1).to_string();
+        }
+        if let Some(a) = attr_get(map, &["NAME", "Pin Name"]) {
+            if !a.value.is_empty() {
+                pin.name = a.value.clone();
+            }
+            pin.show_name = a.visible;
+        }
+        if pin.name.is_empty() {
+            pin.name = pin.number.clone();
+        }
+        pin.pin_type = attr_get(map, &["Pin Type"])
+            .map(|a| a.value.clone())
             .unwrap_or_default();
     }
     Ok(symbol)
+}
+
+#[derive(Debug, Clone)]
+struct AttrEntry {
+    value: String,
+    visible: bool,
+}
+
+fn attr_get<'a>(
+    map: Option<&'a HashMap<String, AttrEntry>>,
+    keys: &[&str],
+) -> Option<&'a AttrEntry> {
+    let map = map?;
+    keys.iter().find_map(|k| map.get(*k))
+}
+
+/// 符号级位号：`ATTR Designator` 或 `HEAD.c_para.pre`。
+pub fn symbol_designator(value: &Value) -> Option<String> {
+    let Ok(rows) = parse_component_json(value) else {
+        return None;
+    };
+    let mut from_attr = None;
+    let mut from_pre = None;
+    for row in &rows {
+        match row_type(row).as_str() {
+            "ATTR" => {
+                let parent = get_string(row, 2);
+                let key = get_string(row, 3);
+                let val = get_string(row, 4);
+                if parent.is_empty() && key.eq_ignore_ascii_case("Designator") && !val.is_empty() {
+                    from_attr = Some(val);
+                }
+            }
+            "HEAD" => {
+                let meta = row.get(1).or_else(|| row.get(2));
+                if let Some(meta) = meta {
+                    if let Some(pre) = meta
+                        .pointer("/c_para/pre")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        from_pre = Some(pre.to_string());
+                    } else if let Some(pre) = meta
+                        .get("pre")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        from_pre = Some(pre.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    from_attr.or(from_pre)
 }
 
 /// 立创封装/符号的原始库名，优先 `result.display_title`。
@@ -642,6 +729,20 @@ fn json_f64(v: &Value) -> f64 {
     }
 }
 
+/// 立创 `valueVisible`：bool / 0/1 / "true"|"false"。
+fn json_bool(v: Option<&Value>) -> Option<bool> {
+    match v {
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::Number(n)) => Some(n.as_i64().unwrap_or(0) != 0),
+        Some(Value::String(s)) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => Some(true),
+            "false" | "0" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn as_number(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
@@ -662,6 +763,21 @@ pub fn normalize_angle(v: f64) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn symbol_designator_reads_top_level_attr() {
+        let json: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/FNR3015S2R2MT_symbol_easyeda.json"
+        ))
+        .unwrap();
+        assert_eq!(symbol_designator(&json).as_deref(), Some("L?"));
+        let head = json!({
+            "result": {
+                "dataStr": "[\"HEAD\",{\"c_para\":{\"pre\":\"SW?\"}}]\n"
+            }
+        });
+        assert_eq!(symbol_designator(&head).as_deref(), Some("SW?"));
+    }
 
     #[test]
     fn component_display_title_prefers_result_display_title() {
@@ -690,6 +806,29 @@ mod tests {
         assert_eq!(sym.pins.len(), 1);
         assert_eq!(sym.pins[0].number, "1");
         assert_eq!(sym.pins[0].name, "VCC");
+        assert!(sym.pins[0].show_name);
+        assert!(sym.pins[0].show_number);
+    }
+
+    #[test]
+    fn pin_attr_value_visible_matches_easyeda() {
+        let ds = r#"["PART","LED.1",{"BBOX":[-8,-12,8,12]}]
+["PIN","p1","","",-20,0,10,0]
+["ATTR","a","p1","NAME","KA1",false,false,-6,0,0,"st3",0]
+["ATTR","b","p1","NUMBER","1",false,true,-18,2,0,"st4",0]
+["PIN","p2","","",20,0,10,180]
+["ATTR","c","p2","Pin Name","KA2",false,0,6,0,0,"st3",0]
+["ATTR","d","p2","Pin Number","2",false,1,18,2,0,"st4",0]
+"#;
+        let sym = parse_symbol(&json!({"result": {"dataStr": ds}})).unwrap();
+        assert_eq!(sym.part_box, Some((-8.0, -12.0, 8.0, 12.0)));
+        assert!(sym.rects.is_empty(), "BBOX is not a RECT");
+        assert_eq!(sym.pins[0].name, "KA1");
+        assert!(!sym.pins[0].show_name);
+        assert!(sym.pins[0].show_number);
+        assert_eq!(sym.pins[1].name, "KA2");
+        assert!(!sym.pins[1].show_name);
+        assert!(sym.pins[1].show_number);
     }
 
     #[test]

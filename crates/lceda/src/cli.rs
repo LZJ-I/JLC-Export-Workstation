@@ -288,6 +288,7 @@ fn build_req(
         merge: false,
         merge_name: "lceda".into(),
         sch_colors: scheme.colors(prefs.sch_custom),
+        desc_fields: prefs.desc_fields.clone(),
     };
     if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
     {

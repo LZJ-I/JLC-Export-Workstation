@@ -43,6 +43,8 @@ impl PartMeta {
 pub struct SymbolIr {
     pub name: String,
     pub description: String,
+    /// 原理图位号前缀，如 `U?` / `R?` / `SW?`。
+    pub designator: String,
     pub meta: PartMeta,
     pub pins: Vec<IrPin>,
     pub rects: Vec<IrRect>,
@@ -59,6 +61,24 @@ pub struct IrPin {
     pub length: f64,
     pub rotation: f64,
     pub pin_type: String,
+    pub show_name: bool,
+    pub show_number: bool,
+}
+
+impl Default for IrPin {
+    fn default() -> Self {
+        Self {
+            number: String::new(),
+            name: String::new(),
+            x: 0.0,
+            y: 0.0,
+            length: 2.54,
+            rotation: 0.0,
+            pin_type: String::new(),
+            show_name: true,
+            show_number: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +180,7 @@ pub struct IrRegion {
 }
 
 pub fn symbol_ir(name: &str, description: &str, src: EasyedaSymbol, meta: PartMeta) -> SymbolIr {
-    let mut rects: Vec<IrRect> = src
+    let rects: Vec<IrRect> = src
         .rects
         .into_iter()
         .map(|r| IrRect {
@@ -170,19 +190,12 @@ pub fn symbol_ir(name: &str, description: &str, src: EasyedaSymbol, meta: PartMe
             y2: r.y2 * SYMBOL_UNIT_MM,
         })
         .collect();
-    if rects.is_empty() {
-        if let Some((x1, y1, x2, y2)) = src.part_box {
-            rects.push(IrRect {
-                x1: x1 * SYMBOL_UNIT_MM,
-                y1: y1 * SYMBOL_UNIT_MM,
-                x2: x2 * SYMBOL_UNIT_MM,
-                y2: y2 * SYMBOL_UNIT_MM,
-            });
-        }
-    }
+    // 立创 PART.BBOX 只是点选包围盒，官方预览 / KiCad 导入都不画。
+    let description = meta.describe(description);
     let mut symbol = SymbolIr {
         name: name.to_string(),
-        description: meta.describe(description),
+        description,
+        designator: "U?".into(),
         meta,
         pins: src
             .pins
@@ -195,6 +208,8 @@ pub fn symbol_ir(name: &str, description: &str, src: EasyedaSymbol, meta: PartMe
                 length: p.length.max(0.0) * SYMBOL_UNIT_MM,
                 rotation: p.rotation,
                 pin_type: p.pin_type,
+                show_name: p.show_name,
+                show_number: p.show_number,
             })
             .collect(),
         rects,
@@ -214,89 +229,36 @@ pub fn symbol_ir(name: &str, description: &str, src: EasyedaSymbol, meta: PartMe
             })
             .collect(),
     };
-    snap_pins_to_body(&mut symbol);
+    let _ = src.part_box;
+    attach_pins_from_length(&mut symbol);
     symbol
 }
 
 const MIN_PIN_LENGTH_MM: f64 = 2.54;
 
-fn snap_pins_to_body(symbol: &mut SymbolIr) {
-    let bounds = graphics_bounds(symbol);
+/// 立创 PIN 坐标是电气端点，长度指向本体。Altium 坐标是本体端，向外画线。
+/// 按库里的长度贴上，不要用图形包围盒：LED 箭头会把包围盒撑出阴极，右边留缝。
+fn attach_pins_from_length(symbol: &mut SymbolIr) {
     for pin in &mut symbol.pins {
-        let mut attached = false;
-        if let Some((min_x, min_y, max_x, max_y)) = bounds {
-            let mut orient = pin_quadrant(pin.rotation);
-            let horizontal = orient == 0 || orient == 2;
-            let mut length = pin.length;
-            let mut x = pin.x;
-            let mut y = pin.y;
-            if horizontal {
-                if pin.x <= min_x {
-                    orient = 2;
-                    length = min_x - pin.x;
-                    x = min_x;
-                    attached = true;
-                } else if pin.x >= max_x {
-                    orient = 0;
-                    length = pin.x - max_x;
-                    x = max_x;
-                    attached = true;
-                }
-            } else if pin.y <= min_y {
-                orient = 3;
-                length = min_y - pin.y;
-                y = min_y;
-                attached = true;
-            } else if pin.y >= max_y {
-                orient = 1;
-                length = pin.y - max_y;
-                y = max_y;
-                attached = true;
+        let length = pin.length;
+        if length.is_finite() && length > 1e-6 {
+            let toward = pin_quadrant(pin.rotation);
+            match toward {
+                0 => pin.x += length,
+                1 => pin.y += length,
+                2 => pin.x -= length,
+                3 => pin.y -= length,
+                _ => {}
             }
-            if attached && length.is_finite() && length > 1e-6 {
-                pin.x = x;
-                pin.y = y;
-                pin.length = length.max(MIN_PIN_LENGTH_MM);
-                pin.rotation = f64::from(orient) * 90.0;
-                continue;
-            }
+            pin.rotation = f64::from((toward + 2) % 4) * 90.0;
         }
-        pin.length = pin.length.max(MIN_PIN_LENGTH_MM);
+        pin.length = length.max(MIN_PIN_LENGTH_MM);
     }
 }
 
 fn pin_quadrant(rotation_deg: f64) -> u8 {
     let a = crate::easyeda::normalize_angle(rotation_deg);
     ((a / 90.0).round() as i32).rem_euclid(4) as u8
-}
-
-fn graphics_bounds(symbol: &SymbolIr) -> Option<(f64, f64, f64, f64)> {
-    let mut min_x = f64::INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    {
-        let mut add = |x: f64, y: f64| {
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
-        };
-        for r in &symbol.rects {
-            add(r.x1, r.y1);
-            add(r.x2, r.y2);
-        }
-        for poly in &symbol.polys {
-            for &(x, y) in poly {
-                add(x, y);
-            }
-        }
-        for e in &symbol.ellipses {
-            add(e.x - e.rx, e.y - e.ry);
-            add(e.x + e.rx, e.y + e.ry);
-        }
-    }
-    min_x.is_finite().then_some((min_x, min_y, max_x, max_y))
 }
 
 pub fn footprint_ir(name: &str, description: &str, src: EasyedaFootprint, meta: PartMeta) -> FootprintIr {
@@ -406,6 +368,25 @@ mod tests {
             meta.describe("CH343P"),
             "CH343P | LCSC C2846043 | WCH"
         );
+        let src = EasyedaSymbol {
+            pins: vec![],
+            rects: vec![],
+            polys: vec![],
+            ellipses: vec![],
+            part_box: None,
+        };
+        let one_line = symbol_ir("CH343P", "CH343P", src.clone(), meta.clone());
+        assert_eq!(one_line.description, "CH343P | LCSC C2846043 | WCH");
+        let multi = symbol_ir(
+            "CH343P",
+            "应用功能:USB转UART\nUSB协议版本:USB 2.0",
+            src,
+            meta,
+        );
+        assert_eq!(
+            multi.description,
+            "应用功能:USB转UART\nUSB协议版本:USB 2.0"
+        );
     }
 
     #[test]
@@ -421,6 +402,8 @@ mod tests {
                     number: "1".into(),
                     name: "1".into(),
                     pin_type: String::new(),
+                    show_name: true,
+                    show_number: true,
                 },
                 SymbolPin {
                     id: "b".into(),
@@ -431,6 +414,8 @@ mod tests {
                     number: "2".into(),
                     name: "2".into(),
                     pin_type: String::new(),
+                    show_name: true,
+                    show_number: true,
                 },
             ],
             rects: vec![SymbolRect {
@@ -446,11 +431,67 @@ mod tests {
         let sym = symbol_ir("L", "", src, PartMeta::default());
         let left = &sym.pins[0];
         let right = &sym.pins[1];
-        assert!((left.x - (-10.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
-        assert!((right.x - (10.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
+        assert!((left.x - (-17.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
+        assert!((right.x - (17.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
         assert!((left.rotation - 180.0).abs() < 1e-9);
         assert!(right.rotation.abs() < 1e-9);
         assert!(left.length >= MIN_PIN_LENGTH_MM - 1e-9);
         assert!(right.length >= MIN_PIN_LENGTH_MM - 1e-9);
+    }
+
+    #[test]
+    fn part_box_snaps_pins_but_is_not_drawn() {
+        let src = EasyedaSymbol {
+            pins: vec![SymbolPin {
+                id: "a".into(),
+                x: -20.0,
+                y: 0.0,
+                length: 3.0,
+                rotation: 0.0,
+                number: "1".into(),
+                name: "KA1".into(),
+                pin_type: String::new(),
+                show_name: false,
+                show_number: true,
+            }],
+            rects: vec![],
+            polys: vec![],
+            ellipses: vec![],
+            part_box: Some((-10.0, -4.0, 10.0, 4.0)),
+        };
+        let sym = symbol_ir("LED", "", src, PartMeta::default());
+        assert!(sym.rects.is_empty(), "EasyEDA BBOX must not become a rectangle");
+        assert!((sym.pins[0].x - (-17.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
+        assert!(!sym.pins[0].show_name);
+        assert!(sym.pins[0].show_number);
+    }
+
+    #[test]
+    fn led_arrows_do_not_leave_cathode_gap() {
+        // C93880：阴极在 x=5，箭头伸到 x=9；脚长 15，应从 20 收到 5。
+        let src = EasyedaSymbol {
+            pins: vec![SymbolPin {
+                id: "k".into(),
+                x: 20.0,
+                y: -10.0,
+                length: 15.0,
+                rotation: 180.0,
+                number: "2".into(),
+                name: "K1".into(),
+                pin_type: String::new(),
+                show_name: false,
+                show_number: true,
+            }],
+            rects: vec![],
+            polys: vec![
+                vec![(5.0, -16.0), (5.0, -4.0)],
+                vec![(2.0, -18.0), (9.0, -25.0)],
+            ],
+            ellipses: vec![],
+            part_box: Some((-5.5, -29.5, 9.5, 29.5)),
+        };
+        let sym = symbol_ir("LED", "", src, PartMeta::default());
+        assert!((sym.pins[0].x - (5.0 * SYMBOL_UNIT_MM)).abs() < 1e-9);
+        assert!(sym.pins[0].rotation.abs() < 1e-9);
     }
 }

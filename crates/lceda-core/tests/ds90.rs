@@ -57,7 +57,13 @@ fn writes_ds90_schlib_and_pcblib() {
     let name = "DS90LV048ATMTC_NOPB";
     let sym_src = easyeda::parse_symbol(&load("symbol")).unwrap();
     let fp_src = easyeda::parse_footprint(&load("footprint")).unwrap();
+    assert!(!sym_src.rects.is_empty(), "IC has a real RECT");
+    assert!(
+        sym_src.pins.iter().all(|p| p.show_name && p.show_number),
+        "DS90 NAME/NUMBER valueVisible=true"
+    );
     let mut sym = ir::symbol_ir(name, name, sym_src, Default::default());
+    assert_eq!(sym.rects.len(), 1, "BBOX must not add a second rectangle");
     let fp = ir::footprint_ir(name, name, fp_src, Default::default());
     sym.meta.footprint_lib = fp.name.clone();
 

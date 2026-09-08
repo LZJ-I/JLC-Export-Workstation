@@ -218,13 +218,13 @@ pub fn manufacturer_from_raw(raw: &Value) -> String {
     String::new()
 }
 
-fn attr_string(raw: &Value, key: &str) -> Option<String> {
+pub(crate) fn attr_string(raw: &Value, key: &str) -> Option<String> {
     raw.get("attributes")
         .and_then(|a| a.get(key))
         .and_then(json_to_string)
 }
 
-fn string_or_num(raw: &Value, key: &str) -> Option<String> {
+pub(crate) fn string_or_num(raw: &Value, key: &str) -> Option<String> {
     raw.get(key).and_then(json_to_string)
 }
 

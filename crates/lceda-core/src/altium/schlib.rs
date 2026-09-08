@@ -198,7 +198,7 @@ fn component_data(symbol: &SymbolIr, libref: &str, colors: SchColors) -> Vec<u8>
         ("OWNERPARTID", "-1".into()),
         ("COLOR", colors.designator.to_string()),
         ("FONTID", "1".into()),
-        ("TEXT", "U?".into()),
+        ("TEXT", symbol.designator.clone()),
         ("NAME", "Designator".into()),
         ("READONLYSTATE", "1".into()),
     ]);
@@ -271,30 +271,26 @@ fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin, colors: SchColors) {
 
 /// AD 真实 SchLib：`|HEADER=PinTextData|Weight=N` + 按管脚序号索引的 zlib 条目。
 /// BOTH 格式 14 字节：`0x10 + font_id(i16) + COLORREF(u32)` × 名/号。
+/// 只给立创配色写；经典 / 黑白 / 自定义走 FONT 表或管脚 COLOR。
 fn pin_text_data_stream(symbol: &SymbolIr, colors: SchColors) -> Option<Vec<u8>> {
-    if symbol.pins.is_empty() {
+    if !colors.follows_easyeda_pins() || symbol.pins.is_empty() {
         return None;
     }
-    let easy = colors.follows_easyeda_pins();
-    let mut entries = Vec::new();
-    for (i, pin) in symbol.pins.iter().enumerate() {
-        let style = colors.pin_style(&pin.pin_type, &pin.name);
-        // 立创：所有脚都写，电源/地也用同一套 Verdana 字号。
-        // 其它方案：仅二进制管脚写，ASCII 管脚靠 FONT 表。
-        if !easy && style.uses_local_font() {
-            continue;
-        }
-        entries.push((
-            i,
-            colors.font_id_for(style.name) as i16,
-            style.name,
-            colors.font_id_for(style.number) as i16,
-            style.number,
-        ));
-    }
-    if entries.is_empty() {
-        return None;
-    }
+    let entries: Vec<_> = symbol
+        .pins
+        .iter()
+        .enumerate()
+        .map(|(i, pin)| {
+            let style = colors.pin_style(&pin.pin_type, &pin.name);
+            (
+                i,
+                colors.font_id_for(style.name) as i16,
+                style.name,
+                colors.font_id_for(style.number) as i16,
+                style.number,
+            )
+        })
+        .collect();
     Some(encode_pin_text_data(&entries))
 }
 
@@ -331,7 +327,7 @@ fn write_pin_binary(w: &mut BinWriter, pin: &crate::ir::IrPin, color: i32) {
     let loc_x = dxp_num(pin.x);
     let loc_y = dxp_num(pin.y);
     let len = dxp_num(pin.length.max(2.54));
-    let conglomerate = orient | 0x08 | 0x10; // show name + designator
+    let conglomerate = pin_conglomerate(orient, pin.show_name, pin.show_number, 0);
     w.write_block(0x01, |w| {
         w.write_i32(2);
         w.write_u8(0);
@@ -369,8 +365,8 @@ fn write_pin_ascii(
     let loc_x = dxp_num(pin.x);
     let loc_y = dxp_num(pin.y);
     let len = dxp_num(pin.length.max(2.54));
-    // bit5 与官方导出一致；bit3/4 显示名和号。
-    let conglomerate = 0x20 | 0x08 | 0x10 | orient;
+    // bit5 与官方导出一致；bit3/4 按立创 valueVisible 显示名和号。
+    let conglomerate = pin_conglomerate(orient, pin.show_name, pin.show_number, 0x20);
     let name_font = colors.font_id_for(style.name);
     let number_font = colors.font_id_for(style.number);
     w.write_params(&[
@@ -389,9 +385,24 @@ fn write_pin_ascii(
         ("DESIGNATOR_CUSTOMFONTID", number_font.to_string()),
         ("PINNAME_POSITIONCONGLOMERATE", "16".into()),
         ("PINDESIGNATOR_POSITIONCONGLOMERATE", "16".into()),
-        ("SHOWPINNAME", "T".into()),
-        ("SHOWDESIGNATOR", "T".into()),
+        ("SHOWPINNAME", altium_bool(pin.show_name)),
+        ("SHOWDESIGNATOR", altium_bool(pin.show_number)),
     ]);
+}
+
+fn pin_conglomerate(orient: u8, show_name: bool, show_number: bool, extra: u8) -> u8 {
+    let mut c = orient | extra;
+    if show_name {
+        c |= 0x08;
+    }
+    if show_number {
+        c |= 0x10;
+    }
+    c
+}
+
+fn altium_bool(v: bool) -> String {
+    if v { "T" } else { "F" }.into()
 }
 
 fn pin_orient(rotation_deg: f64) -> u8 {
@@ -411,6 +422,8 @@ mod tests {
     #[test]
     fn pin_text_both_matches_ad_library() {
         // TPS7A2012PDBVR.SchLib：font 2、黑字
+        assert_eq!(pin_conglomerate(0, true, true, 0), 0x18);
+        assert_eq!(pin_conglomerate(2, false, true, 0x20), 0x20 | 0x10 | 2);
         assert_eq!(
             pin_text_both_attrs(2, 0, 2, 0),
             [0x10, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00]

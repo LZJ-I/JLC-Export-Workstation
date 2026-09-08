@@ -7,6 +7,7 @@ use crate::ir::{self, FootprintIr, PartMeta, SymbolIr};
 use crate::kicad;
 use crate::mesh;
 use crate::pads;
+use crate::desc::DescField;
 use crate::models::{DownloadPaths, SearchItem};
 use crate::util::{ensure_parent, looks_like_step, sanitize_filename, unique_name};
 use serde_json::Value;
@@ -36,6 +37,8 @@ pub struct ExportRequest {
     pub merge_name: String,
     /// Altium 原理图库颜色。默认是 AD 经典暗红/蓝。
     pub sch_colors: SchColors,
+    /// Description / 详细信息字段顺序。
+    pub desc_fields: Vec<DescField>,
 }
 
 impl Default for ExportRequest {
@@ -56,6 +59,7 @@ impl Default for ExportRequest {
             merge: false,
             merge_name: "lceda".into(),
             sch_colors: SchColors::default(),
+            desc_fields: DescField::library(),
         }
     }
 }
@@ -167,7 +171,15 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             return Err(Error::NoSymbolOrFootprint);
         }
         let (symbol_json, footprint_json, fetched_sym, fetched_fp) =
-            fetch_sources(client, item, &part_dir, &base, req.force, req.rename_footprint)?;
+            fetch_sources(
+                client,
+                item,
+                &part_dir,
+                &base,
+                req.force,
+                req.rename_footprint,
+                &req.desc_fields,
+            )?;
         symbol_ir = fetched_sym;
         footprint_ir = fetched_fp;
         if req.source_json || req.ad || req.kicad || req.pads {
@@ -524,6 +536,7 @@ fn fetch_sources(
     base: &str,
     force: bool,
     rename_footprint: bool,
+    desc_fields: &[DescField],
 ) -> Result<(
     Option<PathBuf>,
     Option<PathBuf>,
@@ -534,7 +547,7 @@ fn fetch_sources(
     let mut footprint_path = None;
     let mut symbol_ir = None;
     let mut footprint_ir = None;
-    let desc = item.product_description();
+    let desc = item.render_description(desc_fields);
     let meta: PartMeta = item.meta();
 
     if let Some(uuid) = item.symbol_uuid() {
@@ -543,7 +556,14 @@ fn fetch_sources(
         write_json(&path, &json, force)?;
         symbol_path = Some(path);
         match easyeda::parse_symbol(&json) {
-            Ok(src) => symbol_ir = Some(ir::symbol_ir(base, &desc, src, meta.clone())),
+            Ok(src) => {
+                let mut sym = ir::symbol_ir(base, &desc, src, meta.clone());
+                sym.designator = crate::desc::first_designator(&[
+                    crate::easyeda::symbol_designator(&json),
+                    Some(item.sch_designator()),
+                ]);
+                symbol_ir = Some(sym);
+            }
             Err(e) => eprintln!("解析原理图失败: {e}"),
         }
     }

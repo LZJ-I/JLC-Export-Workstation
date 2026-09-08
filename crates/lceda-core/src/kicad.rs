@@ -111,12 +111,14 @@ fn symbol_entry(symbol: &SymbolIr) -> String {
         let rot = snap_angle(pin.rotation);
         let etype = kicad_etype(&pin.pin_type);
         out.push_str(&format!(
-            "      (pin {etype} line (at {} {} {rot}) (length {})\n        (name {} (effects (font (size 1.27 1.27))))\n        (number {} (effects (font (size 1.27 1.27))))\n      )\n",
+            "      (pin {etype} line (at {} {} {rot}) (length {})\n        (name {} (effects (font (size 1.27 1.27)){name_hide}))\n        (number {} (effects (font (size 1.27 1.27)){num_hide}))\n      )\n",
             n(pin.x),
             n(pin.y),
             n(pin.length.max(2.54)),
             quoted(&pin.name),
-            quoted(&pin.number)
+            quoted(&pin.number),
+            name_hide = if pin.show_name { "" } else { " hide" },
+            num_hide = if pin.show_number { "" } else { " hide" },
         ));
     }
     out.push_str("    )\n  )\n");
@@ -348,20 +350,11 @@ fn kicad_etype(src: &str) -> &'static str {
 }
 
 fn guess_ref(symbol: &SymbolIr) -> String {
-    let n = symbol.name.to_ascii_uppercase();
-    if crate::models::looks_like_lcsc_token(&n) {
-        return "U".into();
+    let core = symbol.designator.trim().trim_end_matches('?').trim();
+    if !core.is_empty() && core.chars().all(|c| c.is_ascii_alphabetic()) {
+        return core.to_string();
     }
-    match n.chars().next() {
-        Some('R') => "R".into(),
-        Some('C') => "C".into(),
-        Some('L') => "L".into(),
-        Some('D') => "D".into(),
-        Some('Q') => "Q".into(),
-        Some('F') => "F".into(),
-        Some('Y') => "Y".into(),
-        _ => "U".into(),
-    }
+    "U".into()
 }
 
 fn polar(cx: f64, cy: f64, r: f64, deg: f64) -> (f64, f64) {
@@ -426,6 +419,7 @@ mod tests {
         let symbol = SymbolIr {
             name: "RES".into(),
             description: "test".into(),
+            designator: "R?".into(),
             meta: PartMeta {
                 lcsc: "C2040".into(),
                 mpn: "RES".into(),
@@ -439,6 +433,7 @@ mod tests {
                 length: 2.54,
                 rotation: 270.0,
                 pin_type: "PASSIVE".into(),
+                ..Default::default()
             }],
             rects: vec![IrRect {
                 x1: -1.0,
@@ -454,6 +449,37 @@ mod tests {
         assert!(text.contains("LCSC"));
         assert!(text.contains("C2040"));
         assert!(text.contains("passive"));
+        assert!(text.contains("(name \"1\" (effects (font (size 1.27 1.27))))"));
+    }
+
+    #[test]
+    fn hidden_pin_name_matches_easyeda_value_visible() {
+        let mut symbol = SymbolIr {
+            name: "LED".into(),
+            description: String::new(),
+            designator: "D?".into(),
+            meta: PartMeta::default(),
+            pins: vec![IrPin {
+                number: "1".into(),
+                name: "KA1".into(),
+                x: 0.0,
+                y: 0.0,
+                length: 2.54,
+                rotation: 0.0,
+                pin_type: "PASSIVE".into(),
+                show_name: false,
+                show_number: true,
+            }],
+            rects: vec![],
+            polys: vec![],
+            ellipses: vec![],
+        };
+        let text = symbol_lib_text_many(std::slice::from_ref(&symbol));
+        assert!(text.contains("(name \"KA1\" (effects (font (size 1.27 1.27)) hide))"));
+        assert!(text.contains("(number \"1\" (effects (font (size 1.27 1.27))))"));
+        symbol.pins[0].show_number = false;
+        let text = symbol_lib_text_many(std::slice::from_ref(&symbol));
+        assert!(text.contains("(number \"1\" (effects (font (size 1.27 1.27)) hide))"));
     }
 
     #[test]
@@ -461,6 +487,7 @@ mod tests {
         let a = SymbolIr {
             name: "AAA".into(),
             description: String::new(),
+            designator: "U?".into(),
             meta: PartMeta::default(),
             pins: vec![],
             rects: vec![],
@@ -473,6 +500,20 @@ mod tests {
         assert!(text.contains("(symbol \"AAA\""));
         assert!(text.contains("(symbol \"BBB\""));
         assert_eq!(text.matches("(kicad_symbol_lib").count(), 1);
+        assert!(text.contains("(property \"Reference\" \"U\""));
+        let sw = SymbolIr {
+            name: "TS-1088".into(),
+            description: String::new(),
+            designator: "SW?".into(),
+            meta: PartMeta::default(),
+            pins: vec![],
+            rects: vec![],
+            polys: vec![],
+            ellipses: vec![],
+        };
+        let text = symbol_lib_text_many(std::slice::from_ref(&sw));
+        assert!(text.contains("(property \"Reference\" \"SW\""));
+        assert!(!text.contains("(property \"Reference\" \"T\""));
     }
 
     #[test]

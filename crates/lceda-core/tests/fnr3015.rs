@@ -31,6 +31,11 @@ fn parses_fnr3015_symbol_and_snaps_pins() {
     let ir = ir::symbol_ir("FNR3015S2R2MT", "inductor", src, Default::default());
     assert_eq!(ir.pins.len(), 2);
     assert!(!ir.polys.is_empty(), "coil outline should parse as polylines");
+    assert!(ir.rects.is_empty(), "inductor BBOX is not a body rectangle");
+    assert!(
+        ir.pins.iter().all(|p| !p.show_name && !p.show_number),
+        "FNR NAME/NUMBER valueVisible=false"
+    );
     let tip = 20.0 * SYMBOL_UNIT_MM;
     for pin in &ir.pins {
         assert!(

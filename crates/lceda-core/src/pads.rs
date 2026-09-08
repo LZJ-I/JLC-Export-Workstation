@@ -675,6 +675,7 @@ mod tests {
         SymbolIr {
             name: "RES".into(),
             description: "test".into(),
+            designator: "R?".into(),
             meta: PartMeta {
                 lcsc: "C2040".into(),
                 mpn: "RES".into(),
@@ -689,6 +690,7 @@ mod tests {
                     length: 2.54,
                     rotation: 0.0,
                     pin_type: "PASSIVE".into(),
+                    ..Default::default()
                 },
                 IrPin {
                     number: "2".into(),
@@ -698,6 +700,7 @@ mod tests {
                     length: 2.54,
                     rotation: 180.0,
                     pin_type: "PASSIVE".into(),
+                    ..Default::default()
                 },
             ],
             rects: vec![IrRect {
@@ -853,6 +856,7 @@ mod tests {
                 length: 2.54,
                 rotation: 270.0,
                 pin_type: "PASSIVE".into(),
+                ..Default::default()
             });
             s.pins[0].name = "GND".into();
             s

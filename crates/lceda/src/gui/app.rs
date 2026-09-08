@@ -3,7 +3,8 @@ use super::theme::{self, ACCENT};
 use crate::i18n::{self, Lang};
 use crate::instance::InstanceGuard;
 use crate::library::{part_from_item, Library, SavedPart, UNCAT};
-use crate::prefs::ThemeMode;
+use crate::prefs::{ExportSection, SettingsTab, ThemeMode};
+use lceda_core::desc::{DescField, PropGroup, PropRow};
 use crate::sponsor;
 use crate::update::{self, CheckResult, UpdateInfo, UpdatePhase, UpdateProgress};
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -62,13 +63,6 @@ enum NavPage {
     Sponsor,
     Settings,
     About,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SettingsTab {
-    General,
-    Appearance,
-    Export,
 }
 
 impl NavPage {
@@ -166,12 +160,7 @@ impl BatchOpts {
             source_json: self.source || self.ad || self.kicad || self.pads,
             force: true,
             out_dir,
-            ad_embed_3d: true,
-            kicad_attach_3d: true,
-            rename_footprint: false,
-            merge: false,
-            merge_name: "lceda".into(),
-            sch_colors: SchColors::default(),
+            ..Default::default()
         }
     }
 }
@@ -240,6 +229,7 @@ struct App {
     alert: Option<String>,
     page: NavPage,
     settings_tab: SettingsTab,
+    export_section: ExportSection,
     theme: ThemeMode,
     always_on_top: bool,
     dark_applied: Option<bool>,
@@ -302,6 +292,13 @@ struct App {
     batch_merge: bool,
     sch_scheme: SchColorScheme,
     sch_custom: SchColors,
+    desc_fields: Vec<DescField>,
+    show_detail: bool,
+    detail_query: String,
+    desc_preview_kw: String,
+    desc_preview_item: Option<SearchItem>,
+    desc_preview_job: Option<SearchPromise>,
+    desc_preview_note: Option<String>,
 }
 
 impl App {
@@ -342,7 +339,8 @@ impl App {
             } else {
                 NavPage::Search
             },
-            settings_tab: SettingsTab::General,
+            settings_tab: prefs.settings_tab,
+            export_section: prefs.export_section,
             theme: env::var("LCEDA_THEME")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -351,8 +349,8 @@ impl App {
             always_on_top: prefs.always_on_top,
             dark_applied: None,
             instance,
-            nav_expanded: true,
-            nav_anim_w: NAV_W,
+            nav_expanded: prefs.nav_expanded,
+            nav_anim_w: if prefs.nav_expanded { NAV_W } else { NAV_COLLAPSED },
             brand_tex: None,
             nav_tex: None,
             pay_tex: None,
@@ -421,6 +419,13 @@ impl App {
             batch_merge: prefs.batch_merge,
             sch_scheme: prefs.sch_scheme,
             sch_custom: prefs.sch_custom,
+            desc_fields: prefs.desc_fields.clone(),
+            show_detail: false,
+            detail_query: String::new(),
+            desc_preview_kw: String::new(),
+            desc_preview_item: None,
+            desc_preview_job: None,
+            desc_preview_note: None,
         }
     }
 
@@ -527,6 +532,120 @@ impl App {
             self.hide_welcome = self.welcome_hide;
             self.persist_prefs();
             self.goto(NavPage::Settings);
+        }
+    }
+
+    fn show_modal_scrim(&self, ctx: &egui::Context) {
+        if !self.dialog_open() {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("modal_scrim"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.allocate_response(screen.size(), egui::Sense::click());
+                let dim = if theme::is_dark() {
+                    Color32::from_black_alpha(150)
+                } else {
+                    Color32::from_black_alpha(88)
+                };
+                ui.painter().rect_filled(screen, 0.0, dim);
+            });
+    }
+
+    fn show_detail(&mut self, ctx: &egui::Context) {
+        if !self.show_detail {
+            return;
+        }
+        let Some(item) = self.selected_item().cloned() else {
+            self.show_detail = false;
+            return;
+        };
+        let lang = self.lang;
+        let rows = item.ad_properties(&self.desc_fields, true);
+        let ds = item.datasheet_url();
+        let page = item.product_url();
+        let title = format!("{}  {}", i18n::t(lang, "details"), item.name());
+        let mut close = false;
+        let mut open_ds = false;
+        let mut open_page = false;
+        let mut query = std::mem::take(&mut self.detail_query);
+        let width = 580.0;
+        let mut open = true;
+        fit_window(title, "lceda_detail_fit", width)
+            .open(&mut open)
+            .min_width(540.0)
+            .max_width(680.0)
+            .max_height(680.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.set_min_width(width - 8.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(i18n::t(lang, "details_legend"))
+                            .color(theme::secondary())
+                            .size(12.0),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let search_w = (ui.available_width() - 8.0).max(160.0);
+                    theme::search_field(
+                        ui,
+                        &mut query,
+                        i18n::t(lang, "details_search"),
+                        "detail_prop_search",
+                        egui::vec2(search_w, 32.0),
+                    );
+                });
+                ui.add_space(12.0);
+                show_ad_props(ui, lang, &rows, &query, Some(460.0), "detail_props", true);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::pill_button(ui, i18n::t(lang, "ok"), true, true).clicked() {
+                            close = true;
+                        }
+                        if theme::pill_button(ui, i18n::t(lang, "details_online"), true, false)
+                            .clicked()
+                        {
+                            open_page = true;
+                        }
+                        if ds.is_some()
+                            && theme::pill_button(ui, i18n::t(lang, "datasheet"), true, false)
+                                .clicked()
+                        {
+                            open_ds = true;
+                        }
+                    });
+                });
+                if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                    if query.is_empty() {
+                        close = true;
+                    } else {
+                        query.clear();
+                    }
+                }
+            });
+        if !open {
+            close = true;
+        }
+        if open_page {
+            let _ = webbrowser::open(&page);
+        }
+        if open_ds {
+            if let Some(url) = ds {
+                let _ = webbrowser::open(&url);
+            }
+        }
+        if close {
+            self.show_detail = false;
+            self.detail_query.clear();
+        } else {
+            self.detail_query = query;
         }
     }
 
@@ -738,6 +857,7 @@ impl App {
                     .clicked()
                 {
                     self.settings_tab = tab;
+                    persist = true;
                 }
             }
         });
@@ -874,6 +994,34 @@ impl App {
     fn settings_export(&mut self, ui: &mut egui::Ui) -> bool {
         let lang = self.lang;
         let mut persist = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for (sec, key) in [
+                (ExportSection::Format, "export_sec_format"),
+                (ExportSection::Schematic, "export_sec_sch"),
+                (ExportSection::Description, "export_sec_desc"),
+            ] {
+                if ui
+                    .selectable_label(self.export_section == sec, i18n::t(lang, key))
+                    .clicked()
+                {
+                    self.export_section = sec;
+                    persist = true;
+                }
+            }
+        });
+        ui.add_space(8.0);
+        match self.export_section {
+            ExportSection::Format => persist |= self.settings_export_format(ui),
+            ExportSection::Schematic => persist |= self.sch_color_card(ui),
+            ExportSection::Description => persist |= self.settings_desc_card(ui),
+        }
+        persist
+    }
+
+    fn settings_export_format(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut persist = false;
         theme::show_card(ui, |ui| {
             ui.label(
                 egui::RichText::new(i18n::t(lang, "defaults_label"))
@@ -889,42 +1037,27 @@ impl App {
                 .wrap(),
             );
             let before = self.batch_opts;
-            ui.checkbox(&mut self.batch_opts.step, i18n::t(lang, "download_step"));
-            ui.checkbox(&mut self.batch_opts.obj, i18n::t(lang, "download_obj"));
-            ui.checkbox(&mut self.batch_opts.ad, i18n::t(lang, "export_ad"));
-            ui.checkbox(&mut self.batch_opts.kicad, i18n::t(lang, "export_kicad"));
-            ui.checkbox(&mut self.batch_opts.pads, i18n::t(lang, "export_pads"));
-            ui.checkbox(&mut self.batch_opts.datasheet, i18n::t(lang, "datasheet"));
-            ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
+            ui.columns(2, |cols| {
+                cols[0].checkbox(&mut self.batch_opts.step, i18n::t(lang, "download_step"));
+                cols[1].checkbox(&mut self.batch_opts.obj, i18n::t(lang, "download_obj"));
+                cols[0].checkbox(&mut self.batch_opts.ad, i18n::t(lang, "export_ad"));
+                cols[1].checkbox(&mut self.batch_opts.kicad, i18n::t(lang, "export_kicad"));
+                cols[0].checkbox(&mut self.batch_opts.pads, i18n::t(lang, "export_pads"));
+                cols[1].checkbox(&mut self.batch_opts.datasheet, i18n::t(lang, "datasheet"));
+                cols[0].checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
+            });
             if before != self.batch_opts {
                 persist = true;
             }
-            ui.add_space(14.0);
-            ui.label(
-                egui::RichText::new(i18n::t(lang, "settings_3d_hint")).color(theme::secondary()),
-            );
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             let before_ad = self.ad_embed_3d;
             let before_kicad = self.kicad_attach_3d;
             let before_fp = self.rename_footprint;
             let before_merge = self.batch_merge;
             ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
             ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(i18n::t(lang, "settings_fp_hint")).color(theme::secondary()),
-            );
             ui.checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
-            ui.add_space(8.0);
             ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(i18n::t(lang, "batch_merge_hint"))
-                        .color(theme::secondary())
-                        .small(),
-                )
-                .wrap(),
-            );
             if self.ad_embed_3d != before_ad
                 || self.kicad_attach_3d != before_kicad
                 || self.rename_footprint != before_fp
@@ -933,9 +1066,225 @@ impl App {
                 persist = true;
             }
         });
-        ui.add_space(10.0);
-        persist |= self.sch_color_card(ui);
         persist
+    }
+
+    fn settings_desc_card(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.lang;
+        let mut persist = false;
+        let mut fields = self.desc_fields.clone();
+        theme::show_card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "export_sec_desc"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(i18n::t(lang, "desc_hint"))
+                        .color(theme::secondary())
+                        .small(),
+                )
+                .wrap(),
+            );
+            ui.add_space(12.0);
+            show_ad_field_map(ui, lang);
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "desc_fields_title"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(i18n::t(lang, "desc_fields_hint"))
+                        .color(theme::secondary())
+                        .small(),
+                )
+                .wrap(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                for (preset, key) in [
+                    (DescField::library(), "desc_preset_library"),
+                    (DescField::specs_only(), "desc_preset_specs"),
+                    (DescField::ids_only(), "desc_preset_ids"),
+                ] {
+                    if ui
+                        .selectable_label(fields == preset, i18n::t(lang, key))
+                        .clicked()
+                    {
+                        fields = preset;
+                        persist = true;
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            let enabled = fields.clone();
+            let disabled: Vec<DescField> = DescField::ALL
+                .into_iter()
+                .filter(|f| !enabled.contains(f))
+                .collect();
+            let mut drag_from = None;
+            let mut drag_to = None;
+            for (i, field) in enabled.iter().enumerate() {
+                let drop_frame = egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(2, 1))
+                    .corner_radius(6);
+                let (_, dropped) = ui.dnd_drop_zone::<usize, _>(drop_frame, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.dnd_drag_source(egui::Id::new(("desc_grip", field.id())), i, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("☰")
+                                        .color(theme::secondary())
+                                        .size(14.0),
+                                )
+                                .sense(egui::Sense::drag()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::Grab)
+                            .on_hover_text(i18n::t(lang, "desc_drag"));
+                        });
+                        let mut on = true;
+                        if ui
+                            .checkbox(&mut on, i18n::t(lang, field.i18n_key()))
+                            .changed()
+                            && !on
+                        {
+                            fields.retain(|f| f != field);
+                            persist = true;
+                        }
+                    });
+                });
+                if let Some(from) = dropped {
+                    drag_from = Some(*from);
+                    drag_to = Some(i);
+                }
+            }
+            if let (Some(from), Some(to)) = (drag_from, drag_to) {
+                if from != to && from < fields.len() && to < fields.len() {
+                    if from < to {
+                        fields[from..=to].rotate_left(1);
+                    } else {
+                        fields[to..=from].rotate_right(1);
+                    }
+                    persist = true;
+                }
+            }
+            for field in disabled {
+                ui.horizontal(|ui| {
+                    let mut on = false;
+                    if ui
+                        .checkbox(&mut on, i18n::t(lang, field.i18n_key()))
+                        .changed()
+                        && on
+                    {
+                        fields.push(field);
+                        persist = true;
+                    }
+                });
+            }
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "desc_preview_lookup"))
+                    .strong()
+                    .color(theme::label()),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(i18n::t(lang, "desc_preview_hint"))
+                        .color(theme::secondary())
+                        .small(),
+                )
+                .wrap(),
+            );
+            ui.add_space(8.0);
+            let mut lookup = false;
+            ui.horizontal(|ui| {
+                let btn_w = 64.0;
+                let edit_w = (ui.available_width() - btn_w - 8.0).max(120.0);
+                let r = theme::search_field(
+                    ui,
+                    &mut self.desc_preview_kw,
+                    i18n::t(lang, "desc_preview_lookup_hint"),
+                    "desc_preview_search",
+                    egui::vec2(edit_w, 32.0),
+                );
+                if (r.has_focus() || r.lost_focus())
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && !self.dialog_open()
+                {
+                    lookup = true;
+                }
+                if theme::pill_button(
+                    ui,
+                    i18n::t(lang, "desc_preview_view"),
+                    self.desc_preview_job.is_none(),
+                    true,
+                )
+                .clicked()
+                {
+                    lookup = true;
+                }
+            });
+            ui.add_space(10.0);
+            if self.desc_preview_job.is_some() {
+                ui.label(
+                    egui::RichText::new(i18n::t(lang, "desc_preview_loading"))
+                        .color(theme::secondary()),
+                );
+            } else if let Some(note) = &self.desc_preview_note {
+                ui.label(egui::RichText::new(note).color(theme::secondary()));
+            } else if let Some(item) = self.desc_preview_item.clone() {
+                let title = match item.lcsc_id() {
+                    Some(id) => format!("{} · {id}", item.name()),
+                    None => item.name().to_string(),
+                };
+                ui.label(
+                    egui::RichText::new(title)
+                        .color(theme::label())
+                        .size(12.5),
+                );
+                ui.add_space(8.0);
+                let preview_rows = item.ad_properties(&fields, false);
+                show_ad_props(ui, lang, &preview_rows, "", None, "desc_preview_props", true);
+            } else {
+                ui.label(
+                    egui::RichText::new(i18n::t(lang, "desc_preview_idle"))
+                        .color(theme::secondary()),
+                );
+            }
+            if lookup {
+                self.start_desc_preview();
+            }
+        });
+        if persist {
+            if fields.is_empty() {
+                fields = DescField::library();
+            }
+            self.desc_fields = fields;
+        }
+        persist
+    }
+
+    fn start_desc_preview(&mut self) {
+        let kw = self.desc_preview_kw.trim().to_string();
+        if kw.is_empty() {
+            self.desc_preview_note = Some(i18n::t(self.lang, "empty_keyword").into());
+            return;
+        }
+        if self.desc_preview_job.is_some() {
+            return;
+        }
+        if let Some(item) = self.cache.get(&kw).cloned() {
+            self.desc_preview_item = Some(item);
+            self.desc_preview_note = None;
+            return;
+        }
+        self.desc_preview_note = None;
+        self.desc_preview_job = Some(Promise::spawn_thread("desc-preview", move || {
+            LcedaClient::new().search(&kw)
+        }));
     }
 
     fn sch_color_card(&mut self, ui: &mut egui::Ui) -> bool {
@@ -1200,6 +1549,7 @@ impl App {
             .clicked()
         {
             self.nav_expanded = !self.nav_expanded;
+            self.persist_prefs();
         }
         let go = |ui: &mut egui::Ui, icon: Option<&TextureHandle>, text: &str, on: bool| {
             theme::nav_icon_item(ui, icon, text, on, expanded).clicked()
@@ -1277,6 +1627,7 @@ impl App {
             ui.set_width(width - 8.0);
             ui.label(egui::RichText::new(i18n::t(lang, "batch_hint")).color(theme::secondary()));
             ui.add_space(8.0);
+            let before = self.batch_opts;
             egui::Grid::new("batch_opts")
                 .num_columns(2)
                 .spacing([12.0, 6.0])
@@ -1293,6 +1644,9 @@ impl App {
                     ui.checkbox(&mut self.batch_opts.source, i18n::t(lang, "export_source"));
                     ui.end_row();
                 });
+            if before != self.batch_opts {
+                self.persist_prefs();
+            }
             if self.batch_opts.ad || self.batch_opts.kicad {
                 ui.add_space(4.0);
                 let before = self.batch_merge;
@@ -1636,8 +1990,10 @@ impl eframe::App for App {
                 NavPage::Settings => self.page_settings(ui),
                 NavPage::About => self.page_about(ui),
             });
+        self.show_modal_scrim(ctx);
         self.show_alert(ctx);
         self.show_welcome(ctx);
+        self.show_detail(ctx);
         self.show_batch_dialog(ctx);
         self.show_sponsor_qr(ctx);
         self.show_fav_pick(ctx);
@@ -1810,6 +2166,40 @@ impl App {
                         self.queue_preview();
                     }
                     Err(e) => self.alert(format!("{}: {e}", i18n::t(self.lang, "error"))),
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(p) = &self.desc_preview_job {
+            if p.ready().is_some() {
+                match self.desc_preview_job.take().unwrap().block_and_take() {
+                    Ok(items) => {
+                        let kw = self.desc_preview_kw.trim();
+                        let item = items
+                            .iter()
+                            .find(|i| {
+                                i.lcsc_id().as_deref() == Some(kw)
+                                    || i.name().eq_ignore_ascii_case(kw)
+                            })
+                            .cloned()
+                            .or_else(|| items.into_iter().next());
+                        if let Some(item) = item {
+                            if let Some(id) = item.lcsc_id() {
+                                self.cache.insert(id, item.clone());
+                            }
+                            self.desc_preview_item = Some(item);
+                            self.desc_preview_note = None;
+                        } else {
+                            self.desc_preview_item = None;
+                            self.desc_preview_note =
+                                Some(i18n::t(self.lang, "desc_preview_none").into());
+                        }
+                    }
+                    Err(e) => {
+                        self.desc_preview_item = None;
+                        self.desc_preview_note = Some(e.to_string());
+                    }
                 }
             } else {
                 ctx.request_repaint();
@@ -2329,9 +2719,11 @@ impl App {
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     Color32::WHITE,
                 );
-                if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
-                    if img_rect.contains(pointer) {
-                        paint_photo_zoom(ui, tex, img_rect, pointer, rect);
+                if !self.dialog_open() {
+                    if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                        if img_rect.contains(pointer) {
+                            paint_photo_zoom(ui, tex, img_rect, pointer, rect);
+                        }
                     }
                 }
             } else {
@@ -2394,23 +2786,28 @@ impl App {
             });
             let well_h = ui.available_height().max(80.0);
             let well_w = ui.max_rect().width();
+            let locked = self.dialog_open();
             let (well, resp) = ui.allocate_exact_size(
                 egui::vec2(well_w, well_h),
-                egui::Sense::click_and_drag(),
+                if locked {
+                    egui::Sense::hover()
+                } else {
+                    egui::Sense::click_and_drag()
+                },
             );
             paint_well(ui, well);
-            if resp.dragged() {
+            if !locked && resp.dragged() {
                 let d = resp.drag_delta();
                 self.yaw += d.x * 0.01;
                 self.pitch += d.y * 0.01;
             }
-            if resp.hovered() {
+            if !locked && resp.hovered() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll != 0.0 {
                     self.zoom = (self.zoom * (1.0 + scroll * 0.003)).clamp(0.15, 8.0);
                 }
             }
-            if resp.double_clicked() {
+            if !locked && resp.double_clicked() {
                 self.yaw = 0.7;
                 self.pitch = 0.55;
                 self.zoom = 1.0;
@@ -2495,6 +2892,7 @@ impl App {
         let mut pads = false;
         let mut datasheet = false;
         let mut page = false;
+        let mut details = false;
         let in_queue = self
             .selected_item()
             .and_then(|i| i.lcsc_id())
@@ -2552,6 +2950,14 @@ impl App {
                         en && has3d,
                         false,
                     ),
+                    (
+                        i18n::t(lang, "details"),
+                        has_item,
+                        false,
+                        "",
+                        false,
+                        false,
+                    ),
                 ],
             );
             export = clicks[0].0;
@@ -2564,6 +2970,7 @@ impl App {
             step = clicks[3].1;
             datasheet = clicks[4].0;
             obj = clicks[4].1;
+            details = clicks[5].0;
         });
 
         if export {
@@ -2607,6 +3014,14 @@ impl App {
             self.require_export(has_item, has_ds, i18n::t(self.lang, "no_datasheet"), |req| {
                 req.datasheet = true;
             });
+        }
+        if details {
+            if self.selected_item().is_some() {
+                self.detail_query.clear();
+                self.show_detail = true;
+            } else {
+                self.alert(i18n::t(self.lang, "select_first"));
+            }
         }
         if page {
             if let Some(it) = self.selected_item() {
@@ -2785,10 +3200,7 @@ impl App {
             return;
         }
         let mut req = self.batch_opts.request(out_dir.clone());
-        req.ad_embed_3d = self.ad_embed_3d;
-        req.kicad_attach_3d = self.kicad_attach_3d;
-        req.rename_footprint = self.rename_footprint;
-        req.sch_colors = self.resolved_sch_colors();
+        self.apply_export_opts(&mut req);
         req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("export-ids", move || {
@@ -3040,6 +3452,7 @@ impl App {
     fn dialog_open(&self) -> bool {
         self.alert.is_some()
             || self.show_welcome
+            || self.show_detail
             || self.show_batch
             || self.sponsor_popup
             || self.fav_pick
@@ -3123,10 +3536,7 @@ impl App {
             ..Default::default()
         };
         mutate(&mut req);
-        req.ad_embed_3d = self.ad_embed_3d;
-        req.kicad_attach_3d = self.kicad_attach_3d;
-        req.rename_footprint = self.rename_footprint;
-        req.sch_colors = self.resolved_sch_colors();
+        self.apply_export_opts(&mut req);
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("export", move || {
             let client = LcedaClient::new();
@@ -3273,11 +3683,23 @@ impl App {
             top_frac: self.top_frac,
             sch_scheme: self.sch_scheme,
             sch_custom: self.sch_custom,
+            settings_tab: self.settings_tab,
+            export_section: self.export_section,
+            desc_fields: self.desc_fields.clone(),
+            nav_expanded: self.nav_expanded,
         });
     }
 
     fn resolved_sch_colors(&self) -> SchColors {
         self.sch_scheme.colors(self.sch_custom)
+    }
+
+    fn apply_export_opts(&self, req: &mut ExportRequest) {
+        req.ad_embed_3d = self.ad_embed_3d;
+        req.kicad_attach_3d = self.kicad_attach_3d;
+        req.rename_footprint = self.rename_footprint;
+        req.sch_colors = self.resolved_sch_colors();
+        req.desc_fields = self.desc_fields.clone();
     }
 
     fn persist_window(&mut self, ctx: &egui::Context) {
@@ -3336,10 +3758,7 @@ impl App {
             return false;
         }
         let mut req = self.batch_opts.request(out_dir.clone());
-        req.ad_embed_3d = self.ad_embed_3d;
-        req.kicad_attach_3d = self.kicad_attach_3d;
-        req.rename_footprint = self.rename_footprint;
-        req.sch_colors = self.resolved_sch_colors();
+        self.apply_export_opts(&mut req);
         req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("batch", move || {
@@ -3467,6 +3886,7 @@ fn fit_window<'a>(
     egui::Window::new(title)
         .id(egui::Id::new(id))
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .order(egui::Order::Foreground)
         .collapsible(false)
         .resizable(false)
         .default_width(width)
@@ -3482,6 +3902,189 @@ fn fit_window<'a>(
                 .inner_margin(egui::Margin::same(12))
                 .shadow(egui::Shadow::NONE),
         )
+}
+
+fn show_ad_field_map(ui: &mut egui::Ui, lang: Lang) {
+    ui.label(
+        egui::RichText::new(i18n::t(lang, "ad_map_title"))
+            .strong()
+            .color(theme::label()),
+    );
+    ui.add_space(6.0);
+    let pairs = [
+        ("Designator", "ad_map_designator"),
+        ("Comment", "ad_map_comment"),
+        ("Description", "ad_map_description"),
+    ];
+    egui::Frame::new()
+        .fill(theme::fill())
+        .stroke(egui::Stroke::new(1.0_f32, theme::hairline()))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::ZERO)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (i, (name, key)) in pairs.iter().enumerate() {
+                paint_ad_prop_row(
+                    ui,
+                    &PropRow {
+                        group: PropGroup::General,
+                        name: (*name).into(),
+                        value: i18n::t(lang, key).into(),
+                    },
+                    i,
+                );
+            }
+        });
+}
+
+fn show_ad_props(
+    ui: &mut egui::Ui,
+    lang: Lang,
+    rows: &[PropRow],
+    filter: &str,
+    max_h: Option<f32>,
+    id: &'static str,
+    show_hints: bool,
+) {
+    let q = filter.trim().to_lowercase();
+    let shown: Vec<&PropRow> = rows
+        .iter()
+        .filter(|r| {
+            q.is_empty()
+                || r.name.to_lowercase().contains(&q)
+                || r.value.to_lowercase().contains(&q)
+        })
+        .collect();
+    let body = |ui: &mut egui::Ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        if shown.is_empty() {
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(i18n::t(lang, "details_empty")).color(theme::secondary()),
+            );
+            ui.add_space(12.0);
+            return;
+        }
+        let mut first = true;
+        for group in [
+            PropGroup::General,
+            PropGroup::Identity,
+            PropGroup::Specs,
+            PropGroup::Extra,
+        ] {
+            let chunk: Vec<&PropRow> = shown
+                .iter()
+                .copied()
+                .filter(|r| r.group == group)
+                .collect();
+            if chunk.is_empty() {
+                continue;
+            }
+            if !first {
+                ui.add_space(16.0);
+            }
+            first = false;
+            egui::Frame::new()
+                .fill(theme::fill())
+                .stroke(egui::Stroke::new(1.0_f32, theme::hairline()))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::ZERO)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let (header, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 32.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_filled(header, 0.0, theme::fill_strong());
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(header.min, egui::vec2(3.0, header.height())),
+                        0.0,
+                        ACCENT,
+                    );
+                    ui.painter().text(
+                        header.left_center() + egui::vec2(14.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        i18n::t(lang, group.i18n_key()),
+                        egui::FontId::proportional(13.0),
+                        theme::label(),
+                    );
+                    if show_hints {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(i18n::t(lang, group.hint_key()))
+                                        .color(theme::secondary())
+                                        .size(11.5),
+                                )
+                                .wrap(),
+                            );
+                        });
+                        ui.add_space(8.0);
+                    }
+                    for (i, row) in chunk.iter().enumerate() {
+                        paint_ad_prop_row(ui, row, i);
+                    }
+                });
+        }
+    };
+    if let Some(max_h) = max_h {
+        egui::ScrollArea::vertical()
+            .id_salt(id)
+            .min_scrolled_height(max_h)
+            .max_height(max_h)
+            .auto_shrink([false, false])
+            .show(ui, body);
+    } else {
+        body(ui);
+    }
+}
+
+fn paint_ad_prop_row(ui: &mut egui::Ui, row: &PropRow, i: usize) {
+    let w = ui.available_width();
+    let name_w = (w * 0.34).clamp(118.0, 168.0);
+    let val_w = (w - name_w).max(80.0);
+    let galley = ui.fonts(|f| {
+        f.layout(
+            row.value.clone(),
+            egui::FontId::proportional(12.5),
+            theme::label(),
+            (val_w - 20.0).max(40.0),
+        )
+    });
+    let h = (galley.size().y + 16.0).max(34.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    let bg = if i % 2 == 0 {
+        theme::well()
+    } else {
+        theme::fill()
+    };
+    ui.painter().rect_filled(rect, 0.0, bg);
+    ui.painter().vline(
+        rect.min.x + name_w,
+        rect.y_range(),
+        egui::Stroke::new(1.0_f32, theme::hairline()),
+    );
+    let name_y = if h > 40.0 { 17.0 } else { h * 0.5 };
+    ui.painter().text(
+        rect.min + egui::vec2(12.0, name_y),
+        egui::Align2::LEFT_CENTER,
+        &row.name,
+        egui::FontId::proportional(12.0),
+        theme::secondary(),
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.min.x + name_w + 12.0,
+            rect.min.y + (h - galley.size().y) * 0.5,
+        ),
+        galley,
+        theme::label(),
+    );
 }
 
 fn consume_dialog_confirm(ui: &mut egui::Ui, allow_space: bool) -> bool {
@@ -3708,7 +4311,12 @@ fn action_grid(
         .show(ui, |ui| {
             for row in rows {
                 let a = theme::action_button(ui, row.0, row.1, row.2, egui::vec2(col, BTN_H)).clicked();
-                let b = theme::action_button(ui, row.3, row.4, row.5, egui::vec2(col, BTN_H)).clicked();
+                let b = if row.3.is_empty() {
+                    ui.allocate_exact_size(egui::vec2(col, BTN_H), egui::Sense::hover());
+                    false
+                } else {
+                    theme::action_button(ui, row.3, row.4, row.5, egui::vec2(col, BTN_H)).clicked()
+                };
                 out.push((a, b));
                 ui.end_row();
             }
