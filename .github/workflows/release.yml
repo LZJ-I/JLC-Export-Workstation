@@ -92,7 +92,7 @@ jobs:
           ## 改进
 
           ### 名字
-          - 窗口标题改为 **嘉立创导出工作站** / **JLC Export Workstation**（仓库仍叫 JLC-Export）。
+          - 窗口标题改为 **嘉立创导出工作站** / **JLC Export Workstation**，仓库改为 `JLC-Export-Workstation`。
 
           ### Altium 三栏
           - **Designator**：只用立创位号前缀（`U?` / `R?` / `CN?` / `SW?`），不再拿型号当位号。
