@@ -91,8 +91,7 @@ jobs:
             --notes "$(cat <<'EOF'
           ## 改进
 
-          - 修复浅色界面加粗标题看不见（器件 / 预览 / 三维外形等）。
-          - 提高浅色 / 深色禁用按钮、占位提示和输入框 hint 的对比度。
+          - 修复 Altium SchLib 位号被型号顶掉：Designator 写 `RECORD=34`（`U?`），Comment 写 `RECORD=41`（型号）。
 
           ## 下载
           解压后运行：
