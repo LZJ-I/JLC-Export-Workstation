@@ -496,6 +496,26 @@ pub fn caption_min(ui: &mut egui::Ui) -> egui::Response {
     resp
 }
 
+pub fn caption_max(ui: &mut egui::Ui, maximized: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 6.0, well());
+    }
+    let s = Stroke::new(1.4_f32, label());
+    if maximized {
+        let back = egui::Rect::from_center_size(rect.center() + egui::vec2(1.8, -1.8), egui::vec2(8.0, 8.0));
+        let front = egui::Rect::from_center_size(rect.center() + egui::vec2(-1.6, 1.6), egui::vec2(8.0, 8.0));
+        let bg = if resp.hovered() { well() } else { fill() };
+        ui.painter().rect_stroke(back, 0.8, s, egui::StrokeKind::Inside);
+        ui.painter().rect_filled(front.expand(1.0), 0.8, bg);
+        ui.painter().rect_stroke(front, 0.8, s, egui::StrokeKind::Inside);
+    } else {
+        let boxr = egui::Rect::from_center_size(rect.center(), egui::vec2(10.0, 10.0));
+        ui.painter().rect_stroke(boxr, 1.2, s, egui::StrokeKind::Inside);
+    }
+    resp
+}
+
 pub fn caption_close(ui: &mut egui::Ui) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::click());
     if resp.hovered() {

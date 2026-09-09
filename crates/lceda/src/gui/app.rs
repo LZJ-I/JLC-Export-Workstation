@@ -3607,7 +3607,7 @@ impl App {
                             .size(11.0),
                     );
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    let controls = 40.0 + 32.0 * 3.0 + 8.0;
+                    let controls = 40.0 + 32.0 * 4.0 + 8.0;
                     let drag_w = (ui.available_width() - controls).max(16.0);
                     let (_, drag) = ui.allocate_exact_size(egui::vec2(drag_w, 32.0), egui::Sense::click_and_drag());
                     if drag.drag_started() {
@@ -3649,6 +3649,18 @@ impl App {
                     {
                         ui.ctx()
                             .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                    let max_tip = if maxed {
+                        i18n::t(self.lang, "win_restore")
+                    } else {
+                        i18n::t(self.lang, "win_max")
+                    };
+                    if theme::caption_max(ui, maxed)
+                        .on_hover_text(max_tip)
+                        .clicked()
+                    {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
                     }
                     if theme::caption_close(ui)
                         .on_hover_text(i18n::t(self.lang, "win_close"))
