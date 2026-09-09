@@ -91,7 +91,7 @@ jobs:
             --notes "$(cat <<'EOF'
           ## 改进
 
-          - 修复 Altium SchLib 位号被型号顶掉：Designator 写 `RECORD=34`（`U?`），Comment 写 `RECORD=41`（型号）。
+          - 标题栏增加最大化 / 还原按钮（最小化与关闭之间）。双击标题栏仍可切换。
 
           ## 下载
           解压后运行：
