@@ -193,24 +193,19 @@ fn component_data(symbol: &SymbolIr, libref: &str, colors: SchColors) -> Vec<u8>
         write_named(&mut w, &pairs);
     }
 
-    w.write_params(&[
-        ("RECORD", "34".into()),
-        ("OWNERPARTID", "-1".into()),
-        ("COLOR", colors.designator.to_string()),
-        ("FONTID", "1".into()),
-        ("TEXT", symbol.designator.clone()),
-        ("NAME", "Designator".into()),
-        ("READONLYSTATE", "1".into()),
-    ]);
-    w.write_params(&[
-        ("RECORD", "34".into()),
-        ("OWNERPARTID", "-1".into()),
-        ("COLOR", colors.comment.to_string()),
-        ("FONTID", "1".into()),
-        ("TEXT", symbol.name.clone()),
-        ("NAME", "Comment".into()),
-        ("READONLYSTATE", "1".into()),
-    ]);
+    // AD：位号是 RECORD=34，型号是 RECORD=41。两条都写成 34 时，
+    // 后一条会顶掉位号（属性里变成型号，Comment 掉成 *）。
+    let (dx, dy, cx, cy) = label_positions(symbol);
+    write_component_label(
+        &mut w,
+        34,
+        "Designator",
+        &symbol.designator,
+        colors.designator,
+        dx,
+        dy,
+    );
+    write_component_label(&mut w, 41, "Comment", &symbol.name, colors.comment, cx, cy);
 
     write_footprint_implementation(&mut w, symbol);
     w.into_vec()
@@ -249,6 +244,77 @@ fn write_footprint_implementation(w: &mut BinWriter, symbol: &SymbolIr) {
         ]);
     }
     w.write_params(&[("RECORD", "48".into())]);
+}
+
+fn write_component_label(
+    w: &mut BinWriter,
+    record: u8,
+    name: &str,
+    text: &str,
+    color: i32,
+    x: f64,
+    y: f64,
+) {
+    let mut pairs = vec![
+        ("RECORD".into(), record.to_string()),
+        ("INDEXINSHEET".into(), "-1".into()),
+        ("OWNERPARTID".into(), "-1".into()),
+    ];
+    add_coord_param(&mut pairs, "LOCATION.X", x);
+    add_coord_param(&mut pairs, "LOCATION.Y", y);
+    pairs.extend([
+        ("COLOR".into(), color.to_string()),
+        ("FONTID".into(), "1".into()),
+        ("ISHIDDEN".into(), "F".into()),
+        ("TEXT".into(), text.replace('|', "_")),
+        ("NAME".into(), name.into()),
+        ("READONLYSTATE".into(), "1".into()),
+        ("UNIQUEID".into(), unique_id()),
+    ]);
+    write_named(w, &pairs);
+}
+
+/// 位号在本体上方，型号在下方。没有图形时用 AD 常见的 (-5, 5) / (-5, -15) DXP。
+fn label_positions(symbol: &SymbolIr) -> (f64, f64, f64, f64) {
+    const STEP: f64 = 1.27;
+    match symbol_bounds(symbol) {
+        Some((min_x, min_y, _, max_y)) => (min_x, max_y + STEP, min_x, min_y - STEP),
+        None => (-STEP, STEP, -STEP, -3.0 * STEP),
+    }
+}
+
+fn symbol_bounds(symbol: &SymbolIr) -> Option<(f64, f64, f64, f64)> {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut any = false;
+    let mut add = |x: f64, y: f64| {
+        if x.is_finite() && y.is_finite() {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            any = true;
+        }
+    };
+    for r in &symbol.rects {
+        add(r.x1, r.y1);
+        add(r.x2, r.y2);
+    }
+    for pin in &symbol.pins {
+        add(pin.x, pin.y);
+    }
+    for poly in &symbol.polys {
+        for &(x, y) in poly {
+            add(x, y);
+        }
+    }
+    for e in &symbol.ellipses {
+        add(e.x - e.rx, e.y - e.ry);
+        add(e.x + e.rx, e.y + e.ry);
+    }
+    any.then_some((min_x, min_y, max_x, max_y))
 }
 
 fn write_named(w: &mut BinWriter, pairs: &[(String, String)]) {
@@ -432,5 +498,29 @@ mod tests {
         let raw = pin_text_both_attrs(2, blue, 2, blue);
         assert_eq!(&raw[3..7], &blue.to_le_bytes());
         assert_eq!(&raw[10..14], &blue.to_le_bytes());
+    }
+
+    #[test]
+    fn label_positions_sit_above_and_below_body() {
+        let symbol = crate::ir::SymbolIr {
+            name: "U".into(),
+            description: String::new(),
+            designator: "U?".into(),
+            meta: Default::default(),
+            pins: vec![],
+            rects: vec![crate::ir::IrRect {
+                x1: -2.54,
+                y1: -5.08,
+                x2: 2.54,
+                y2: 5.08,
+            }],
+            polys: vec![],
+            ellipses: vec![],
+        };
+        let (dx, dy, cx, cy) = label_positions(&symbol);
+        assert!((dx - (-2.54)).abs() < 1e-9);
+        assert!((dy - 6.35).abs() < 1e-9);
+        assert!((cx - (-2.54)).abs() < 1e-9);
+        assert!((cy - (-6.35)).abs() < 1e-9);
     }
 }

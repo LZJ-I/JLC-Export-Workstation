@@ -95,7 +95,14 @@ mod tests {
             "default SchLib must use Altium maroon 128, got {text}"
         );
         assert!(text.contains("16711680"), "designator/comment blue 16711680: {text}");
-        assert!(text.contains("NAME=Comment"), "{text}");
+        assert!(
+            text.contains("RECORD=34") && text.contains("NAME=Designator") && text.contains("TEXT=U?"),
+            "Designator must be RECORD=34: {text}"
+        );
+        assert!(
+            text.contains("RECORD=41") && text.contains("NAME=Comment") && text.contains("TEXT=RES"),
+            "Comment must be RECORD=41, not another 34: {text}"
+        );
         assert!(
             text.contains("RECORD=2") && text.contains("NAME_CUSTOMFONTID"),
             "classic pins are ASCII: {text}"
@@ -131,6 +138,10 @@ mod tests {
             "Chinese Description must be GBK"
         );
         assert!(text.contains("TEXT=U?") && text.contains("NAME=Designator"), "{text}");
+        assert!(
+            text.contains("RECORD=41") && text.contains("NAME=Comment") && text.contains("TEXT=CH343P"),
+            "Comment is RECORD=41: {text}"
+        );
     }
 
     #[test]
