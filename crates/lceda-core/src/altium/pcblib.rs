@@ -304,6 +304,9 @@ fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec
     }
 
     for track in &fp.tracks {
+        if skip_altium_graphic(track.layer) {
+            continue;
+        }
         let layer = pcb_layer(track.layer, 0.0);
         let width = from_mm(track.width.max(0.05));
         for win in track.points.windows(2) {
@@ -317,6 +320,9 @@ fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec
     }
 
     for c in &fp.circles {
+        if skip_altium_graphic(c.layer) {
+            continue;
+        }
         let layer = pcb_layer(c.layer, 0.0);
         w.write_u8(1);
         write_arc(
@@ -333,6 +339,9 @@ fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec
     }
 
     for a in &fp.arcs {
+        if skip_altium_graphic(a.layer) {
+            continue;
+        }
         let layer = pcb_layer(a.layer, 0.0);
         w.write_u8(1);
         write_arc(
@@ -372,6 +381,12 @@ fn closed_outline(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
 
 fn nearly_same(a: (f64, f64), b: (f64, f64)) -> bool {
     (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+}
+
+/// EasyEDA Pro 48 COMPONENT_SHAPE（元件外形）只是封装编辑器参考框。
+/// 写成 Mechanical1 时，AD 常见模板把这层当板框，闭合线会被铣成开孔。
+fn skip_altium_graphic(layer: i32) -> bool {
+    layer == 48
 }
 
 fn altium_param(s: &str) -> String {

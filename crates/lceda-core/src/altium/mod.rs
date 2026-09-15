@@ -328,6 +328,61 @@ mod tests {
     }
 
     #[test]
+    fn pcblib_drops_component_shape_layer() {
+        let dir = std::env::temp_dir().join("lceda-test-pcb-shape");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("SHAPE.PcbLib");
+        let fp = FootprintIr {
+            name: "SHAPE".into(),
+            description: "msop".into(),
+            meta: Default::default(),
+            pads: vec![IrPad {
+                designator: "1".into(),
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                hole: 0.0,
+                hole_slot: 0.0,
+                hole_shape: "ROUND".into(),
+                rotation: 0.0,
+                layer: 1,
+                shape: "RECT".into(),
+                polygon: None,
+            }],
+            tracks: vec![
+                IrTrack {
+                    layer: 48,
+                    width: 0.051,
+                    points: vec![
+                        (-2.0, -1.5),
+                        (2.0, -1.5),
+                        (2.0, 1.5),
+                        (-2.0, 1.5),
+                        (-2.0, -1.5),
+                    ],
+                },
+                IrTrack {
+                    layer: 3,
+                    width: 0.15,
+                    points: vec![(-1.0, -1.0), (1.0, -1.0)],
+                },
+            ],
+            circles: vec![],
+            arcs: vec![],
+            regions: vec![],
+            model: Default::default(),
+        };
+        write_pcblib(&path, &fp).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut hdr = Vec::new();
+        cfb.open_stream("SHAPE/Header").unwrap().read_to_end(&mut hdr).unwrap();
+        // 1 pad + 1 silk segment; the layer-48 body box must not become Mechanical1 tracks
+        assert_eq!(i32::from_le_bytes(hdr.try_into().unwrap()), 2);
+        assert_ne!(pcb_layer(48, 0.0), 57);
+    }
+
+    #[test]
     fn pcblib_embeds_step_as_component_body() {
         let dir = std::env::temp_dir().join("lceda-test-pcb-step");
         let _ = std::fs::create_dir_all(&dir);
@@ -723,7 +778,8 @@ mod tests {
 }
 
 /// EasyEDA Pro 图层 → Altium PcbLib 二进制 layer byte。
-/// 48 外形跟 EasyEDALoader 的 ComponentShape 一样落到机械层；49 标记放到丝印，方便看见 Pin 1。
+/// 48 元件外形是封装编辑器参考框，不能进 Mechanical1（AD 会把闭合线当成板框/开孔）。
+/// 49 标记放到丝印，方便看见 Pin 1。
 pub fn pcb_layer(easy: i32, hole_mm: f64) -> u8 {
     if easy == 12 || hole_mm > 1e-6 {
         return 74; // MultiLayer
@@ -737,7 +793,7 @@ pub fn pcb_layer(easy: i32, hole_mm: f64) -> u8 {
         6 => 38,      // Bottom solder
         7 => 35,      // Top paste
         8 => 36,      // Bottom paste
-        11 | 48 => 57, // Mechanical1 / component shape
+        11 => 57,     // Mechanical1 / board outline
         13 => 58,     // Mechanical2 / document courtyard
         _ => 33,
     }
