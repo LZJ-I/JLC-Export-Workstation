@@ -89,9 +89,9 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/*.zip \
             --title "${GITHUB_REF_NAME}" \
             --notes "$(cat <<'EOF'
-          ## 改进
+          ## 修复
 
-          - 标题栏增加最大化 / 还原按钮（最小化与关闭之间）。双击标题栏仍可切换。
+          - AD 封装不再写出立创「元件外形」层。原先落到 Mechanical1，闭合框会被当成板框开孔。
 
           ## 下载
           解压后运行：
