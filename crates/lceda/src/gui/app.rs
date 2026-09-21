@@ -46,6 +46,8 @@ const ACTIONS_MIN: f32 = 300.0;
 const TOP_MIN: f32 = 188.0;
 const MESH_MIN: f32 = 168.0;
 const WIN_CORNER: u8 = 12;
+const RESIZE_EDGE: f32 = 6.0;
+const RESIZE_CORNER: f32 = 12.0;
 
 #[derive(Clone, Copy)]
 enum PartAct {
@@ -191,17 +193,13 @@ pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
     }
     if !shooting && prefs.win_max {
         viewport = viewport.with_maximized(true);
-    } else if !shooting {
-        if let (Some(x), Some(y)) = (prefs.win_x, prefs.win_y) {
-            viewport = viewport.with_position([x, y]);
-        }
     }
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions {
         viewport,
-        centered: shooting || prefs.win_x.is_none() || prefs.win_y.is_none(),
+        centered: shooting || !prefs.win_max,
         ..Default::default()
     };
     eframe::run_native(
@@ -274,8 +272,6 @@ struct App {
     parts_width: f32,
     photo_frac: Option<f32>,
     top_frac: Option<f32>,
-    win_x: Option<f32>,
-    win_y: Option<f32>,
     win_w: f32,
     win_h: f32,
     win_max: bool,
@@ -403,8 +399,6 @@ impl App {
             parts_width: prefs.parts_width,
             photo_frac: prefs.photo_frac,
             top_frac: prefs.top_frac,
-            win_x: prefs.win_x,
-            win_y: prefs.win_y,
             win_w: prefs.win_w,
             win_h: prefs.win_h,
             win_max: prefs.win_max,
@@ -1353,25 +1347,30 @@ impl App {
                 let mut custom = self.sch_custom;
                 let mut dirty = false;
                 ui.columns(2, |cols| {
-                    dirty |= sch_color_row(&mut cols[0], i18n::t(lang, "sch_color_body"), &mut custom.body);
-                    dirty |= sch_color_row(&mut cols[1], i18n::t(lang, "sch_color_pin"), &mut custom.pin);
                     dirty |= sch_color_row(
                         &mut cols[0],
+                        i18n::t(lang, "sch_color_background"),
+                        &mut custom.background,
+                    );
+                    dirty |= sch_color_row(&mut cols[1], i18n::t(lang, "sch_color_body"), &mut custom.body);
+                    dirty |= sch_color_row(&mut cols[0], i18n::t(lang, "sch_color_pin"), &mut custom.pin);
+                    dirty |= sch_color_row(
+                        &mut cols[1],
                         i18n::t(lang, "sch_color_pin_name"),
                         &mut custom.pin_name,
                     );
                     dirty |= sch_color_row(
-                        &mut cols[1],
+                        &mut cols[0],
                         i18n::t(lang, "sch_color_pin_number"),
                         &mut custom.pin_number,
                     );
                     dirty |= sch_color_row(
-                        &mut cols[0],
+                        &mut cols[1],
                         i18n::t(lang, "sch_color_designator"),
                         &mut custom.designator,
                     );
                     dirty |= sch_color_row(
-                        &mut cols[1],
+                        &mut cols[0],
                         i18n::t(lang, "sch_color_comment"),
                         &mut custom.comment,
                     );
@@ -1919,6 +1918,7 @@ impl eframe::App for App {
             }
         }
         paint_window_shell(ctx, maxed);
+        handle_window_resize(ctx, maxed);
         if self.instance.wakeup.swap(false, Ordering::SeqCst) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -2025,6 +2025,7 @@ impl eframe::App for App {
         }
         self.tick_debug_shot(ctx);
         self.persist_window(ctx);
+        handle_window_resize(ctx, maxed);
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
@@ -3610,7 +3611,15 @@ impl App {
                     let controls = 40.0 + 32.0 * 4.0 + 8.0;
                     let drag_w = (ui.available_width() - controls).max(16.0);
                     let (_, drag) = ui.allocate_exact_size(egui::vec2(drag_w, 32.0), egui::Sense::click_and_drag());
-                    if drag.drag_started() {
+                    if drag.drag_started()
+                        && resize_dir_at(
+                            ui.ctx().screen_rect(),
+                            drag.interact_pointer_pos().unwrap_or(drag.rect.center()),
+                            RESIZE_EDGE,
+                            RESIZE_CORNER,
+                        )
+                        .is_none()
+                    {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
                     if drag.double_clicked() {
@@ -3707,8 +3716,8 @@ impl App {
             export_pads: self.batch_opts.pads,
             export_datasheet: self.batch_opts.datasheet,
             export_source: self.batch_opts.source,
-            win_x: self.win_x,
-            win_y: self.win_y,
+            win_x: None,
+            win_y: None,
             win_w: self.win_w,
             win_h: self.win_h,
             win_max: self.win_max,
@@ -3737,9 +3746,9 @@ impl App {
     }
 
     fn persist_window(&mut self, ctx: &egui::Context) {
-        let (outer, inner, maxed) = ctx.input(|i| {
+        let (inner, maxed) = ctx.input(|i| {
             let v = i.viewport();
-            (v.outer_rect, v.inner_rect, v.maximized.unwrap_or(false))
+            (v.inner_rect, v.maximized.unwrap_or(false))
         });
         let mut dirty = false;
         if self.win_max != maxed {
@@ -3747,20 +3756,6 @@ impl App {
             dirty = true;
         }
         if !maxed {
-            let pos = outer
-                .map(|r| r.min)
-                .or_else(|| inner.map(|r| r.min));
-            if let Some(pos) = pos {
-                let x = pos.x;
-                let y = pos.y;
-                if self.win_x.is_none_or(|o| (o - x).abs() > 1.0)
-                    || self.win_y.is_none_or(|o| (o - y).abs() > 1.0)
-                {
-                    self.win_x = Some(x);
-                    self.win_y = Some(y);
-                    dirty = true;
-                }
-            }
             if let Some(inner) = inner {
                 if inner.width() >= 960.0 && inner.height() >= 620.0 {
                     let w = inner.width().min(4000.0);
@@ -4227,7 +4222,7 @@ fn sch_color_preview(ui: &mut egui::Ui, colors: SchColors) {
     let h = (148.0 + (pin_pt - 7.0) * 3.0).clamp(148.0, 188.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 8.0, theme::well());
+    p.rect_filled(rect, 8.0, bgr_color(colors.background));
     p.rect_stroke(
         rect,
         8.0,
@@ -4330,6 +4325,71 @@ fn shell_panel_fill(maximized: bool) -> Color32 {
         theme::window_bg()
     } else {
         Color32::TRANSPARENT
+    }
+}
+
+fn resize_dir_at(
+    rect: egui::Rect,
+    pos: egui::Pos2,
+    edge: f32,
+    corner: f32,
+) -> Option<egui::viewport::ResizeDirection> {
+    use egui::viewport::ResizeDirection;
+    let left = pos.x - rect.left();
+    let right = rect.right() - pos.x;
+    let top = pos.y - rect.top();
+    let bottom = rect.bottom() - pos.y;
+    if left <= corner && top <= corner {
+        return Some(ResizeDirection::NorthWest);
+    }
+    if right <= corner && top <= corner {
+        return Some(ResizeDirection::NorthEast);
+    }
+    if left <= corner && bottom <= corner {
+        return Some(ResizeDirection::SouthWest);
+    }
+    if right <= corner && bottom <= corner {
+        return Some(ResizeDirection::SouthEast);
+    }
+    if top <= edge {
+        return Some(ResizeDirection::North);
+    }
+    if bottom <= edge {
+        return Some(ResizeDirection::South);
+    }
+    if left <= edge {
+        return Some(ResizeDirection::West);
+    }
+    if right <= edge {
+        return Some(ResizeDirection::East);
+    }
+    None
+}
+
+fn resize_cursor(dir: egui::viewport::ResizeDirection) -> egui::CursorIcon {
+    use egui::viewport::ResizeDirection;
+    match dir {
+        ResizeDirection::North | ResizeDirection::South => egui::CursorIcon::ResizeVertical,
+        ResizeDirection::East | ResizeDirection::West => egui::CursorIcon::ResizeHorizontal,
+        ResizeDirection::NorthEast | ResizeDirection::SouthWest => egui::CursorIcon::ResizeNeSw,
+        ResizeDirection::NorthWest | ResizeDirection::SouthEast => egui::CursorIcon::ResizeNwSe,
+    }
+}
+
+fn handle_window_resize(ctx: &egui::Context, maximized: bool) {
+    if maximized {
+        return;
+    }
+    let Some(pos) = ctx.pointer_hover_pos().or_else(|| ctx.input(|i| i.pointer.latest_pos()))
+    else {
+        return;
+    };
+    let Some(dir) = resize_dir_at(ctx.screen_rect(), pos, RESIZE_EDGE, RESIZE_CORNER) else {
+        return;
+    };
+    ctx.set_cursor_icon(resize_cursor(dir));
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
     }
 }
 
@@ -4856,5 +4916,27 @@ mod layout_tests {
         assert!(h >= TOP_MIN);
         let tall = clamp_top_h(680.0, 700.0, TOP_MIN);
         assert!(tall + GAP + MESH_MIN <= 700.0 + 0.5);
+    }
+
+    #[test]
+    fn window_edge_picks_resize_direction() {
+        use egui::viewport::ResizeDirection;
+        let r = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        assert_eq!(
+            resize_dir_at(r, egui::pos2(2.0, 150.0), 6.0, 12.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            resize_dir_at(r, egui::pos2(398.0, 150.0), 6.0, 12.0),
+            Some(ResizeDirection::East)
+        );
+        assert_eq!(
+            resize_dir_at(r, egui::pos2(8.0, 8.0), 6.0, 12.0),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_dir_at(r, egui::pos2(200.0, 150.0), 6.0, 12.0),
+            None
+        );
     }
 }

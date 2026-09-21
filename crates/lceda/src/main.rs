@@ -10,6 +10,9 @@ mod sponsor;
 mod update;
 
 fn main() {
+    if let Some(code) = update::maybe_apply_update() {
+        std::process::exit(code);
+    }
     #[cfg(windows)]
     attach_console_if_cli();
     match cli::run() {
@@ -26,6 +29,7 @@ fn main() {
 fn attach_console_if_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let gui_only = args.is_empty()
+        || args[0] == "--apply-update"
         || args.iter().all(|a| a.eq_ignore_ascii_case("gui") || a.starts_with("--lang"));
     if gui_only {
         return;

@@ -87,6 +87,10 @@ mod tests {
         assert!(hdr.len() > 32);
         let hdr_text = String::from_utf8_lossy(&hdr);
         assert!(hdr_text.contains("COLOR2=0"), "default classic black pin text: {hdr_text}");
+        assert!(
+            hdr_text.contains("AREACOLOR=16317695"),
+            "classic sheet background #FFFCF8: {hdr_text}"
+        );
         let mut data = Vec::new();
         cfb.open_stream("RES/Data").unwrap().read_to_end(&mut data).unwrap();
         let text = String::from_utf8_lossy(&data);
@@ -188,6 +192,10 @@ mod tests {
         assert!(hdr.contains("COLOR2=16711680"), "{hdr}");
         assert!(hdr.contains("COLOR3=255"), "电源红字: {hdr}");
         assert!(hdr.contains("COLOR4=0"), "地黑字: {hdr}");
+        assert!(
+            hdr.contains("AREACOLOR=16777215"),
+            "立创官方图纸白底: {hdr}"
+        );
     }
 
     #[test]
@@ -769,10 +777,32 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("RES.SchLib");
         write_schlib_with_colors(&path, &sample_symbol("RES"), SchColors::mono()).unwrap();
-        let cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
         assert!(
             !cfb.exists("RES/PinTextData"),
             "黑白线字同色，不写 PinTextData"
+        );
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        let hdr = String::from_utf8_lossy(&hdr);
+        assert!(hdr.contains("AREACOLOR=16777215"), "mono white sheet: {hdr}");
+    }
+
+    #[test]
+    fn writes_schlib_custom_sheet_background() {
+        let dir = std::env::temp_dir().join("lceda-test-sch-bg");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("RES.SchLib");
+        let mut colors = SchColors::altium_classic();
+        colors.background = SchColors::rgb(240, 248, 255);
+        write_schlib_with_colors(&path, &sample_symbol("RES"), colors).unwrap();
+        let mut cfb = cfb::CompoundFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut hdr = Vec::new();
+        cfb.open_stream("FileHeader").unwrap().read_to_end(&mut hdr).unwrap();
+        let hdr = String::from_utf8_lossy(&hdr);
+        assert!(
+            hdr.contains(&format!("AREACOLOR={}", SchColors::rgb(240, 248, 255))),
+            "custom sheet background: {hdr}"
         );
     }
 }

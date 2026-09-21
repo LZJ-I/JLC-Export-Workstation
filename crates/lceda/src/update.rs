@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -237,6 +237,7 @@ fn leftover_update_paths(current: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         current.with_file_name(format!("{name}.old")),
         current.with_file_name(format!("{name}.new")),
+        staging_exe_path(),
     ];
     if let Some(parent) = current.parent() {
         if !stem.is_empty() {
@@ -307,33 +308,113 @@ fn extract_exe(zip_bytes: &[u8]) -> Result<Vec<u8>, String> {
     Err("压缩包里没有程序文件".into())
 }
 
-fn replace_self_and_restart(new_bytes: &[u8]) -> Result<(), String> {
-    let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    let tmp = current.with_file_name(format!(
-        "{}.new",
-        current.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    fs::write(&tmp, new_bytes).map_err(|e| format!("无法写入更新文件: {e}"))?;
-    let old = old_path(&current);
-    let _ = fs::remove_file(&old);
-    fs::rename(&current, &old).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("无法替换正在运行的程序: {e}")
-    })?;
-    if let Err(e) = fs::rename(&tmp, &current) {
-        let _ = fs::rename(&old, &current);
-        return Err(format!("无法安装新版本: {e}"));
+/// 新进程入口：等旧进程放开文件后，原地覆盖桌面上的同一个 exe，图标就不会跑回左边。
+pub fn maybe_apply_update() -> Option<i32> {
+    let mut args = std::env::args();
+    let _ = args.next();
+    if args.next()?.as_str() != "--apply-update" {
+        return None;
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut cmd = Command::new(&current);
-    cmd.args(&args);
-    cmd.spawn().map_err(|e| {
-        let _ = fs::rename(&old, &current);
-        format!("无法重新启动: {e}")
-    })?;
-    std::process::exit(0);
+    let dest = PathBuf::from(args.next()?);
+    let rest: Vec<String> = args.collect();
+    Some(finish_apply_update(&dest, &rest))
 }
 
+fn replace_self_and_restart(new_bytes: &[u8]) -> Result<(), String> {
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    let tmp = if cfg!(windows) {
+        staging_exe_path()
+    } else {
+        current.with_file_name(format!(
+            "{}.new",
+            current.file_name().unwrap_or_default().to_string_lossy()
+        ))
+    };
+    fs::write(&tmp, new_bytes).map_err(|e| format!("无法写入更新文件: {e}"))?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new(&tmp);
+        cmd.arg("--apply-update");
+        cmd.arg(&current);
+        cmd.args(&args);
+        cmd.spawn().map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("无法重新启动: {e}")
+        })?;
+        std::process::exit(0);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let old = old_path(&current);
+        let _ = fs::remove_file(&old);
+        fs::rename(&current, &old).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("无法替换正在运行的程序: {e}")
+        })?;
+        if let Err(e) = fs::rename(&tmp, &current) {
+            let _ = fs::rename(&old, &current);
+            return Err(format!("无法安装新版本: {e}"));
+        }
+        let mut cmd = Command::new(&current);
+        cmd.args(&args);
+        cmd.spawn().map_err(|e| {
+            let _ = fs::rename(&old, &current);
+            format!("无法重新启动: {e}")
+        })?;
+        std::process::exit(0);
+    }
+}
+
+fn finish_apply_update(dest: &Path, rest: &[String]) -> i32 {
+    let Ok(src) = std::env::current_exe() else {
+        return 2;
+    };
+    let Ok(bytes) = fs::read(&src) else {
+        return 2;
+    };
+    if overwrite_in_place_retry(dest, &bytes).is_err() {
+        return 2;
+    }
+    let mut cmd = Command::new(dest);
+    cmd.args(rest);
+    if cmd.spawn().is_err() {
+        return 2;
+    }
+    0
+}
+
+fn staging_exe_path() -> PathBuf {
+    std::env::temp_dir().join("lceda-update.exe")
+}
+
+fn overwrite_in_place_retry(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut last = String::new();
+    for i in 0..50 {
+        match overwrite_in_place(path, bytes) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+        std::thread::sleep(Duration::from_millis(40 + i * 10));
+    }
+    Err(last)
+}
+
+/// 打开已有文件写入，不删再建。Windows 桌面图标按文件身份记位置。
+fn overwrite_in_place(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.write_all(bytes).map_err(|e| e.to_string())?;
+    f.flush().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn old_path(current: &Path) -> PathBuf {
     let name = current.file_name().unwrap_or_default().to_string_lossy();
     current.with_file_name(format!("{name}.old"))
@@ -425,6 +506,16 @@ mod tests {
         assert!(names.contains(&"lceda.exe.old".into()));
         assert!(names.contains(&"lceda.exe.new".into()));
         assert!(names.contains(&"lceda.old.exe".into()));
+        assert!(names.contains(&"lceda-update.exe".into()));
+    }
+
+    #[test]
+    fn overwrite_in_place_replaces_bytes() {
+        let path = std::env::temp_dir().join(format!("lceda-overwrite-{}.bin", std::process::id()));
+        fs::write(&path, b"old-bytes").unwrap();
+        overwrite_in_place(&path, b"new-content").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new-content");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

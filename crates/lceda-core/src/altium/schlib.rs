@@ -72,7 +72,8 @@ fn file_header_many(names: &[String], colors: SchColors) -> Vec<u8> {
     }
     raw.push_str(&format!(
         "|USEMBCS=T|ISBOC=T|SHEETSTYLE=9|SYSTEMFONT=1|BORDERON=T|DISPLAY_UNIT=0\
-         |COMPCOUNT={n}"
+         |AREACOLOR={}|COMPCOUNT={n}",
+        colors.background
     ));
     for (i, name) in names.iter().enumerate() {
         raw.push_str(&format!("|LIBREF{i}={name}|PARTCOUNT{i}=2"));

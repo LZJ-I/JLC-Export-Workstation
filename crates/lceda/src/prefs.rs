@@ -265,6 +265,9 @@ fn json_sch_colors(v: Option<&Value>) -> SchColors {
     if let Some(n) = hex_or_int(v.get("comment")) {
         c.comment = n;
     }
+    if let Some(n) = hex_or_int(v.get("background")) {
+        c.background = n;
+    }
     if let Some(n) = v.get("pin_font_size").and_then(Value::as_i64) {
         c.pin_font_size = (n as i32).clamp(
             lceda_core::altium::PIN_FONT_SIZE_MIN,
@@ -328,6 +331,7 @@ fn to_json(prefs: &Prefs) -> Value {
             "pin_number": SchColors::as_hex(prefs.sch_custom.pin_number),
             "designator": SchColors::as_hex(prefs.sch_custom.designator),
             "comment": SchColors::as_hex(prefs.sch_custom.comment),
+            "background": SchColors::as_hex(prefs.sch_custom.background),
             "pin_font_size": prefs.sch_custom.clamped_pin_font_size(),
         },
     });
@@ -418,6 +422,7 @@ mod tests {
         prefs.top_frac = Some(0.45);
         prefs.sch_scheme = SchColorScheme::Custom;
         prefs.sch_custom.pin_font_size = 7;
+        prefs.sch_custom.background = SchColors::rgb(240, 248, 255);
         prefs.settings_tab = SettingsTab::Export;
         prefs.export_section = ExportSection::Description;
         prefs.nav_expanded = false;
@@ -445,5 +450,9 @@ mod tests {
         assert_eq!(prefs.export_section, ExportSection::Format);
         assert_eq!(prefs.desc_fields, DescField::library());
         assert!(prefs.nav_expanded);
+        assert_eq!(
+            prefs.sch_custom.background,
+            SchColors::altium_classic().background
+        );
     }
 }

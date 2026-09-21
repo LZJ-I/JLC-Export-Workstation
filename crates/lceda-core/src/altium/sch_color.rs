@@ -15,6 +15,8 @@ pub struct SchColors {
     pub pin_number: i32,
     pub designator: i32,
     pub comment: i32,
+    /// SchLib FileHeader `AREACOLOR`，库编辑器图纸背景。缺省时 AD 会当成黑。
+    pub background: i32,
     /// 管脚名/号字号（Altium 点）。立创官方 7，经典 10。
     pub pin_font_size: i32,
 }
@@ -76,6 +78,15 @@ impl SchColors {
         Self::rgb(rgb[0], rgb[1], rgb[2])
     }
 
+    /// Altium 经典图纸底 `#FFFCF8`（FileHeader AREACOLOR=16317695）。
+    pub const fn sheet_cream() -> i32 {
+        Self::rgb(255, 252, 248)
+    }
+
+    pub const fn sheet_white() -> i32 {
+        Self::rgb(255, 255, 255)
+    }
+
     /// Altium 经典：外形/管脚暗红，位号/型号蓝，管脚字黑。
     pub const fn altium_classic() -> Self {
         Self {
@@ -85,6 +96,7 @@ impl SchColors {
             pin_number: Self::rgb(0, 0, 0),
             designator: Self::rgb(0, 0, 255),
             comment: Self::rgb(0, 0, 255),
+            background: Self::sheet_cream(),
             pin_font_size: 10,
         }
     }
@@ -99,6 +111,7 @@ impl SchColors {
             pin_number: Self::rgb(0, 0, 255),
             designator: Self::rgb(0, 0, 128),
             comment: Self::rgb(0, 0, 128),
+            background: Self::sheet_white(),
             pin_font_size: 7,
         }
     }
@@ -120,6 +133,7 @@ impl SchColors {
             pin_number: 0,
             designator: 0,
             comment: 0,
+            background: Self::sheet_white(),
             pin_font_size: 10,
         }
     }
@@ -317,6 +331,8 @@ mod tests {
         assert_eq!(c.designator, 16_711_680);
         assert_eq!(c.comment, 16_711_680);
         assert_eq!(c.pin_font_size, 10);
+        assert_eq!(c.background, 16_317_695);
+        assert_eq!(SchColors::as_hex(c.background), "#FFFCF8");
         assert_eq!(c.pin_font_name(), "Times New Roman");
         assert_eq!(SchColors::to_rgb(128), [128, 0, 0]);
         assert_eq!(SchColors::to_rgb(16_711_680), [0, 0, 255]);
@@ -333,6 +349,8 @@ mod tests {
         assert_eq!(SchColors::as_hex(c.pin_name), "#0000FF");
         assert_eq!(SchColors::as_hex(SchColors::easyeda_power()), "#FF0000");
         assert_eq!(c.pin_font_size, 7);
+        assert_eq!(c.background, 16_777_215);
+        assert_eq!(SchColors::as_hex(c.background), "#FFFFFF");
         assert_eq!(c.pin_font_name(), "Verdana");
         assert_eq!(
             c.pin_text_fonts(),
