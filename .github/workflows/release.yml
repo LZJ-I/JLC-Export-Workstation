@@ -91,7 +91,11 @@ jobs:
             --notes "$(cat <<'EOF'
           ## 修复
 
-          - AD 封装不再写出立创「元件外形」层。原先落到 Mechanical1，闭合框会被当成板框开孔。
+          - AD 原理图库补上图纸背景色（默认 #FFFCF8），设置里可改。原先缺 FileHeader AREACOLOR，AD 会显示黑底。
+          - 窗口每次在主屏居中；Windows 更新覆盖原文件，桌面图标不再移位。无边框窗口可拖边缩放。
+
+          Fixes #1
+          Fixes #2
 
           ## 下载
           解压后运行：
