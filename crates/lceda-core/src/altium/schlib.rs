@@ -10,6 +10,15 @@ pub fn write(path: &Path, symbol: &SymbolIr) -> Result<()> {
     write_with_colors(path, symbol, SchColors::default())
 }
 
+/// Read the very same records that are written into SchLib. Preview consumers
+/// must not reconstruct labels, font IDs or coordinates from the source JSON.
+pub fn preview(symbol: &SymbolIr, colors: SchColors) -> Result<super::sch_preview::SchPreview> {
+    let header = file_header_many(&[symbol.name.clone()], colors);
+    let data = component_data(symbol, &symbol.name, colors);
+    let pin_text = pin_text_data_stream(symbol, colors);
+    super::sch_preview::SchPreview::from_streams(&header, &data, pin_text.as_deref())
+}
+
 pub fn write_with_colors(path: &Path, symbol: &SymbolIr, colors: SchColors) -> Result<()> {
     write_many_with_colors(path, &[symbol], colors)
 }
@@ -196,7 +205,7 @@ fn component_data(symbol: &SymbolIr, libref: &str, colors: SchColors) -> Vec<u8>
 
     // AD：位号是 RECORD=34，型号是 RECORD=41。两条都写成 34 时，
     // 后一条会顶掉位号（属性里变成型号，Comment 掉成 *）。
-    let (dx, dy, cx, cy) = label_positions(symbol);
+    let (dx, dy, cx, cy) = label_positions(symbol, colors);
     write_component_label(
         &mut w,
         34,
@@ -206,7 +215,8 @@ fn component_data(symbol: &SymbolIr, libref: &str, colors: SchColors) -> Vec<u8>
         dx,
         dy,
     );
-    write_component_label(&mut w, 41, "Comment", &symbol.name, colors.comment, cx, cy);
+    let comment = if symbol.meta.mpn.is_empty() { &symbol.name } else { &symbol.meta.mpn };
+    write_component_label(&mut w, 41, "Comment", comment, colors.comment, cx, cy);
 
     write_footprint_implementation(&mut w, symbol);
     w.into_vec()
@@ -275,12 +285,23 @@ fn write_component_label(
     write_named(w, &pairs);
 }
 
-/// 位号在本体上方，型号在下方。没有图形时用 AD 常见的 (-5, 5) / (-5, -15) DXP。
-fn label_positions(symbol: &SymbolIr) -> (f64, f64, f64, f64) {
-    const STEP: f64 = 1.27;
+/// Place both visible AD labels outside the complete symbol, including pin
+/// stubs and their text. Comment uses a bottom-left anchor, so it needs its
+/// font height below the lowest pin, rather than a fixed half-grid offset.
+fn label_positions(symbol: &SymbolIr, colors: SchColors) -> (f64, f64, f64, f64) {
+    let pin_clearance = colors.clamped_pin_font_size() as f64 * super::sch_preview::MM_PER_POINT + 0.508;
+    let comment_clearance = 10.0 * super::sch_preview::MM_PER_POINT + 0.508;
     match symbol_bounds(symbol) {
-        Some((min_x, min_y, _, max_y)) => (min_x, max_y + STEP, min_x, min_y - STEP),
-        None => (-STEP, STEP, -STEP, -3.0 * STEP),
+        Some((min_x, mut min_y, _, mut max_y)) => {
+            for pin in &symbol.pins {
+                let direction = [(1.0,0.0), (0.0,1.0), (-1.0,0.0), (0.0,-1.0)][pin_orient(pin.rotation) as usize];
+                let end_y = pin.y + direction.1 * pin.length.max(2.54);
+                min_y = min_y.min(end_y);
+                max_y = max_y.max(end_y);
+            }
+            (min_x, max_y + pin_clearance, min_x, min_y - comment_clearance)
+        }
+        None => (-1.27, pin_clearance, -1.27, -comment_clearance),
     }
 }
 
@@ -329,7 +350,7 @@ fn write_pin(w: &mut BinWriter, pin: &crate::ir::IrPin, colors: SchColors) {
     // Altium 经典 / 自定义：ASCII RECORD=2 + FONT 表（嘉立创官方 SchDoc 路径）。
     if colors.follows_easyeda_pins() {
         write_pin_binary(w, pin, style.line);
-    } else if style.uses_local_font() {
+    } else if style.uses_local_font() || colors.clamped_pin_font_size() != 10 {
         write_pin_ascii(w, pin, colors, style);
     } else {
         write_pin_binary(w, pin, style.line);
@@ -518,10 +539,14 @@ mod tests {
             polys: vec![],
             ellipses: vec![],
         };
-        let (dx, dy, cx, cy) = label_positions(&symbol);
+        let (dx, dy, cx, cy) = label_positions(&symbol, SchColors::default());
         assert!((dx - (-2.54)).abs() < 1e-9);
-        assert!((dy - 6.35).abs() < 1e-9);
+        assert!(dy > 5.08 + 2.54);
         assert!((cx - (-2.54)).abs() < 1e-9);
-        assert!((cy - (-6.35)).abs() < 1e-9);
+        assert!(cy < -5.08 - 2.54);
+        let mut with_pins = symbol.clone();
+        with_pins.pins.push(crate::ir::IrPin { y: -5.08, length: 5.08, rotation: 270.0, ..Default::default() });
+        let (_, _, _, comment_y) = label_positions(&with_pins, SchColors::default());
+        assert!(comment_y < -10.16 - 2.54, "comment must clear the bottom pin stubs too");
     }
 }

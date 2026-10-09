@@ -2,6 +2,7 @@ pub mod binary;
 pub mod pcblib;
 pub mod sch_color;
 pub mod schlib;
+pub mod sch_preview;
 
 pub use sch_color::{
     PIN_FONT_SIZE_MAX, PIN_FONT_SIZE_MIN, PinStyle, SchColorScheme, SchColors,

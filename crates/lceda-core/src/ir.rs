@@ -1,13 +1,14 @@
 //! EasyEDA 单位 → 中间表示（毫米）。
 
 use crate::easyeda::{EasyedaFootprint, EasyedaSymbol};
+use serde::{Deserialize, Serialize};
 
 /// EasyEDA 原理图：1 单位 = 10 mil = 0.254 mm
 pub const SYMBOL_UNIT_MM: f64 = 0.254;
 /// EasyEDA 封装：1 单位 = 1 mil = 0.0254 mm
 pub const FOOTPRINT_UNIT_MM: f64 = 0.0254;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct PartMeta {
     pub lcsc: String,
     pub mpn: String,
@@ -39,7 +40,7 @@ impl PartMeta {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SymbolIr {
     pub name: String,
     pub description: String,
@@ -52,7 +53,7 @@ pub struct SymbolIr {
     pub ellipses: Vec<IrEllipse>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrPin {
     pub number: String,
     pub name: String,
@@ -81,7 +82,7 @@ impl Default for IrPin {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrRect {
     pub x1: f64,
     pub y1: f64,
@@ -89,7 +90,7 @@ pub struct IrRect {
     pub y2: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrEllipse {
     pub x: f64,
     pub y: f64,
@@ -97,7 +98,7 @@ pub struct IrEllipse {
     pub ry: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FootprintIr {
     pub name: String,
     pub description: String,
@@ -111,7 +112,7 @@ pub struct FootprintIr {
 }
 
 /// STEP 相对封装原点的姿态（毫米 / 度），来自立创 `model_3d.transform`。
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
 pub struct Model3dPlacement {
     pub rot_x: f64,
     pub rot_y: f64,
@@ -121,7 +122,7 @@ pub struct Model3dPlacement {
     pub off_z: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrPad {
     pub designator: String,
     pub x: f64,
@@ -146,14 +147,14 @@ impl IrPad {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrTrack {
     pub layer: i32,
     pub width: f64,
     pub points: Vec<(f64, f64)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrCircle {
     pub layer: i32,
     pub width: f64,
@@ -162,7 +163,7 @@ pub struct IrCircle {
     pub radius: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrArc {
     pub layer: i32,
     pub width: f64,
@@ -173,7 +174,7 @@ pub struct IrArc {
     pub end: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IrRegion {
     pub layer: i32,
     pub points: Vec<(f64, f64)>,

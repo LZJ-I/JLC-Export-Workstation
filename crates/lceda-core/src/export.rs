@@ -11,9 +11,9 @@ use crate::desc::DescField;
 use crate::models::{DownloadPaths, SearchItem};
 use crate::util::{ensure_parent, looks_like_step, sanitize_filename, unique_name};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ExportRequest {
@@ -39,6 +39,10 @@ pub struct ExportRequest {
     pub sch_colors: SchColors,
     /// Description / 详细信息字段顺序。
     pub desc_fields: Vec<DescField>,
+    /// Dedicated, application-managed stable AD library directory.
+    pub ad_library_dir: Option<PathBuf>,
+    /// Per-part library bindings selected by the desktop's library categories.
+    pub ad_library_files: BTreeMap<String, PathBuf>,
 }
 
 impl Default for ExportRequest {
@@ -60,6 +64,8 @@ impl Default for ExportRequest {
             merge_name: "lceda".into(),
             sch_colors: SchColors::default(),
             desc_fields: DescField::library(),
+            ad_library_dir: None,
+            ad_library_files: BTreeMap::new(),
         }
     }
 }
@@ -187,14 +193,16 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             out.footprint_json = footprint_json;
         }
 
-        if req.ad && !req.merge {
+        let has_bound_target = item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id));
+        if req.ad && !req.merge && !has_bound_target && req.ad_library_dir.is_none() {
+            protect_ad_outputs(req, &part_dir, &base, symbol_ir.is_some(), footprint_ir.is_some())?;
             if let Err(e) = export_altium(
                 &mut out,
                 &part_dir,
                 &base,
                 symbol_ir.as_ref(),
                 footprint_ir.as_ref(),
-                step_bytes.as_deref(),
+                step_bytes.as_deref().filter(|_| req.ad_embed_3d),
                 req.sch_colors,
             ) {
                 if !req.kicad {
@@ -225,6 +233,23 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
         }
     }
 
+    if req.ad {
+        let entry = || crate::managed_ad::Entry {
+            id: item.lcsc_id().unwrap_or_else(|| base.clone()),
+            symbol: symbol_ir.clone(), footprint: footprint_ir.clone(),
+            step: if req.ad_embed_3d { step_bytes.clone() } else { None },
+        };
+        let bound = item.lcsc_id().and_then(|id| req.ad_library_files.get(&id));
+        if let Some(path) = bound {
+            let (sch, pcb) = crate::bound_ad::update(path, entry(), req.sch_colors)?;
+            out.schlib = sch.is_file().then_some(sch);
+            out.pcblib = pcb.is_file().then_some(pcb);
+        } else if let Some(dir) = &req.ad_library_dir {
+            let (sch, pcb) = crate::managed_ad::update(dir, entry(), req.sch_colors)?;
+            out.schlib = sch.is_file().then_some(sch);
+            out.pcblib = pcb.is_file().then_some(pcb);
+        }
+    }
     if !out.has_files() {
         return Err(Error::msg("没有写出任何文件"));
     }
@@ -272,7 +297,7 @@ pub fn export_batch(
                 for (_, result) in &mut rows {
                     if result.is_ok() {
                         let mut paths = collected[idx].paths.clone();
-                        if req.ad {
+                        if req.ad && req.ad_library_dir.is_none() && !part_is_bound(req, &collected[idx]) {
                             paths.schlib = merged.schlib.clone();
                             paths.pcblib = merged.pcblib.clone();
                         }
@@ -289,6 +314,95 @@ pub fn export_batch(
         }
     }
     rows
+}
+
+/// Export exact, user-confirmed selections. No keyword lookup is performed here.
+pub fn export_items(client: &LcedaClient, items: &[SearchItem], req: &ExportRequest)
+    -> Vec<(SearchItem, Result<DownloadPaths>)> {
+    let merge_libs = req.merge && (req.ad || req.kicad);
+    let mut rows = Vec::new();
+    let mut collected = Vec::new();
+    for item in items {
+        let mut part_req = req.clone();
+        if item.model_uuid.is_none() { part_req.step = false; part_req.obj = false; }
+        if !item.has_symbol_or_footprint() { part_req.ad = false; part_req.kicad = false; part_req.pads = false; part_req.source_json = false; }
+        if item.datasheet_url().is_none() { part_req.datasheet = false; }
+        match export_part(client, item, &part_req) {
+            Ok(part) => { rows.push((item.clone(), Ok(part.paths.clone()))); collected.push(part); }
+            Err(e) => rows.push((item.clone(), Err(e))),
+        }
+    }
+    if merge_libs && !collected.is_empty() {
+        uniquify_collected(&mut collected);
+        match write_merged_libraries(req, &collected) {
+            Ok(paths) => for (item, result) in &mut rows {
+                if let Ok(p) = result {
+                    if req.ad && req.ad_library_dir.is_none() && !item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id)) { p.schlib = paths.schlib.clone(); p.pcblib = paths.pcblib.clone(); }
+                    if req.kicad { p.kicad_sym = paths.kicad_sym.clone(); p.kicad_mod = paths.kicad_mod.clone(); }
+                }
+            },
+            Err(e) => {
+                for (_, result) in &mut rows {
+                    if result.is_ok() { *result = Err(Error::msg(format!("合并库失败（已下载的源文件保留）: {e}"))); }
+                }
+            },
+        }
+    }
+    rows
+}
+
+fn part_is_bound(req: &ExportRequest, part: &PartExport) -> bool {
+    part.symbol.as_ref().map(|s| &s.meta.lcsc)
+        .or_else(|| part.footprint.as_ref().map(|p| &p.meta.lcsc))
+        .is_some_and(|id| req.ad_library_files.contains_key(id))
+}
+
+/// Ordinary exports must never rebuild a file reserved for incremental library updates.
+fn protect_ad_outputs(req: &ExportRequest, directory: &Path, name: &str, symbol: bool, footprint: bool) -> Result<()> {
+    let mut reserved = Vec::new();
+    for path in req.ad_library_files.values() {
+        reserved.push(path.clone());
+        reserved.push(path.with_extension("PcbLib"));
+    }
+    if let Some(directory) = &req.ad_library_dir {
+        reserved.push(directory.join("JLC.SchLib"));
+        reserved.push(directory.join("JLC.PcbLib"));
+    }
+    let reserved: Vec<_> = reserved.iter().map(|path| ad_path_identity(path)).collect::<Result<_>>()?;
+    for (enabled, extension) in [(symbol, "SchLib"), (footprint, "PcbLib")] {
+        if !enabled { continue; }
+        let path = directory.join(format!("{name}.{extension}"));
+        if reserved.contains(&ad_path_identity(&path)?) {
+            return Err(Error::msg(format!("普通 AD 导出目标 {} 与分类绑定库或固定库冲突；请更换导出目录或合并库名称。绑定库及原有元件保持不变。", path.display())));
+        }
+    }
+    Ok(())
+}
+
+fn ad_path_identity(path: &Path) -> Result<String> {
+    let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
+    let mut prefix = absolute.clone();
+    let mut tail = Vec::new();
+    let resolved = loop {
+        if let Ok(mut ancestor) = fs::canonicalize(&prefix) {
+            for component in tail.iter().rev() { ancestor.push(component); }
+            break ancestor;
+        }
+        let Some(name) = prefix.file_name().map(|name| name.to_os_string()) else { break absolute; };
+        tail.push(name);
+        if !prefix.pop() { break absolute; }
+    };
+    let mut normalized = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            Component::CurDir => {},
+            Component::ParentDir => { normalized.pop(); },
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    // Use Windows' conservative case-insensitive identity even when building on Linux,
+    // since output directories may live on a case-insensitive Windows/shared volume.
+    Ok(normalized.to_string_lossy().replace('/', "\\").trim_start_matches("\\\\?\\").to_lowercase())
 }
 
 fn uniquify_collected(parts: &mut [PartExport]) {
@@ -317,8 +431,11 @@ fn write_merged_libraries(req: &ExportRequest, parts: &[PartExport]) -> Result<D
     let mut out = DownloadPaths::default();
     let mut ad_err: Option<String> = None;
 
-    if req.ad {
-        let symbols: Vec<&SymbolIr> = parts.iter().filter_map(|p| p.symbol.as_ref()).collect();
+    let ad_parts: Vec<_> = parts.iter().filter(|part| req.ad_library_dir.is_none() && !part_is_bound(req, part)).collect();
+    if req.ad && !ad_parts.is_empty() {
+        let symbols: Vec<&SymbolIr> = ad_parts.iter().filter_map(|p| p.symbol.as_ref()).collect();
+        let has_footprints = ad_parts.iter().any(|part| part.footprint.is_some());
+        protect_ad_outputs(req, &req.out_dir, &name, !symbols.is_empty(), has_footprints)?;
         if !symbols.is_empty() {
             let sch = req.out_dir.join(format!("{name}.SchLib"));
             match altium::write_schlib_many_with_colors(&sch, &symbols, req.sch_colors) {
@@ -329,12 +446,12 @@ fn write_merged_libraries(req: &ExportRequest, parts: &[PartExport]) -> Result<D
                 Err(e) => ad_err = Some(e.to_string()),
             }
         }
-        let pcblib_parts: Vec<altium::pcblib::PcbLibPart<'_>> = parts
+        let pcblib_parts: Vec<altium::pcblib::PcbLibPart<'_>> = ad_parts
             .iter()
             .filter_map(|p| {
                 p.footprint.as_ref().map(|fp| altium::pcblib::PcbLibPart {
                     fp,
-                    step: p.step.as_deref(),
+                    step: p.step.as_deref().filter(|_| req.ad_embed_3d),
                 })
             })
             .collect();
@@ -356,10 +473,11 @@ fn write_merged_libraries(req: &ExportRequest, parts: &[PartExport]) -> Result<D
                 }
             }
         }
-        if req.ad && out.schlib.is_none() && out.pcblib.is_none() {
-            return Err(Error::Altium(ad_err.unwrap_or_else(|| {
-                "未能生成合并 SchLib/PcbLib".into()
-            })));
+        if let Some(error) = ad_err {
+            return Err(Error::Altium(error));
+        }
+        if out.schlib.is_none() && out.pcblib.is_none() {
+            return Err(Error::Altium("未能生成合并 SchLib/PcbLib".into()));
         }
     }
 
@@ -529,6 +647,16 @@ fn export_pads(
     Ok(())
 }
 
+/// Shared source-to-symbol conversion for export and the AD-record preview.
+pub fn symbol_for_item(item: &SearchItem, name: &str, json: &Value, fields: &[DescField]) -> Result<SymbolIr> {
+    let source = easyeda::parse_symbol(json)?;
+    let mut symbol = ir::symbol_ir(name, &item.render_description(fields), source, item.meta());
+    symbol.designator = crate::desc::first_designator(&[
+        easyeda::symbol_designator(json), Some(item.sch_designator()),
+    ]);
+    Ok(symbol)
+}
+
 fn fetch_sources(
     client: &LcedaClient,
     item: &SearchItem,
@@ -551,25 +679,18 @@ fn fetch_sources(
     let meta: PartMeta = item.meta();
 
     if let Some(uuid) = item.symbol_uuid() {
-        let json = client.component_json(&uuid)?;
         let path = out_dir.join(format!("{base}_symbol_easyeda.json"));
+        let json = cached_source(client, &uuid, &path, force)?;
         write_json(&path, &json, force)?;
         symbol_path = Some(path);
-        match easyeda::parse_symbol(&json) {
-            Ok(src) => {
-                let mut sym = ir::symbol_ir(base, &desc, src, meta.clone());
-                sym.designator = crate::desc::first_designator(&[
-                    crate::easyeda::symbol_designator(&json),
-                    Some(item.sch_designator()),
-                ]);
-                symbol_ir = Some(sym);
-            }
+        match symbol_for_item(item, base, &json, desc_fields) {
+            Ok(sym) => symbol_ir = Some(sym),
             Err(e) => eprintln!("解析原理图失败: {e}"),
         }
     }
     if let Some(uuid) = item.footprint_uuid() {
-        let json = client.component_json(&uuid)?;
         let path = out_dir.join(format!("{base}_footprint_easyeda.json"));
+        let json = cached_source(client, &uuid, &path, force)?;
         write_json(&path, &json, force)?;
         footprint_path = Some(path);
         match easyeda::parse_footprint(&json) {
@@ -588,6 +709,15 @@ fn fetch_sources(
         }
     }
     Ok((symbol_path, footprint_path, symbol_ir, footprint_ir))
+}
+
+fn cached_source(client: &LcedaClient, uuid: &str, path: &Path, force: bool) -> Result<Value> {
+    if !force {
+        if let Ok(bytes) = fs::read(path) {
+            if let Ok(json) = serde_json::from_slice(&bytes) { return Ok(json); }
+        }
+    }
+    client.component_json(uuid)
 }
 
 fn write_json(path: &Path, value: &Value, force: bool) -> Result<()> {

@@ -64,6 +64,9 @@ pub enum Cmd {
         /// 原理图颜色：altium（默认）/ easyeda / mono
         #[arg(long = "sch-color")]
         sch_color: Option<String>,
+        /// Add/update this part in an existing SchLib and its matching PcbLib.
+        #[arg(long, requires = "ad")]
+        ad_library_file: Option<PathBuf>,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -170,12 +173,13 @@ pub fn run() -> Result<i32> {
             no_kicad_3d,
             rename_footprint,
             sch_color,
+            ad_library_file,
             output,
             force,
         }) => {
             let client = LcedaClient::new();
             let item = client.select(&keyword, index)?;
-            let req = build_req(
+            let mut req = build_req(
                 step,
                 obj,
                 ad,
@@ -190,6 +194,10 @@ pub fn run() -> Result<i32> {
                 output,
                 force,
             );
+            if let Some(path) = ad_library_file {
+                let id = item.lcsc_id().ok_or_else(|| anyhow::anyhow!("绑定 AD 库需要明确的 C 编号"))?;
+                req.ad_library_files.insert(id, path);
+            }
             let paths = export::export(&client, &item, &req).context("export failed")?;
             print_paths(&paths);
             Ok(0)
@@ -289,6 +297,8 @@ fn build_req(
         merge_name: "lceda".into(),
         sch_colors: scheme.colors(prefs.sch_custom),
         desc_fields: prefs.desc_fields.clone(),
+        ad_library_dir: None,
+        ad_library_files: Default::default(),
     };
     if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
     {

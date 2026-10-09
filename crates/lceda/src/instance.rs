@@ -80,8 +80,7 @@ pub fn acquire() -> Option<InstanceGuard> {
 }
 
 fn dirs() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "LZJ-I", "lceda-assistant")
-        .map(|d| d.config_dir().to_path_buf())
+    crate::profile_dir()
 }
 
 fn take_lock(path: &PathBuf) -> bool {

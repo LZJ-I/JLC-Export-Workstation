@@ -1,4 +1,4 @@
-//! 浅色 / 深色卡片主题：系统蓝、大圆角、不透明底板。
+//! 工作站主题：清晰的操作层级、键盘可达按钮与稳定的明暗对比。
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontDefinitions, FontFamily, FontId, Sense, Shadow, Stroke,
@@ -6,11 +6,11 @@ use eframe::egui::{
 };
 use std::cell::Cell;
 
-pub const ACCENT: Color32 = Color32::from_rgb(0, 122, 255);
-pub const LABEL: Color32 = Color32::from_rgb(29, 29, 31);
-pub const SECONDARY: Color32 = Color32::from_rgb(90, 90, 95);
-pub const WINDOW_BG: Color32 = Color32::from_rgb(242, 242, 247);
-pub const WELL: Color32 = Color32::from_rgb(236, 236, 241);
+pub const ACCENT: Color32 = Color32::from_rgb(29, 101, 210);
+pub const LABEL: Color32 = Color32::from_rgb(27, 39, 57);
+pub const SECONDARY: Color32 = Color32::from_rgb(99, 114, 134);
+pub const WINDOW_BG: Color32 = Color32::from_rgb(241, 244, 248);
+pub const WELL: Color32 = Color32::from_rgb(232, 238, 245);
 
 thread_local! {
     static DARK: Cell<bool> = const { Cell::new(false) };
@@ -26,49 +26,49 @@ pub fn set_dark(dark: bool) {
 
 pub fn fill() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(44, 44, 46)
+        Color32::from_rgb(28, 37, 51)
     } else {
         Color32::from_rgb(255, 255, 255)
     }
 }
 pub fn fill_strong() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(58, 58, 60)
+        Color32::from_rgb(36, 47, 63)
     } else {
-        Color32::from_rgb(248, 248, 250)
+        Color32::from_rgb(247, 249, 252)
     }
 }
 pub fn hairline() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(72, 72, 74)
+        Color32::from_rgb(56, 70, 89)
     } else {
-        Color32::from_rgb(224, 224, 229)
+        Color32::from_rgb(218, 226, 236)
     }
 }
 pub fn window_bg() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(28, 28, 30)
+        Color32::from_rgb(19, 27, 39)
     } else {
         WINDOW_BG
     }
 }
 pub fn well() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(58, 58, 60)
+        Color32::from_rgb(36, 47, 63)
     } else {
         WELL
     }
 }
 pub fn label() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(242, 242, 247)
+        Color32::from_rgb(241, 244, 248)
     } else {
         LABEL
     }
 }
 pub fn secondary() -> Color32 {
     if is_dark() {
-        Color32::from_rgb(188, 188, 192)
+        Color32::from_rgb(161, 178, 199)
     } else {
         SECONDARY
     }
@@ -97,7 +97,7 @@ pub fn apply_visuals(ctx: &egui::Context, dark: bool) {
     visuals.widgets.inactive.bg_fill = fill_strong();
     visuals.widgets.inactive.weak_bg_fill = fill_strong();
     visuals.widgets.hovered.bg_fill = if dark {
-        Color32::from_rgb(72, 72, 74)
+        Color32::from_rgb(56, 70, 89)
     } else {
         Color32::from_rgb(240, 240, 245)
     };
@@ -108,14 +108,14 @@ pub fn apply_visuals(ctx: &egui::Context, dark: bool) {
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, label());
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, label());
     visuals.weak_text_color = Some(secondary());
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(10);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(10);
-    visuals.widgets.active.corner_radius = CornerRadius::same(10);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(12);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(3);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(3);
+    visuals.widgets.active.corner_radius = CornerRadius::same(3);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(9);
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, hairline());
     visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(0, 122, 255, 36);
-    visuals.hyperlink_color = ACCENT;
-    visuals.window_corner_radius = CornerRadius::same(12);
+    visuals.hyperlink_color = if dark { Color32::from_rgb(144, 191, 255) } else { ACCENT };
+    visuals.window_corner_radius = CornerRadius::same(9);
     visuals.window_stroke = Stroke::new(1.0_f32, hairline());
     visuals.window_shadow = Shadow::NONE;
     visuals.popup_shadow = Shadow::NONE;
@@ -124,7 +124,9 @@ pub fn apply_visuals(ctx: &egui::Context, dark: bool) {
 
     ctx.style_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.interact_size.y = 34.0;
+        style.animation_time = 0.12;
         style.spacing.window_margin = egui::Margin::same(12);
         style.text_styles.insert(
             egui::TextStyle::Heading,
@@ -146,6 +148,7 @@ pub fn apply_visuals(ctx: &egui::Context, dark: bool) {
 }
 
 fn install_cjk_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
     let candidates = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
@@ -160,7 +163,6 @@ fn install_cjk_fonts(ctx: &egui::Context) {
     ];
     for path in candidates {
         if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = FontDefinitions::default();
             fonts.font_data.insert(
                 "cjk".into(),
                 std::sync::Arc::new(egui::FontData::from_owned(bytes)),
@@ -175,10 +177,27 @@ fn install_cjk_fonts(ctx: &egui::Context) {
                 .entry(FontFamily::Monospace)
                 .or_default()
                 .push("cjk".into());
-            ctx.set_fonts(fonts);
             break;
         }
     }
+    // AD export records reference these Windows fonts. Read the installed faces
+    // at runtime; keep CJK and egui's defaults as missing-glyph fallbacks.
+    for (name, paths) in [
+        ("Times New Roman", ["C:\\Windows\\Fonts\\times.ttf", "/mnt/c/Windows/Fonts/times.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf"]),
+        ("Verdana", ["C:\\Windows\\Fonts\\verdana.ttf", "/mnt/c/Windows/Fonts/verdana.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]),
+    ] {
+        let mut family = Vec::new();
+        for path in paths {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+                family.push(name.to_string());
+                break;
+            }
+        }
+        family.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
+        fonts.families.insert(FontFamily::Name(name.into()), family);
+    }
+    ctx.set_fonts(fonts);
 }
 
 pub fn paint_card(painter: &egui::Painter, rect: egui::Rect) {
@@ -344,65 +363,43 @@ pub fn action_button(
     filled: bool,
     size: egui::Vec2,
 ) -> egui::Response {
-    let (fill, stroke, text_color) = if !enabled {
-        (
-            if is_dark() {
-                Color32::from_rgb(58, 58, 60)
-            } else {
-                Color32::from_rgb(236, 236, 240)
-            },
-            hairline(),
-            disabled_text(),
-        )
+    let text_color = if !enabled {
+        disabled_text()
     } else if filled {
-        (ACCENT, ACCENT, Color32::WHITE)
+        Color32::WHITE
     } else {
-        (fill(), hairline(), label())
+        label()
     };
-    let galley = ui.fonts(|f| {
-        f.layout_no_wrap(
-            text.to_string(),
-            FontId::new(13.5, FontFamily::Proportional),
-            text_color,
-        )
-    });
-    let w = if size.x > 0.0 {
-        size.x
-    } else {
-        (galley.size().x + 24.0).max(48.0)
-    };
-    let h = size.y.max(32.0);
-    let sense = if enabled {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), sense);
-    let mut fill = fill;
-    if enabled && resp.hovered() {
-        fill = if filled {
-            Color32::from_rgb(10, 132, 255)
-        } else {
-            well()
-        };
+    // Preserve native hover, focus and keyboard behavior while applying the primary hierarchy.
+    let previous_style = ui.style().clone();
+    if filled && enabled {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.bg_fill = ACCENT;
+        widgets.inactive.weak_bg_fill = ACCENT;
+        widgets.inactive.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+        let hover = Color32::from_rgb(50, 119, 229);
+        widgets.hovered.bg_fill = hover;
+        widgets.hovered.weak_bg_fill = hover;
+        widgets.hovered.bg_stroke = Stroke::new(1.5_f32, if is_dark() { Color32::from_rgb(159, 202, 255) } else { Color32::from_rgb(16, 65, 149) });
+        widgets.active.bg_fill = Color32::from_rgb(22, 77, 164);
+        widgets.active.weak_bg_fill = widgets.active.bg_fill;
     }
-    let p = ui.painter();
-    p.rect_filled(rect, 8.0, fill);
-    p.rect_stroke(
-        rect,
-        8.0,
-        Stroke::new(1.0_f32, stroke),
-        egui::StrokeKind::Inside,
-    );
-    p.galley(
-        egui::pos2(
-            rect.center().x - galley.size().x * 0.5,
-            rect.center().y - galley.size().y * 0.5 + 1.0,
-        ),
-        galley,
-        text_color,
-    );
-    resp
+    let button = egui::Button::new(egui::RichText::new(text).size(13.5).color(text_color))
+        .wrap_mode(egui::TextWrapMode::Extend)
+        .min_size(egui::vec2(size.x, size.y.max(34.0)))
+        .corner_radius(7);
+    let response = ui.add_enabled(enabled, button);
+    ui.set_style(previous_style);
+    response
+}
+
+pub fn badge(ui: &mut egui::Ui, text: &str, available: bool) {
+    let color = if available { if is_dark() { Color32::from_rgb(144, 191, 255) } else { ACCENT } } else { secondary() };
+    egui::Frame::new()
+        .fill(if available { if is_dark() { Color32::from_rgb(29, 52, 81) } else { Color32::from_rgb(233, 241, 253) } } else { well() })
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(7, 3))
+        .show(ui, |ui| { ui.label(egui::RichText::new(text).size(11.5).color(color)); });
 }
 
 pub fn edit_single<'a>(text: &'a mut String, hint: &str) -> egui::TextEdit<'a> {
@@ -538,4 +535,30 @@ pub fn caption_close(ui: &mut egui::Ui) -> egui::Response {
         s,
     );
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_buttons_wrap_whole_without_extending_the_container() {
+        let ctx = egui::Context::default();
+        let mut rectangles = Vec::new();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(280.0, 200.0))), ..Default::default() };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for text in ["Export...", "Add to library", "Details", "Open LCSC"] {
+                        rectangles.push(pill_button(ui, text, true, false).rect);
+                    }
+                });
+            });
+        });
+        assert!(rectangles.last().unwrap().top() > rectangles[0].top(), "last button must wrap to the next row: {rectangles:?}");
+        for rect in rectangles {
+            assert!(rect.right() <= 272.1, "button exceeded the panel: {rect:?}");
+            assert!((rect.height() - 34.0).abs() < 0.1, "button text wrapped inside the button");
+        }
+    }
 }

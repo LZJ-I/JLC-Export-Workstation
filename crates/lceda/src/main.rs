@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod cli;
+mod bom;
 mod gui;
 mod i18n;
 mod instance;
@@ -44,4 +45,12 @@ fn attach_console_if_cli() {
 #[link(name = "kernel32")]
 extern "system" {
     fn AttachConsole(dwProcessId: u32) -> i32;
+}
+
+/// Screenshot runs can isolate their state from the user's working library.
+fn profile_dir() -> Option<std::path::PathBuf> {
+    if std::env::var_os("LCEDA_SHOT").is_some() {
+        if let Some(path) = std::env::var_os("LCEDA_SHOT_PROFILE") { return Some(path.into()); }
+    }
+    directories::ProjectDirs::from("", "LZJ-I", "lceda-assistant").map(|d| d.config_dir().to_path_buf())
 }

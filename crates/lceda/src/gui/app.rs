@@ -1,9 +1,12 @@
 use super::preview3d::{self, GpuPreview};
+use super::preview2d::{SymbolView, FootprintView, scroll_zoom};
+use lceda_core::ir::{SymbolIr, FootprintIr};
 use super::theme::{self, ACCENT};
 use crate::i18n::{self, Lang};
+use crate::bom::BomDocument;
 use crate::instance::InstanceGuard;
 use crate::library::{part_from_item, Library, SavedPart, UNCAT};
-use crate::prefs::{ExportSection, SettingsTab, ThemeMode};
+use crate::prefs::{ExportSection, SettingsTab, ThemeMode, PreviewMode};
 use lceda_core::desc::{DescField, PropGroup, PropRow};
 use crate::sponsor;
 use crate::update::{self, CheckResult, UpdateInfo, UpdatePhase, UpdateProgress};
@@ -14,18 +17,25 @@ use lceda_core::client::LcedaClient;
 use lceda_core::altium::{PIN_FONT_SIZE_MAX, PIN_FONT_SIZE_MIN, SchColorScheme, SchColors};
 use lceda_core::export::{ExportRequest, export};
 use lceda_core::mesh::{self, Mesh};
-use lceda_core::models::SearchItem;
+use lceda_core::models::{SearchItem, DownloadPaths};
 use poll_promise::Promise;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
-type ExportPromise = Promise<lceda_core::Result<String>>;
+struct JobReport {
+    message: String,
+    exported: Vec<(SearchItem, DownloadPaths)>,
+    notify: bool,
+    failed: usize,
+}
+type ExportPromise = Promise<lceda_core::Result<JobReport>>;
+type BomPromise = Promise<Result<BomDocument, String>>;
 type PreviewPromise = Promise<PreviewData>;
 type UpdatePromise = Promise<CheckResult>;
 type ApplyPromise = Promise<Result<(), String>>;
@@ -33,18 +43,14 @@ type SponsorPromise = Promise<Result<sponsor::Pack, String>>;
 type SponsorQrPromise = Promise<Result<(String, Vec<u8>), String>>;
 type ResolvePromise = Promise<Result<(String, SearchItem), String>>;
 
+const DEFAULT_PART: &str = "C25804"; // 10kΩ, 0603, 1%
 const GAP: f32 = 10.0;
-const BTN_H: f32 = 32.0;
 const CARD_PAD: f32 = 12.0;
-const NAV_W: f32 = 196.0;
+const NAV_W: f32 = 156.0;
 const NAV_COLLAPSED: f32 = 56.0;
 const PARTS_MIN: f32 = 200.0;
 const PARTS_MAX: f32 = 480.0;
-const RIGHT_MIN: f32 = 508.0;
-const PHOTO_MIN: f32 = 168.0;
-const ACTIONS_MIN: f32 = 300.0;
-const TOP_MIN: f32 = 188.0;
-const MESH_MIN: f32 = 168.0;
+const RIGHT_MIN: f32 = 500.0;
 const WIN_CORNER: u8 = 12;
 const RESIZE_EDGE: f32 = 6.0;
 const RESIZE_CORNER: f32 = 12.0;
@@ -168,9 +174,15 @@ impl BatchOpts {
 }
 
 struct PreviewData {
+    lcsc: Option<String>,
+    files: Vec<(String, PathBuf)>,
     image: Option<Vec<u8>>,
     mesh: Option<Mesh>,
     mesh_note: Option<String>,
+    symbol: Option<SymbolIr>,
+    symbol_note: Option<String>,
+    footprint: Option<FootprintIr>,
+    footprint_note: Option<String>,
 }
 
 pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
@@ -178,7 +190,7 @@ pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
     let prefs = crate::prefs::load();
     let shooting = env::var("LCEDA_SHOT").is_ok();
     let (win_w, win_h) = if shooting {
-        (1180.0, 760.0)
+        (env_f32("LCEDA_SHOT_W").unwrap_or(1180.0), env_f32("LCEDA_SHOT_H").unwrap_or(760.0))
     } else {
         (prefs.win_w, prefs.win_h)
     };
@@ -217,6 +229,25 @@ pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
 struct App {
     lang: Lang,
     lang_pinned: bool,
+    show_bom_import: bool,
+    bind_cat: Option<String>,
+    bind_path: String,
+    pending_library_sync: BTreeSet<String>,
+    library_sync_after: Option<Instant>,
+    symbol: Option<SymbolIr>,
+    symbol_note: Option<String>,
+    symbol_view: SymbolView,
+    preview_mode: PreviewMode,
+    footprint: Option<FootprintIr>,
+    footprint_note: Option<String>,
+    footprint_view: FootprintView,
+    bom: Option<BomDocument>,
+    bom_job: Option<BomPromise>,
+    bom_cancel: Arc<AtomicBool>,
+    bom_progress: Arc<Mutex<(usize, usize)>>,
+    export_items_pending: Option<Vec<SearchItem>>,
+    show_activity: bool,
+    confirm_clear_queue: bool,
     keyword: String,
     out_dir: String,
     items: Vec<SearchItem>,
@@ -319,9 +350,28 @@ impl App {
         let skip_update = env::var("LCEDA_SHOT").is_ok();
         let prefs = crate::prefs::load();
         let out_dir = prefs.out_dir.clone().unwrap_or(out_dir);
-        Self {
+        let mut app = Self {
             lang,
             lang_pinned: prefs.lang.is_some(),
+            show_bom_import: false,
+            bind_cat: None,
+            bind_path: String::new(),
+            pending_library_sync: BTreeSet::new(),
+            library_sync_after: None,
+            symbol: None,
+            symbol_note: None,
+            symbol_view: SymbolView::default(),
+            preview_mode: env::var("LCEDA_PREVIEW").ok().map(|v| PreviewMode::parse(&v)).unwrap_or(prefs.preview_mode),
+            footprint: None,
+            footprint_note: None,
+            footprint_view: FootprintView::default(),
+            bom: None,
+            bom_job: None,
+            bom_cancel: Arc::new(AtomicBool::new(false)),
+            bom_progress: Arc::new(Mutex::new((0, 0))),
+            export_items_pending: None,
+            show_activity: false,
+            confirm_clear_queue: false,
             keyword: String::new(),
             out_dir,
             items: Vec::new(),
@@ -343,6 +393,7 @@ impl App {
                 Ok("about") => NavPage::About,
                 Ok("favorites") => NavPage::Favorites,
                 Ok("queue") => NavPage::Queue,
+                Ok("bom") => NavPage::Favorites,
                 Ok("sponsor") => NavPage::Sponsor,
                 _ if !prefs.hide_welcome && !skip_update => NavPage::Settings,
                 _ => NavPage::Search,
@@ -425,7 +476,7 @@ impl App {
             update_progress: None,
             md_cache: CommonMarkCache::default(),
             frame: 0,
-            pending_search: env::var("LCEDA_SEARCH").ok().filter(|s| !s.is_empty()),
+            pending_search: Some(env::var("LCEDA_SEARCH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_PART.into())),
             shot_path: env::var("LCEDA_SHOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
             shot_requested: false,
             shot_settle: 0,
@@ -438,11 +489,26 @@ impl App {
             desc_fields: prefs.desc_fields.clone(),
             show_detail: false,
             detail_query: String::new(),
-            desc_preview_kw: env::var("LCEDA_DESC_PREVIEW").unwrap_or_default(),
+            desc_preview_kw: env::var("LCEDA_DESC_PREVIEW").unwrap_or_else(|_| DEFAULT_PART.into()),
             desc_preview_item: None,
             desc_preview_job: None,
             desc_preview_note: None,
+        };
+        if skip_update {
+            if let Ok(path) = env::var("LCEDA_BOM_FILE") {
+                if let Ok(mut doc) = BomDocument::load(Path::new(&path)) {
+                    for row in &mut doc.rows {
+                        if let Some(item) = app.lib.cached_item(&row.lcsc) {
+                            row.candidates = vec![item]; row.selected = Some(0);
+                        }
+                    }
+                    app.bom = Some(doc);
+                    app.page = NavPage::Favorites;
+                    app.show_bom_import = true;
+                }
+            }
         }
+        app
     }
 
     fn log(&mut self, msg: impl Into<String>) {
@@ -595,7 +661,7 @@ impl App {
             .open(&mut open)
             .min_width(540.0)
             .max_width(680.0)
-            .max_height(680.0)
+            .max_height((ctx.screen_rect().height() - 64.0).max(360.0))
             .resizable(true)
             .show(ctx, |ui| {
                 ui.set_min_width(width - 8.0);
@@ -619,7 +685,9 @@ impl App {
                     );
                 });
                 ui.add_space(12.0);
-                show_ad_props(ui, lang, &rows, &query, Some(460.0), "detail_props", true);
+                egui::ScrollArea::vertical().id_salt("detail_body").max_height((ctx.screen_rect().height() - 260.0).clamp(180.0, 410.0)).show(ui, |ui| {
+                    show_ad_props(ui, lang, &rows, &query, None, "detail_props", true);
+                });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1010,6 +1078,7 @@ impl App {
     fn settings_export(&mut self, ui: &mut egui::Ui) -> bool {
         let lang = self.lang;
         let mut persist = false;
+        let previous = (self.ad_embed_3d, self.rename_footprint, self.resolved_sch_colors(), self.desc_fields.clone());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             for (sec, key) in [
@@ -1032,6 +1101,11 @@ impl App {
             ExportSection::Schematic => persist |= self.sch_color_card(ui),
             ExportSection::Description => persist |= self.settings_desc_card(ui),
         }
+        let current = (self.ad_embed_3d, self.rename_footprint, self.resolved_sch_colors(), self.desc_fields.clone());
+        if current != previous {
+            self.pending_library_sync.extend(self.lib.bound_categories().into_iter().map(|(category, _)| category.id.clone()));
+            self.library_sync_after = Some(Instant::now() + Duration::from_millis(700));
+        }
         persist
     }
 
@@ -1039,6 +1113,8 @@ impl App {
         let lang = self.lang;
         let mut persist = false;
         theme::show_card(ui, |ui| {
+            ui.spacing_mut().interact_size.y = 28.0;
+            ui.spacing_mut().item_spacing.y = 6.0;
             ui.label(
                 egui::RichText::new(i18n::t(lang, "defaults_label"))
                     .strong()
@@ -1069,15 +1145,14 @@ impl App {
             let before_ad = self.ad_embed_3d;
             let before_kicad = self.kicad_attach_3d;
             let before_fp = self.rename_footprint;
-            let before_merge = self.batch_merge;
-            ui.checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
-            ui.checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
-            ui.checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
-            ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
+            ui.columns(2, |cols| {
+                cols[0].checkbox(&mut self.ad_embed_3d, i18n::t(lang, "ad_embed_3d"));
+                cols[1].checkbox(&mut self.kicad_attach_3d, i18n::t(lang, "kicad_attach_3d"));
+                cols[0].checkbox(&mut self.rename_footprint, i18n::t(lang, "rename_footprint"));
+            });
             if self.ad_embed_3d != before_ad
                 || self.kicad_attach_3d != before_kicad
                 || self.rename_footprint != before_fp
-                || self.batch_merge != before_merge
             {
                 persist = true;
             }
@@ -1089,6 +1164,9 @@ impl App {
         let lang = self.lang;
         let mut persist = false;
         let mut fields = self.desc_fields.clone();
+        if self.desc_preview_item.is_none() && self.desc_preview_job.is_none() && self.desc_preview_note.is_none() {
+            self.start_desc_preview();
+        }
         theme::show_card(ui, |ui| {
             ui.label(
                 egui::RichText::new(i18n::t(lang, "export_sec_desc"))
@@ -1104,175 +1182,192 @@ impl App {
                 .wrap(),
             );
             ui.add_space(12.0);
-            show_ad_field_map(ui, lang);
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new(i18n::t(lang, "desc_fields_title"))
-                    .strong()
-                    .color(theme::label()),
-            );
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(i18n::t(lang, "desc_fields_hint"))
-                        .color(theme::secondary())
-                        .small(),
-                )
-                .wrap(),
-            );
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                for (preset, key) in [
-                    (DescField::library(), "desc_preset_library"),
-                    (DescField::specs_only(), "desc_preset_specs"),
-                    (DescField::ids_only(), "desc_preset_ids"),
-                ] {
-                    if ui
-                        .selectable_label(fields == preset, i18n::t(lang, key))
-                        .clicked()
-                    {
-                        fields = preset;
-                        persist = true;
-                    }
-                }
-            });
-            ui.add_space(8.0);
-            let enabled = fields.clone();
-            let disabled: Vec<DescField> = DescField::ALL
-                .into_iter()
-                .filter(|f| !enabled.contains(f))
-                .collect();
-            let mut drag_from = None;
-            let mut drag_to = None;
-            for (i, field) in enabled.iter().enumerate() {
-                let drop_frame = egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(2, 1))
-                    .corner_radius(6);
-                let (_, dropped) = ui.dnd_drop_zone::<usize, _>(drop_frame, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.dnd_drag_source(egui::Id::new(("desc_grip", field.id())), i, |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("☰")
-                                        .color(theme::secondary())
-                                        .size(14.0),
-                                )
-                                .sense(egui::Sense::drag()),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::Grab)
-                            .on_hover_text(i18n::t(lang, "desc_drag"));
-                        });
-                        let mut on = true;
-                        if ui
-                            .checkbox(&mut on, i18n::t(lang, field.i18n_key()))
-                            .changed()
-                            && !on
-                        {
-                            fields.retain(|f| f != field);
-                            persist = true;
+            let width = ui.available_width();
+            let left_width = (width * 0.34).clamp(240.0, 290.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 20.0;
+                ui.allocate_ui_with_layout(egui::vec2(left_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(left_width);
+                    ui.spacing_mut().interact_size.y = 26.0;
+                    ui.spacing_mut().button_padding.y = 4.0;
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "desc_fields_title"))
+                            .strong()
+                            .color(theme::label()),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(i18n::t(lang, "desc_fields_hint"))
+                                .color(theme::secondary())
+                                .small(),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for (preset, key) in [
+                            (DescField::library(), "desc_preset_library"),
+                            (DescField::specs_only(), "desc_preset_specs"),
+                            (DescField::ids_only(), "desc_preset_ids"),
+                        ] {
+                            if ui
+                                .selectable_label(fields == preset, i18n::t(lang, key))
+                                .clicked()
+                            {
+                                fields = preset;
+                                persist = true;
+                            }
                         }
                     });
+                    ui.add_space(8.0);
+                    let enabled = fields.clone();
+                    let disabled: Vec<DescField> = DescField::ALL
+                        .into_iter()
+                        .filter(|f| !enabled.contains(f))
+                        .collect();
+                    let mut drag_from = None;
+                    let mut drag_to = None;
+                    for (i, field) in enabled.iter().enumerate() {
+                        let drop_frame = egui::Frame::new()
+                            .inner_margin(egui::Margin::symmetric(2, 1))
+                            .corner_radius(6);
+                        let (_, dropped) = ui.dnd_drop_zone::<usize, _>(drop_frame, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.dnd_drag_source(egui::Id::new(("desc_grip", field.id())), i, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new("☰")
+                                                .color(theme::secondary())
+                                                .size(14.0),
+                                        )
+                                        .sense(egui::Sense::drag()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::Grab)
+                                    .on_hover_text(i18n::t(lang, "desc_drag"));
+                                });
+                                let mut on = true;
+                                if ui
+                                    .checkbox(&mut on, i18n::t(lang, field.i18n_key()))
+                                    .changed()
+                                    && !on
+                                {
+                                    fields.retain(|f| f != field);
+                                    persist = true;
+                                }
+                            });
+                        });
+                        if let Some(from) = dropped {
+                            drag_from = Some(*from);
+                            drag_to = Some(i);
+                        }
+                    }
+                    if let (Some(from), Some(to)) = (drag_from, drag_to) {
+                        if from != to && from < fields.len() && to < fields.len() {
+                            if from < to {
+                                fields[from..=to].rotate_left(1);
+                            } else {
+                                fields[to..=from].rotate_right(1);
+                            }
+                            persist = true;
+                        }
+                    }
+                    for field in disabled {
+                        ui.horizontal(|ui| {
+                            let mut on = false;
+                            if ui
+                                .checkbox(&mut on, i18n::t(lang, field.i18n_key()))
+                                .changed()
+                                && on
+                            {
+                                fields.push(field);
+                                persist = true;
+                            }
+                        });
+                    }
                 });
-                if let Some(from) = dropped {
-                    drag_from = Some(*from);
-                    drag_to = Some(i);
-                }
-            }
-            if let (Some(from), Some(to)) = (drag_from, drag_to) {
-                if from != to && from < fields.len() && to < fields.len() {
-                    if from < to {
-                        fields[from..=to].rotate_left(1);
+                let right_width = ui.available_width().max(240.0);
+                ui.allocate_ui_with_layout(egui::vec2(right_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(right_width);
+                    ui.label(
+                        egui::RichText::new(i18n::t(lang, "desc_preview_lookup"))
+                            .strong()
+                            .color(theme::label()),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(i18n::t(lang, "desc_preview_hint"))
+                                .color(theme::secondary())
+                                .small(),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    let mut lookup = false;
+                    ui.horizontal(|ui| {
+                        let btn_w = 64.0;
+                        let edit_w = (ui.available_width() - btn_w - 8.0).max(120.0);
+                        let r = theme::search_field(
+                            ui,
+                            &mut self.desc_preview_kw,
+                            i18n::t(lang, "desc_preview_lookup_hint"),
+                            "desc_preview_search",
+                            egui::vec2(edit_w, 32.0),
+                        );
+                        if (r.has_focus() || r.lost_focus())
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !self.dialog_open()
+                        {
+                            lookup = true;
+                        }
+                        if theme::pill_button(
+                            ui,
+                            i18n::t(lang, "desc_preview_view"),
+                            self.desc_preview_job.is_none(),
+                            true,
+                        )
+                        .clicked()
+                        {
+                            lookup = true;
+                        }
+                    });
+                    ui.add_space(10.0);
+                    if self.desc_preview_job.is_some() {
+                        ui.label(
+                            egui::RichText::new(i18n::t(lang, "desc_preview_loading"))
+                                .color(theme::secondary()),
+                        );
+                    } else if let Some(note) = &self.desc_preview_note {
+                        ui.label(egui::RichText::new(note).color(theme::secondary()));
+                    } else if let Some(item) = self.desc_preview_item.clone() {
+                        let title = match item.lcsc_id() {
+                            Some(id) => format!("{} · {id}", item.name()),
+                            None => item.name().to_string(),
+                        };
+                        ui.label(
+                            egui::RichText::new(title)
+                                .color(theme::label())
+                                .size(12.5),
+                        );
+                        ui.add_space(8.0);
+                        let preview_rows = item.ad_properties(&fields, false);
+                        let height = (ui.ctx().screen_rect().bottom() - ui.next_widget_position().y - 64.0).max(180.0);
+                        show_ad_props(ui, lang, &preview_rows, "", Some(height), "desc_preview_props", false);
                     } else {
-                        fields[to..=from].rotate_right(1);
+                        ui.label(
+                            egui::RichText::new(i18n::t(lang, "desc_preview_idle"))
+                                .color(theme::secondary()),
+                        );
                     }
-                    persist = true;
-                }
-            }
-            for field in disabled {
-                ui.horizontal(|ui| {
-                    let mut on = false;
-                    if ui
-                        .checkbox(&mut on, i18n::t(lang, field.i18n_key()))
-                        .changed()
-                        && on
-                    {
-                        fields.push(field);
-                        persist = true;
+                    if self.desc_preview_item.is_none() {
+                        ui.add_space(14.0);
+                        show_ad_field_map(ui, lang);
+                    }
+                    if lookup {
+                        self.start_desc_preview();
                     }
                 });
-            }
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new(i18n::t(lang, "desc_preview_lookup"))
-                    .strong()
-                    .color(theme::label()),
-            );
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(i18n::t(lang, "desc_preview_hint"))
-                        .color(theme::secondary())
-                        .small(),
-                )
-                .wrap(),
-            );
-            ui.add_space(8.0);
-            let mut lookup = false;
-            ui.horizontal(|ui| {
-                let btn_w = 64.0;
-                let edit_w = (ui.available_width() - btn_w - 8.0).max(120.0);
-                let r = theme::search_field(
-                    ui,
-                    &mut self.desc_preview_kw,
-                    i18n::t(lang, "desc_preview_lookup_hint"),
-                    "desc_preview_search",
-                    egui::vec2(edit_w, 32.0),
-                );
-                if (r.has_focus() || r.lost_focus())
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                    && !self.dialog_open()
-                {
-                    lookup = true;
-                }
-                if theme::pill_button(
-                    ui,
-                    i18n::t(lang, "desc_preview_view"),
-                    self.desc_preview_job.is_none(),
-                    true,
-                )
-                .clicked()
-                {
-                    lookup = true;
-                }
             });
-            ui.add_space(10.0);
-            if self.desc_preview_job.is_some() {
-                ui.label(
-                    egui::RichText::new(i18n::t(lang, "desc_preview_loading"))
-                        .color(theme::secondary()),
-                );
-            } else if let Some(note) = &self.desc_preview_note {
-                ui.label(egui::RichText::new(note).color(theme::secondary()));
-            } else if let Some(item) = self.desc_preview_item.clone() {
-                let title = match item.lcsc_id() {
-                    Some(id) => format!("{} · {id}", item.name()),
-                    None => item.name().to_string(),
-                };
-                ui.label(
-                    egui::RichText::new(title)
-                        .color(theme::label())
-                        .size(12.5),
-                );
-                ui.add_space(8.0);
-                let preview_rows = item.ad_properties(&fields, false);
-                show_ad_props(ui, lang, &preview_rows, "", None, "desc_preview_props", true);
-            } else {
-                ui.label(
-                    egui::RichText::new(i18n::t(lang, "desc_preview_idle"))
-                        .color(theme::secondary()),
-                );
-            }
-            if lookup {
-                self.start_desc_preview();
-            }
         });
         if persist {
             if fields.is_empty() {
@@ -1636,6 +1731,22 @@ impl App {
         });
     }
 
+    fn pending_can_merge(&self) -> bool {
+        let parts: Vec<_> = if let Some(items) = &self.export_items_pending {
+            items.iter().map(|item| {
+                let id = item.lcsc_id().unwrap_or_else(|| item.name().to_string());
+                let bound = self.lib.binding_for_part(&id).is_some();
+                (id.to_ascii_uppercase(), item.has_symbol_or_footprint(), bound)
+            }).collect()
+        } else if let Some(ids) = &self.export_ids_pending {
+            ids.iter().map(|id| {
+                let cad = self.lib.cached_item(id).map(|item| item.has_symbol_or_footprint()).unwrap_or(true);
+                (id.to_ascii_uppercase(), cad, self.lib.binding_for_part(id).is_some())
+            }).collect()
+        } else { Vec::new() };
+        can_merge_library_parts(self.batch_opts.ad, self.batch_opts.kicad, parts)
+    }
+
     fn show_batch_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_batch {
             return;
@@ -1646,6 +1757,9 @@ impl App {
         let width = 400.0;
         fit_window(i18n::t(lang, "batch_title"), "lceda_batch_fit", width).show(ctx, |ui| {
             ui.set_width(width - 8.0);
+            let count = self.export_items_pending.as_ref().map(Vec::len)
+                .or_else(|| self.export_ids_pending.as_ref().map(|ids| ids.len().max(1))).unwrap_or(1);
+            ui.label(theme::heading(format!("{count} {}", i18n::t(lang, "components"))));
             ui.label(egui::RichText::new(i18n::t(lang, "batch_hint")).color(theme::secondary()));
             ui.add_space(8.0);
             let before = self.batch_opts;
@@ -1668,7 +1782,7 @@ impl App {
             if before != self.batch_opts {
                 self.persist_prefs();
             }
-            if self.batch_opts.ad || self.batch_opts.kicad {
+            if self.pending_can_merge() {
                 ui.add_space(4.0);
                 let before = self.batch_merge;
                 ui.checkbox(&mut self.batch_merge, i18n::t(lang, "batch_merge"));
@@ -1685,9 +1799,13 @@ impl App {
                 }
             }
             ui.add_space(10.0);
+            ui.separator();
+            ui.label(egui::RichText::new(i18n::t(lang, "output")).small().color(theme::secondary()));
+            ui.add(egui::Label::new(egui::RichText::new(&self.out_dir).small()).truncate()).on_hover_text(&self.out_dir);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::pill_button(ui, i18n::t(lang, "batch_start"), true, true).clicked() {
+                    if theme::pill_button(ui, i18n::t(lang, "batch_start"), !self.busy() && self.batch_opts.any(), true).clicked() {
                         start = true;
                     }
                     if theme::pill_button(ui, i18n::t(lang, "batch_cancel"), true, false).clicked() {
@@ -1704,17 +1822,20 @@ impl App {
                 self.alert(i18n::t(self.lang, "batch_none"));
             } else {
                 self.persist_prefs();
-                match self.export_ids_pending.take() {
+                if let Some(items) = self.export_items_pending.take() { self.export_exact_items(items); }
+                else { match self.export_ids_pending.take() {
                     Some(ids) if ids.is_empty() => self.export_selected(),
                     Some(ids) => self.export_ids(ids),
                     None => {}
-                }
+                } }
                 close = true;
             }
         }
+        close |= ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if close {
             self.show_batch = false;
             self.export_ids_pending = None;
+            self.export_items_pending = None;
         }
     }
 
@@ -1865,25 +1986,14 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.search.is_some() || self.job.is_some() || self.resolve.is_some()
+        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some()
     }
 
     fn selected_item(&self) -> Option<&SearchItem> {
         self.detail.as_ref()
     }
 
-    fn display_manufacturer(&self, item: &SearchItem) -> String {
-        let from_item = item.manufacturer_label();
-        if !from_item.is_empty() {
-            return from_item;
-        }
-        if let Some(id) = item.lcsc_id() {
-            if let Some(mfr) = self.lib.saved_manufacturer(&id) {
-                return mfr.to_string();
-            }
-        }
-        "—".into()
-    }
+
 }
 
 impl eframe::App for App {
@@ -1928,6 +2038,8 @@ impl eframe::App for App {
         self.poll_jobs(ctx);
         self.show_title_bar(ctx);
         self.tick_nav_anim(ctx);
+        self.keyboard_shortcuts(ctx);
+        self.status_bar(ctx);
 
         let nav_w = self.nav_anim_w;
         let nav_pad = if self.nav_expanded { 10 } else { 8 };
@@ -2013,13 +2125,17 @@ impl eframe::App for App {
                 NavPage::About => self.page_about(ui),
             });
         self.show_modal_scrim(ctx);
-        self.show_alert(ctx);
+        self.bom_import_dialog(ctx);
+        self.bind_library_dialog(ctx);
         self.show_welcome(ctx);
         self.show_detail(ctx);
         self.show_batch_dialog(ctx);
         self.show_sponsor_qr(ctx);
         self.show_fav_pick(ctx);
         self.show_cat_dialog(ctx);
+        self.activity_dialog(ctx);
+        self.clear_queue_dialog(ctx);
+        self.show_alert(ctx);
         if !self.show_welcome {
             self.show_update(ctx);
         }
@@ -2038,6 +2154,14 @@ impl eframe::App for App {
 
 impl App {
     fn poll_jobs(&mut self, ctx: &egui::Context) {
+        if !self.busy() && !self.pending_library_sync.is_empty() && self.library_sync_after.is_none_or(|when| Instant::now() >= when) { self.start_library_sync(); }
+        if self.bom_job.as_ref().is_some_and(|p| p.ready().is_some()) {
+            match self.bom_job.take().unwrap().block_and_take() {
+                Ok(doc) => { self.log(format!("BOM: {} ({} rows)", doc.source, doc.rows.len())); self.bom = Some(doc); }
+                Err(e) => self.alert(e),
+            }
+        }
+
         if let Some(p) = &self.search {
             if p.ready().is_some() {
                 match self.search.take().unwrap().block_and_take() {
@@ -2049,6 +2173,7 @@ impl App {
                         if let Some(item) = &self.detail {
                             if let Some(id) = item.lcsc_id() {
                                 self.cache.insert(id, item.clone());
+                self.lib.enrich_from_item(item);
                             }
                         }
                         if self.items.is_empty() {
@@ -2067,7 +2192,12 @@ impl App {
             if p.ready().is_some() {
                 match self.job.take().unwrap().block_and_take() {
                     Ok(msg) => {
-                        self.alert(msg);
+                        for (item, paths) in &msg.exported {
+                            self.lib.enrich_from_item(item);
+                            if let Some(id) = item.lcsc_id() { self.lib.record_export(&id, paths); }
+                        }
+                        if let Err(e) = self.lib.try_save() { self.log(format!("本地库保存失败: {e}")); }
+                        if msg.notify || msg.failed > 0 { self.alert(msg.message); } else { self.log(msg.message); }
                     }
                     Err(e) => {
                         self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
@@ -2080,9 +2210,18 @@ impl App {
         if let Some(p) = &self.preview {
             if p.ready().is_some() {
                 let data = self.preview.take().unwrap().block_and_take();
+                if let Some(id) = &data.lcsc {
+                    let record = self.lib.records.entry(id.clone()).or_default();
+                    for (kind, path) in &data.files { record.resources.insert(kind.clone(), path.clone()); }
+                    self.lib.save();
+                }
                 self.image_tex = data.image.as_ref().and_then(|b| load_texture(ctx, b));
                 self.mesh = data.mesh.map(Arc::new);
                 self.mesh_note = data.mesh_note;
+                self.symbol = data.symbol;
+                self.symbol_note = data.symbol_note;
+                self.footprint = data.footprint;
+                self.footprint_note = data.footprint_note;
                 self.mesh_tex = None;
                 if let Some(note) = &self.mesh_note {
                     self.log(note.clone());
@@ -2184,6 +2323,8 @@ impl App {
                                 item.manufacturer = mfr.to_string();
                             }
                         }
+                        self.lib.enrich_from_item(&item);
+                        if let Err(e) = self.lib.try_save() { self.alert(format!("保存器件资料失败: {e}")); }
                         self.cache.insert(lcsc, item.clone());
                         self.detail = Some(item);
                         self.queue_preview();
@@ -2246,6 +2387,9 @@ impl App {
         let mut ctx_act = PartAct::None;
         theme::card_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
+            ui.label(theme::heading(i18n::t(self.lang, "search")).size(18.0));
+            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let btn_w = 64.0;
                 let edit_w = (ui.available_width() - btn_w - 8.0).max(80.0);
@@ -2268,7 +2412,16 @@ impl App {
                 }
             });
             ui.add_space(8.0);
-            ui.label(theme::heading(i18n::t(self.lang, "components")));
+            ui.horizontal(|ui| {
+                ui.label(theme::heading(i18n::t(self.lang, "components")));
+                ui.label(egui::RichText::new(self.items.len().to_string()).small().color(theme::secondary()));
+                if self.search.is_some() { ui.spinner(); }
+            });
+            if self.items.is_empty() && self.search.is_none() {
+                ui.add_space(20.0);
+                ui.label(theme::heading(i18n::t(self.lang, "search_empty")));
+                ui.label(egui::RichText::new(i18n::t(self.lang, "search_empty_hint")).small().color(theme::secondary()));
+            }
             egui::ScrollArea::vertical().id_salt("part_list").show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 for (idx, item) in self.items.iter().enumerate() {
@@ -2348,6 +2501,10 @@ impl App {
         let mut open_import = false;
         let mut open_rename = false;
         let mut delete = false;
+        let mut import_bom = false;
+        let mut bind_library: Option<String> = None;
+        let mut unbind_library: Option<String> = None;
+        let mut sync_library: Option<String> = None;
         let cats: Vec<(String, String, usize)> = self
             .lib
             .cats
@@ -2376,12 +2533,27 @@ impl App {
         let unit = i18n::t(lang, "fav_item_unit");
         theme::card_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
+            ui.horizontal_wrapped(|ui| {
+                import_bom = theme::pill_button(ui, i18n::t(lang, "import_bom"), !self.busy(), true).clicked();
+                if ui.button(i18n::t(lang, "new_cat")).clicked() { open_new = true; }
+            });
+            ui.add_space(8.0);
             if self.fav_inside {
                 ui.horizontal(|ui| {
                     if theme::pill_button(ui, i18n::t(lang, "fav_back"), true, false).clicked() {
                         leave = true;
                     }
-                    ui.label(theme::heading(cat_title));
+                    ui.add(egui::Label::new(theme::heading(cat_title)).truncate());
+                });
+                let path = self.lib.binding_for_category(&self.fav_cat).map(|p| p.display().to_string());
+                let binding_caption = path.as_ref().map(|p| format!("{} {p}", i18n::t(lang, "bound_library"))).unwrap_or_else(|| i18n::t(lang, "unbound_library").into());
+                let response = ui.add(egui::Label::new(egui::RichText::new(&binding_caption).small().color(theme::secondary())).truncate()).on_hover_text(&binding_caption);
+                response.context_menu(|ui| {
+                    if ui.button(i18n::t(lang, "bind_library")).clicked() { bind_library = Some(self.fav_cat.clone()); ui.close(); }
+                    if path.is_some() {
+                        if ui.button(i18n::t(lang, "sync_library")).clicked() { sync_library = Some(self.fav_cat.clone()); ui.close(); }
+                        if ui.button(i18n::t(lang, "unbind_library")).clicked() { unbind_library = Some(self.fav_cat.clone()); ui.close(); }
+                    }
                 });
                 ui.add_space(8.0);
                 if parts.is_empty() {
@@ -2418,7 +2590,9 @@ impl App {
                     ui.set_width(ui.available_width());
                     for (id, name, n) in &cats {
                         let selected = self.fav_cat == *id;
-                        let r = paint_part_row(ui, name, &format!("{n} {unit}"), selected);
+                        let binding = self.lib.binding_for_category(id);
+                        let subtitle = if let Some(path) = binding { format!("{n} {unit} · {}", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("{n} {unit}") };
+                        let r = paint_part_row(ui, name, &subtitle, selected);
                         if r.double_clicked() {
                             enter_cat = Some(id.clone());
                         } else if r.clicked() {
@@ -2426,6 +2600,12 @@ impl App {
                         }
                         r.context_menu(|ui| {
                             theme::prepare_menu(ui);
+                            if ui.button(i18n::t(lang, "bind_library")).clicked() { bind_library = Some(id.clone()); ui.close(); }
+                            if binding.is_some() {
+                                if ui.button(i18n::t(lang, "sync_library")).clicked() { sync_library = Some(id.clone()); ui.close(); }
+                                if ui.button(i18n::t(lang, "unbind_library")).clicked() { unbind_library = Some(id.clone()); ui.close(); }
+                            }
+                            ui.separator();
                             if ui.button(i18n::t(lang, "new_cat")).clicked() {
                                 open_new = true;
                                 ui.close();
@@ -2474,6 +2654,25 @@ impl App {
                 });
             }
         });
+        if let Some(id) = bind_library {
+            self.bind_path = self.lib.binding_for_category(&id).map(|p| p.display().to_string()).unwrap_or_else(|| {
+                let name = self.lib.cat(&id).map(|c| c.name.as_str()).unwrap_or("Library");
+                PathBuf::from(&self.out_dir).join(format!("{}.SchLib", lceda_core::util::sanitize_filename(name))).display().to_string()
+            });
+            self.bind_cat = Some(id);
+        }
+        if let Some(id) = unbind_library {
+            let mut next = self.lib.clone();
+            match next.unbind_library(&id) {
+                Ok(()) => match next.try_save() {
+                    Ok(()) => { self.lib = next; self.pending_library_sync.remove(&id); }
+                    Err(error) => self.alert(format!("保存库绑定失败: {error}")),
+                },
+                Err(error) => self.alert(error),
+            }
+        }
+        if let Some(id) = sync_library { self.pending_library_sync.insert(id); }
+        if import_bom { self.import_bom(); }
         if let Some(id) = select_cat {
             self.fav_cat = id;
         }
@@ -2546,7 +2745,7 @@ impl App {
         let selected_lcsc = self.detail.as_ref().and_then(|d| d.lcsc_id());
         theme::card_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if theme::pill_button(ui, i18n::t(lang, "queue_import"), !self.busy(), false).clicked()
                 {
                     import = true;
@@ -2590,10 +2789,7 @@ impl App {
                 }
             });
         });
-        if clear {
-            self.lib.clear_queue();
-            self.lib.save();
-        }
+        if clear { self.confirm_clear_queue = true; }
         if let Some(lcsc) = remove {
             self.lib.remove_queue(&lcsc);
             self.lib.save();
@@ -2611,450 +2807,199 @@ impl App {
     }
 
     fn right_pane(&mut self, ui: &mut egui::Ui) {
+        self.part_header(ui);
+        ui.add_space(GAP);
         let area = ui.available_rect_before_wrap();
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .id_salt("right_pane")
-                .max_rect(area)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| {
-                ui.set_clip_rect(area.intersect(ui.clip_rect()));
-                ui.set_min_size(area.size());
-                ui.set_max_size(area.size());
-
-                let title_h = 22.0;
-                let meta_h = if self.selected_item().is_some() { 68.0 } else { 0.0 };
-                let pad = CARD_PAD * 2.0;
-                let min_top = if meta_h > 0.0 { TOP_MIN } else { 160.0 };
-                let auto_photo = clamp_photo_w(
-                    {
-                        let max_photo_w = (area.width() - GAP - ACTIONS_MIN).clamp(PHOTO_MIN, 300.0);
-                        let max_top = (area.height() - GAP - MESH_MIN).max(min_top);
-                        let well = (max_photo_w - pad)
-                            .min(max_top - pad - title_h - meta_h - 8.0)
-                            .max(80.0);
-                        well + pad
-                    },
-                    area.width(),
-                );
-                let auto_top = clamp_top_h(
-                    pad + title_h + 8.0 + (auto_photo - pad).max(80.0) + meta_h,
-                    area.height(),
-                    min_top,
-                );
-                let mut photo_w = self
-                    .photo_frac
-                    .map(|f| clamp_photo_w(area.width() * f, area.width()))
-                    .unwrap_or(auto_photo);
-                let mut top_h = self
-                    .top_frac
-                    .map(|f| clamp_top_h(area.height() * f, area.height(), min_top))
-                    .unwrap_or(auto_top);
-
-                let top = egui::Rect::from_min_size(area.min, egui::vec2(area.width(), top_h));
-                let photo = egui::Rect::from_min_size(top.min, egui::vec2(photo_w, top_h));
-                let actions = egui::Rect::from_min_max(
-                    egui::pos2(photo.max.x + GAP, top.min.y),
-                    egui::pos2(top.max.x, top.max.y),
-                );
-                let mesh = egui::Rect::from_min_max(
-                    egui::pos2(area.min.x, top.max.y + GAP),
-                    area.max,
-                );
-
-                self.photo_card(ui, photo);
-                self.action_card(ui, actions);
-                self.mesh_card(ui, mesh);
-
-                let v_gap = egui::Rect::from_min_max(
-                    egui::pos2(photo.max.x, top.min.y + 8.0),
-                    egui::pos2(actions.min.x, top.max.y - 8.0),
-                );
-                let h_gap = egui::Rect::from_min_max(
-                    egui::pos2(area.min.x + 8.0, top.max.y),
-                    egui::pos2(area.max.x - 8.0, mesh.min.y),
-                );
-                let (dx, v_done) = drag_split(ui, "split_photo", v_gap, true);
-                let (dy, h_done) = drag_split(ui, "split_top", h_gap, false);
-                if dx != 0.0 && area.width() > 1.0 {
-                    photo_w = clamp_photo_w(photo_w + dx, area.width());
-                    self.photo_frac = Some(photo_w / area.width());
-                    ui.ctx().request_repaint();
-                }
-                if dy != 0.0 && area.height() > 1.0 {
-                    top_h = clamp_top_h(top_h + dy, area.height(), min_top);
-                    self.top_frac = Some(top_h / area.height());
-                    ui.ctx().request_repaint();
-                }
-                if v_done || h_done {
-                    self.persist_prefs();
-                }
-            },
-        );
+        let previous = self.preview_mode;
+        card_shell(ui, area, "part_preview", |ui| {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("preview_mode")
+                    .selected_text(i18n::t(self.lang, self.preview_mode.i18n_key()))
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for mode in [PreviewMode::Schematic, PreviewMode::Model3d, PreviewMode::Footprint] {
+                            ui.selectable_value(&mut self.preview_mode, mode, i18n::t(self.lang, mode.i18n_key()));
+                        }
+                    });
+            });
+            ui.add_space(6.0);
+            match self.preview_mode {
+                PreviewMode::Schematic => self.schematic_canvas(ui),
+                PreviewMode::Model3d => self.mesh_canvas(ui),
+                PreviewMode::Footprint => self.footprint_canvas(ui),
+            }
+        });
+        if previous != self.preview_mode { self.persist_prefs(); }
         ui.advance_cursor_after_rect(area);
     }
 
-    fn photo_card(&self, ui: &mut egui::Ui, rect: egui::Rect) {
-        card_shell(ui, rect, "photo", |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            // 1 顶栏
-            ui.horizontal(|ui| {
-                ui.set_height(22.0);
-                ui.label(theme::heading(i18n::t(self.lang, "preview")));
-                if self.image_tex.is_some() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(i18n::t(self.lang, "preview_zoom"))
-                                .color(theme::secondary())
-                                .small(),
-                        );
-                    });
-                }
-            });
-            ui.add_space(6.0);
-            let has_item = self.selected_item().is_some();
-            let footer_h = if has_item { 58.0 } else { 0.0 };
-            let gap = if has_item { 8.0 } else { 0.0 };
-            // 2 方图：先扣掉底部两行，剩下做 1:1
-            let well_s = ui
-                .available_width()
-                .min((ui.available_height() - footer_h - gap).max(80.0));
-            let (well, _) = ui.allocate_exact_size(egui::vec2(well_s, well_s), egui::Sense::hover());
-            paint_well(ui, well);
-            let painter = ui.painter_at(well);
-            if self.preview.is_some() && self.image_tex.is_none() {
-                painter.text(
-                    well.center(),
-                    egui::Align2::CENTER_CENTER,
-                    i18n::t(self.lang, "loading"),
-                    egui::FontId::proportional(14.0),
-                    theme::secondary(),
-                );
-            } else if let Some(tex) = &self.image_tex {
-                let size = tex.size_vec2();
-                let inner = well.shrink(2.0);
-                let scale = (inner.width() / size.x).min(inner.height() / size.y);
-                let draw = size * scale;
-                let img_rect = egui::Rect::from_center_size(inner.center(), draw).intersect(inner);
-                painter.image(
-                    tex.id(),
-                    img_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                if !self.dialog_open() {
-                    if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
-                        if img_rect.contains(pointer) {
-                            paint_photo_zoom(ui, tex, img_rect, pointer, rect);
-                        }
-                    }
-                }
-            } else {
-                painter.text(
-                    well.center(),
-                    egui::Align2::CENTER_CENTER,
-                    i18n::t(self.lang, "preview_none"),
-                    egui::FontId::proportional(13.0),
-                    theme::secondary(),
-                );
-            }
-            if let Some(item) = self.selected_item() {
-                ui.add_space(8.0);
-                // 3 型号
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(item.name())
-                            .color(theme::label())
-                            .size(13.5)
-                            .strong(),
-                    )
-                    .truncate(),
-                );
-                ui.add_space(2.0);
-                let id = item.lcsc_id().unwrap_or_default();
-                if !id.is_empty() {
-                    ui.label(egui::RichText::new(id).color(ACCENT).size(12.0));
-                    ui.add_space(2.0);
-                }
-                let mfr = self.display_manufacturer(item);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(
-                        egui::RichText::new(i18n::t(self.lang, "manufacturer"))
-                            .color(theme::secondary())
-                            .size(12.0),
-                    );
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(mfr).color(theme::label()).size(12.0))
-                            .truncate(),
-                    );
-                });
-            }
-        });
-    }
-
-    fn mesh_card(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        card_shell(ui, rect, "mesh", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(theme::heading(i18n::t(self.lang, "model3d")));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.mesh.is_some() {
-                        ui.label(
-                            egui::RichText::new(i18n::t(self.lang, "drag_orbit"))
-                                .color(theme::secondary())
-                                .small(),
-                        );
-                    }
-                });
-            });
-            let well_h = ui.available_height().max(80.0);
-            let well_w = ui.max_rect().width();
-            let locked = self.dialog_open();
-            let (well, resp) = ui.allocate_exact_size(
-                egui::vec2(well_w, well_h),
-                if locked {
-                    egui::Sense::hover()
-                } else {
-                    egui::Sense::click_and_drag()
-                },
-            );
-            paint_well(ui, well);
-            if !locked && resp.dragged() {
-                let d = resp.drag_delta();
-                self.yaw += d.x * 0.01;
-                self.pitch += d.y * 0.01;
-            }
-            if !locked && resp.hovered() {
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll != 0.0 {
-                    self.zoom = (self.zoom * (1.0 + scroll * 0.003)).clamp(0.15, 8.0);
-                }
-            }
-            if !locked && resp.double_clicked() {
-                self.yaw = 0.7;
-                self.pitch = 0.55;
-                self.zoom = 1.0;
-            }
-            let painter = ui.painter_at(well);
-            let inner = well.shrink(8.0);
-            if self.preview.is_some() && self.mesh.is_none() {
-                painter.text(
-                    well.center(),
-                    egui::Align2::CENTER_CENTER,
-                    i18n::t(self.lang, "loading"),
-                    egui::FontId::proportional(14.0),
-                    theme::secondary(),
-                );
-            } else if let (Some(gpu), Some(mesh)) = (self.gpu.clone(), self.mesh.clone()) {
-                ui.painter().add(preview3d::paint_callback(
-                    inner,
-                    gpu,
-                    mesh,
-                    self.yaw,
-                    self.pitch,
-                    self.zoom,
-                    theme::well(),
-                ));
-            } else if let Some(mesh) = self.mesh.as_ref() {
-                let image = rasterize_mesh(
-                    mesh,
-                    inner,
-                    self.yaw,
-                    self.pitch,
-                    self.zoom,
-                    ui.ctx().pixels_per_point(),
-                );
-                let tex = ui.ctx().load_texture("mesh3d", image, TextureOptions::LINEAR);
-                painter.image(
-                    tex.id(),
-                    inner,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                self.mesh_tex = Some(tex);
-            } else {
-                let msg = if self.selected_item().map(|i| i.model_uuid.is_some()).unwrap_or(false) {
-                    self.mesh_note
-                        .as_deref()
-                        .unwrap_or(i18n::t(self.lang, "mesh_fail"))
-                } else {
-                    i18n::t(self.lang, "no_3d")
-                };
-                painter.text(
-                    well.center(),
-                    egui::Align2::CENTER_CENTER,
-                    msg,
-                    egui::FontId::proportional(13.0),
-                    theme::secondary(),
-                );
-            }
-        });
-    }
-
-    fn action_card(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        let has3d = self.selected_item().map(|i| i.model_uuid.is_some()).unwrap_or(false);
-        let has_ad = self
-            .selected_item()
-            .map(|i| i.has_symbol_or_footprint())
-            .unwrap_or(false);
-        let has_item = self.selected_item().is_some();
-        let has_ds = self
-            .selected_item()
-            .and_then(|i| i.datasheet_url())
-            .is_some();
-        let en = !self.busy() && has_item;
+    fn part_header(&mut self, ui: &mut egui::Ui) {
+        let item = self.selected_item().cloned();
         let lang = self.lang;
-
+        let enabled = !self.busy() && item.is_some();
         let mut export = false;
         let mut queue = false;
         let mut fav = false;
-        let mut step = false;
-        let mut obj = false;
-        let mut ad = false;
-        let mut kicad = false;
-        let mut pads = false;
-        let mut datasheet = false;
-        let mut page = false;
         let mut details = false;
-        let in_queue = self
-            .selected_item()
-            .and_then(|i| i.lcsc_id())
-            .is_some_and(|id| self.lib.in_queue(&id));
-        let queue_label = if in_queue {
-            i18n::t(lang, "added_queue")
-        } else {
-            i18n::t(lang, "add_queue")
-        };
-
-        card_shell(ui, rect, "actions", |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        let mut open_page = false;
+        let in_queue = item.as_ref().and_then(SearchItem::lcsc_id).is_some_and(|id| self.lib.in_queue(&id));
+        let is_favorite = item.as_ref().and_then(SearchItem::lcsc_id).is_some_and(|id| self.lib.favs.iter().any(|part| part.lcsc == id));
+        theme::card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let clicks = action_grid(
-                ui,
-                "main_btns",
-                &[
-                    (
-                        i18n::t(lang, "export_default"),
-                        en,
-                        true,
-                        queue_label,
-                        en,
-                        in_queue,
-                    ),
-                    (
-                        i18n::t(lang, "add_fav"),
-                        en,
-                        false,
-                        i18n::t(lang, "open_page"),
-                        has_item,
-                        false,
-                    ),
-                    (
-                        i18n::t(lang, "export_ad"),
-                        en && has_ad,
-                        true,
-                        i18n::t(lang, "export_kicad"),
-                        en && has_ad,
-                        true,
-                    ),
-                    (
-                        i18n::t(lang, "export_pads"),
-                        en && has_ad,
-                        true,
-                        i18n::t(lang, "download_step"),
-                        en && has3d,
-                        true,
-                    ),
-                    (
-                        i18n::t(lang, "datasheet"),
-                        en && has_ds,
-                        false,
-                        i18n::t(lang, "download_obj"),
-                        en && has3d,
-                        false,
-                    ),
-                    (
-                        i18n::t(lang, "details"),
-                        has_item,
-                        false,
-                        "",
-                        false,
-                        false,
-                    ),
-                ],
-            );
-            export = clicks[0].0;
-            queue = clicks[0].1 && !in_queue;
-            fav = clicks[1].0;
-            page = clicks[1].1;
-            ad = clicks[2].0;
-            kicad = clicks[2].1;
-            pads = clicks[3].0;
-            step = clicks[3].1;
-            datasheet = clicks[4].0;
-            obj = clicks[4].1;
-            details = clicks[5].0;
-        });
-
-        if export {
-            self.ask_export_selected();
-        }
-        if queue {
-            self.add_to_queue();
-        }
-        if fav {
-            self.add_to_fav();
-        }
-        if step {
-            self.require_export(has_item, has3d, i18n::t(self.lang, "no_3d_dl"), |req| {
-                req.step = true;
-            });
-        }
-        if obj {
-            self.require_export(has_item, has3d, i18n::t(self.lang, "no_3d_dl"), |req| {
-                req.obj = true;
-            });
-        }
-        if ad {
-            self.require_export(has_item, has_ad, i18n::t(self.lang, "no_cad"), |req| {
-                req.ad = true;
-                req.source_json = true;
-            });
-        }
-        if kicad {
-            self.require_export(has_item, has_ad, i18n::t(self.lang, "no_cad"), |req| {
-                req.kicad = true;
-                req.source_json = true;
-            });
-        }
-        if pads {
-            self.require_export(has_item, has_ad, i18n::t(self.lang, "no_cad"), |req| {
-                req.pads = true;
-                req.source_json = true;
-            });
-        }
-        if datasheet {
-            self.require_export(has_item, has_ds, i18n::t(self.lang, "no_datasheet"), |req| {
-                req.datasheet = true;
-            });
-        }
-        if details {
-            if self.selected_item().is_some() {
-                self.detail_query.clear();
-                self.show_detail = true;
-            } else {
-                self.alert(i18n::t(self.lang, "select_first"));
-            }
-        }
-        if page {
-            if let Some(it) = self.selected_item() {
-                let url = it.product_url();
-                if let Err(e) = webbrowser::open(&url) {
-                    self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
+            ui.horizontal_top(|ui| {
+                if let Some(tex) = &self.image_tex {
+                    let side = (ui.available_width() * 0.25).clamp(128.0, 164.0);
+                    let response = ui.add(egui::Image::new((tex.id(), tex.size_vec2())).fit_to_exact_size(egui::Vec2::splat(side)).corner_radius(8));
+                    if let Some(pointer) = response.hover_pos() {
+                        if !self.dialog_open() { paint_photo_zoom(ui, tex, response.rect, pointer, ui.max_rect()); }
+                    }
+                    ui.add_space(4.0);
                 }
-            } else {
-                self.alert(i18n::t(self.lang, "select_first"));
+                let width = ui.available_width();
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.add(egui::Label::new(theme::heading(item.as_ref().map(|i| i.name()).unwrap_or(i18n::t(lang, "part_workspace"))).size(18.0)).truncate())
+                        .on_hover_text(item.as_ref().map(|i| i.name()).unwrap_or_default());
+                    if let Some(it) = &item {
+                        ui.add(egui::Label::new(egui::RichText::new(format!("{}  ·  {}", it.lcsc_id().unwrap_or_default(), it.manufacturer_label())).color(theme::secondary()).size(12.0)).truncate());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().interact_size.y = 18.0;
+                            theme::badge(ui, i18n::t(lang, "cad_assets"), it.has_symbol_or_footprint());
+                            theme::badge(ui, "3D", it.model_uuid.is_some());
+                            theme::badge(ui, "PDF", it.datasheet_url().is_some());
+                        });
+                    } else {
+                        ui.label(egui::RichText::new(i18n::t(lang, "workspace_hint")).color(theme::secondary()).size(12.0));
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        export = theme::pill_button(ui, i18n::t(lang, "export_choose"), enabled, true)
+                            .on_disabled_hover_text(i18n::t(lang, if item.is_some() { "working" } else { "select_first" }))
+                            .on_hover_text(i18n::t(lang, "export_unified_hint")).clicked();
+                        queue = theme::pill_button(ui, i18n::t(lang, if in_queue { "added_queue" } else { "add_queue" }), enabled && !in_queue, false).clicked();
+                        fav = theme::pill_button(ui, i18n::t(lang, if is_favorite { "added_fav" } else { "add_fav" }), enabled, false).on_hover_text(i18n::t(lang, "fav_manage_hint")).clicked();
+                        details = theme::pill_button(ui, i18n::t(lang, "details"), item.is_some(), false).clicked();
+                        open_page = theme::pill_button(ui, i18n::t(lang, "open_page"), item.is_some(), false).clicked();
+                    });
+                });
+            });
+            if let Some(path) = item.as_ref().and_then(SearchItem::lcsc_id).and_then(|id| self.lib.binding_for_part(&id)) {
+                ui.add(egui::Label::new(egui::RichText::new(format!("{} {}", i18n::t(lang, "bound_library"), path.display())).small().color(theme::secondary())).truncate()).on_hover_text(path.display().to_string());
             }
+        });
+        if export { self.ask_export_selected(); }
+        if queue { self.add_to_queue(); }
+        if fav { self.add_to_fav(); }
+        if details { self.detail_query.clear(); self.show_detail = true; }
+        if open_page { if let Some(item) = item { let _ = webbrowser::open(&item.product_url()); } }
+    }
+
+    fn schematic_canvas(&mut self, ui: &mut egui::Ui) {
+        let (well, response) = ui.allocate_exact_size(ui.available_size().max(egui::vec2(1.0, 1.0)), egui::Sense::hover());
+        response.on_hover_text(i18n::t(self.lang, "schematic_gestures"));
+        if let Some(symbol) = &self.symbol {
+            self.symbol_view.show(ui, well, symbol, self.resolved_sch_colors(), self.dialog_open());
+        } else {
+            paint_well(ui, well);
+            let message = if self.preview.is_some() { i18n::t(self.lang, "loading") }
+                else { self.symbol_note.as_deref().unwrap_or(i18n::t(self.lang, "no_symbol_preview")) };
+            let galley = ui.painter().layout(message.into(), egui::FontId::proportional(13.0), theme::secondary(), (well.width() - 24.0).max(1.0));
+            ui.painter_at(well).galley(well.center() - galley.size() * 0.5, galley, theme::secondary());
+        }
+    }
+
+    fn footprint_canvas(&mut self, ui: &mut egui::Ui) {
+        let (well, response) = ui.allocate_exact_size(ui.available_size().max(egui::vec2(1.0, 1.0)), egui::Sense::hover());
+        response.on_hover_text(i18n::t(self.lang, "schematic_gestures"));
+        let locked = self.dialog_open();
+        if let Some(footprint) = &self.footprint {
+            self.footprint_view.show(ui, well, footprint, locked);
+        } else {
+            paint_well(ui, well);
+            let message = if self.preview.is_some() { i18n::t(self.lang, "loading") }
+                else { self.footprint_note.as_deref().unwrap_or(i18n::t(self.lang, "no_footprint_preview")) };
+            let galley = ui.painter().layout(message.into(), egui::FontId::proportional(13.0), theme::secondary(), (well.width() - 24.0).max(1.0));
+            ui.painter_at(well).galley(well.center() - galley.size() * 0.5, galley, theme::secondary());
+        }
+    }
+
+    fn mesh_canvas(&mut self, ui: &mut egui::Ui) {
+        let well_h = ui.available_height().max(1.0);
+        let well_w = ui.max_rect().width();
+        let locked = self.dialog_open();
+        let (well, resp) = ui.allocate_exact_size(
+            egui::vec2(well_w, well_h),
+            if locked {
+                egui::Sense::hover()
+            } else {
+                egui::Sense::click_and_drag()
+            },
+        );
+        paint_well(ui, well);
+        if !locked && resp.dragged() {
+            let d = resp.drag_delta();
+            self.yaw += d.x * 0.01;
+            self.pitch += d.y * 0.01;
+        }
+        if !locked && resp.hovered() {
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll != 0.0 {
+                self.zoom = scroll_zoom(self.zoom, scroll, 0.6, 5.0);
+            }
+        }
+        if !locked && resp.double_clicked() {
+            self.yaw = 0.7;
+            self.pitch = 0.55;
+            self.zoom = 1.0;
+        }
+        resp.on_hover_text(i18n::t(self.lang, "drag_orbit"));
+        let painter = ui.painter_at(well);
+        let inner = well.shrink(8.0);
+        if self.preview.is_some() && self.mesh.is_none() {
+            painter.text(
+                well.center(),
+                egui::Align2::CENTER_CENTER,
+                i18n::t(self.lang, "loading"),
+                egui::FontId::proportional(14.0),
+                theme::secondary(),
+            );
+        } else if let (Some(gpu), Some(mesh)) = (self.gpu.clone(), self.mesh.clone()) {
+            ui.painter().add(preview3d::paint_callback(
+                inner,
+                gpu,
+                mesh,
+                self.yaw,
+                self.pitch,
+                self.zoom,
+                theme::well(),
+            ));
+        } else if let Some(mesh) = self.mesh.as_ref() {
+            let image = rasterize_mesh(
+                mesh,
+                inner,
+                self.yaw,
+                self.pitch,
+                self.zoom,
+                ui.ctx().pixels_per_point(),
+            );
+            let tex = ui.ctx().load_texture("mesh3d", image, TextureOptions::LINEAR);
+            painter.image(
+                tex.id(),
+                inner,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            self.mesh_tex = Some(tex);
+        } else {
+            let msg = if self.selected_item().map(|i| i.model_uuid.is_some()).unwrap_or(false) {
+                self.mesh_note
+                    .as_deref()
+                    .unwrap_or(i18n::t(self.lang, "mesh_fail"))
+            } else {
+                i18n::t(self.lang, "no_3d")
+            };
+            let galley = painter.layout(msg.into(), egui::FontId::proportional(13.0), theme::secondary(), (well.width() - 24.0).max(1.0));
+            painter.galley(well.center() - galley.size() * 0.5, galley, theme::secondary());
         }
     }
 
@@ -3076,7 +3021,13 @@ impl App {
             return;
         }
         self.log(i18n::t(self.lang, "searching"));
-        self.search = Some(Promise::spawn_thread("search", move || LcedaClient::new().search(&kw)));
+        self.search = Some(Promise::spawn_thread("search", move || {
+            let mut items = LcedaClient::new().search(&kw)?;
+            if lceda_core::models::looks_like_lcsc_token(&kw) {
+                items.sort_by_key(|item| !item.lcsc_id().is_some_and(|id| id.eq_ignore_ascii_case(&kw)));
+            }
+            Ok(items)
+        }));
     }
 
     fn select_search(&mut self, idx: usize) {
@@ -3085,13 +3036,17 @@ impl App {
         if let Some(item) = &self.detail {
             if let Some(id) = item.lcsc_id() {
                 self.cache.insert(id, item.clone());
+                self.lib.enrich_from_item(item);
+                self.lib.save();
             }
         }
         self.queue_preview();
     }
 
     fn select_saved(&mut self, lcsc: &str) {
-        if let Some(item) = self.cache.get(lcsc).cloned() {
+        let normalized = if lceda_core::models::looks_like_lcsc_token(lcsc) { lcsc.to_ascii_uppercase() } else { lcsc.to_string() };
+        let lcsc = normalized.as_str();
+        if let Some(item) = self.cache.get(lcsc).cloned().or_else(|| self.lib.cached_item(lcsc)) {
             self.detail = Some(item);
             self.queue_preview();
             return;
@@ -3102,10 +3057,8 @@ impl App {
         let q = lcsc.to_string();
         self.resolve = Some(Promise::spawn_thread("resolve", move || {
             let items = LcedaClient::new().search(&q).map_err(|e| e.to_string())?;
-            let item = items
-                .into_iter()
-                .next()
-                .ok_or_else(|| "没有找到器件".to_string())?;
+            let item = items.into_iter().find(|item| item.lcsc_id().as_deref() == Some(q.as_str()))
+                .ok_or_else(|| "没有找到对应编号的器件".to_string())?;
             Ok((q, item))
         }));
     }
@@ -3183,11 +3136,7 @@ impl App {
             self.alert(i18n::t(self.lang, "select_first"));
             return;
         }
-        if self.lib.cats.len() <= 1 {
-            self.save_fav(UNCAT);
-        } else {
-            self.fav_pick = true;
-        }
+        self.fav_pick = true;
     }
 
     fn save_fav(&mut self, cat_id: &str) {
@@ -3199,48 +3148,45 @@ impl App {
             self.alert(i18n::t(self.lang, "select_first"));
             return;
         };
-        self.lib.add_fav(part);
-        self.lib.save();
-        self.alert(i18n::t(self.lang, "added_fav"));
+        let mut next = self.lib.clone();
+        next.add_fav(part);
+        next.enrich_from_item(&item);
+        match next.try_save() {
+            Ok(()) => {
+                self.lib = next;
+                self.pending_library_sync.insert(cat_id.to_string());
+                self.log(i18n::t(self.lang, "added_fav"));
+            }
+            Err(error) => self.alert(format!("保存器件库失败: {error}")),
+        }
     }
 
     fn export_ids(&mut self, ids: Vec<String>) {
-        if self.busy() {
-            self.alert(i18n::t(self.lang, "working"));
-            return;
-        }
-        if ids.is_empty() {
-            self.alert(i18n::t(self.lang, "batch_none"));
-            return;
-        }
-        if !self.batch_opts.any() {
-            self.alert(i18n::t(self.lang, "batch_none"));
-            return;
-        }
-        let out_dir = PathBuf::from(self.out_dir.trim());
-        if let Err(e) = std::fs::create_dir_all(&out_dir) {
-            self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
-            return;
-        }
-        let mut req = self.batch_opts.request(out_dir.clone());
+        if self.busy() || ids.is_empty() { return; }
+        if !self.validate_export_target() { return; }
+        let library = self.lib.clone();
+        let mut req = self.batch_opts.request(PathBuf::from(self.out_dir.trim()));
         self.apply_export_opts(&mut req);
-        req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
-        self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
-        self.job = Some(Promise::spawn_thread("export-ids", move || {
+        req.merge = self.batch_merge;
+        self.job = Some(Promise::spawn_thread("export-list", move || {
             let client = LcedaClient::new();
-            let mut lines = Vec::new();
-            let mut fail = 0;
-            for (kw, result) in lceda_core::export::export_batch(&client, &ids, &req) {
-                match result {
-                    Ok(paths) => lines.push(format!("OK {kw}\n{}", format_paths(&paths, &out_dir))),
-                    Err(e) => {
-                        fail += 1;
-                        lines.push(format!("FAIL {kw}: {e}"));
+            let mut items = Vec::new();
+            let mut errors = Vec::new();
+            for id in ids {
+                let id = if lceda_core::models::looks_like_lcsc_token(&id) { id.to_ascii_uppercase() } else { id };
+                if let Some(item) = library.cached_item(&id) { items.push(item); continue; }
+                match client.search(&id) {
+                    Ok(found) => {
+                        let exact: Vec<_> = found.into_iter().filter(|i| i.lcsc_id().as_deref() == Some(id.as_str()) || i.name().eq_ignore_ascii_case(&id)).collect();
+                        if exact.len() == 1 { items.push(exact.into_iter().next().unwrap()); }
+                        else { errors.push(format!("FAIL {id}: 请在搜索页或 BOM 工作台确认具体器件")); }
                     }
+                    Err(e) => errors.push(format!("FAIL {id}: {e}")),
                 }
             }
-            lines.push(format!("done, failed={fail}"));
-            Ok(lines.join("\n"))
+            let mut report = export_report(&client, &items, &req);
+            if !errors.is_empty() { report.message = format!("{}\nResolution failed: {}\n{}", errors.join("\n"), errors.len(), report.message); }
+            Ok(report)
         }));
     }
 
@@ -3359,18 +3305,22 @@ impl App {
         let width = 360.0;
         fit_window(i18n::t(lang, "pick_cat"), "lceda_fav_pick", width).show(ctx, |ui| {
             ui.set_width(width - 8.0);
-            for (id, name) in &cats {
-                if theme::pill_button(ui, name, true, false).clicked() {
-                    chosen = Some(id.clone());
-                }
+            if let Some(item) = self.selected_item() {
+                ui.add(egui::Label::new(theme::heading(item.name())).truncate());
             }
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                for (id, name) in &cats {
+                    if theme::pill_button(ui, name, true, false).clicked() {
+                        chosen = Some(id.clone());
+                    }
+                }
+            });
             ui.add_space(8.0);
             if theme::pill_button(ui, i18n::t(lang, "batch_cancel"), true, false).clicked() {
                 close = true;
             }
-            if consume_dialog_confirm(ui, true) {
-                chosen = Some(UNCAT.into());
-            }
+            close |= ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         });
         if let Some(id) = chosen {
             self.save_fav(&id);
@@ -3483,35 +3433,111 @@ impl App {
             || self.show_rename_cat
             || self.show_import_cat
             || self.update.is_some()
+            || self.show_activity
+            || self.confirm_clear_queue
+            || self.show_bom_import
+            || self.bind_cat.is_some()
     }
 
     fn queue_preview(&mut self) {
-        let Some(item) = self.selected_item().cloned() else {
-            return;
-        };
+        let Some(item) = self.selected_item().cloned() else { return; };
+        self.image_tex = None;
         self.mesh = None;
         self.mesh_tex = None;
         self.mesh_note = None;
+        self.symbol = None;
+        self.symbol_note = None;
+        self.symbol_view.reset();
+        self.footprint = None;
+        self.footprint_note = None;
+        self.footprint_view.reset();
         self.yaw = 0.7;
         self.pitch = 0.55;
         self.zoom = 1.0;
+        let id = item.lcsc_id();
+        let record = id.as_ref().and_then(|id| self.lib.record(id)).cloned().unwrap_or_default();
+        let desc_fields = self.desc_fields.clone();
         self.preview = Some(Promise::spawn_thread("preview", move || {
             let client = LcedaClient::new();
-            let mut data = PreviewData {
-                image: None,
-                mesh: None,
-                mesh_note: None,
-            };
-            for url in item.image_urls() {
-                if let Ok(bytes) = client.get_bytes(&url) {
-                    data.image = Some(bytes);
-                    break;
+            let mut data = PreviewData { lcsc: id.clone(), files: Vec::new(), image: None, mesh: None, mesh_note: None, symbol: None, symbol_note: None, footprint: None, footprint_note: None };
+            let cache_dir = if env::var_os("LCEDA_SHOT").is_some() {
+                crate::profile_dir().map(|d| d.join("cache"))
+            } else {
+                directories::ProjectDirs::from("", "LZJ-I", "lceda-assistant").map(|d| d.cache_dir().to_path_buf())
+            }.map(|d| d.join("preview").join(id.as_deref().unwrap_or("unknown")));
+            if let Some(path) = record.resources.get("preview_image") {
+                data.image = std::fs::read(path).ok();
+            }
+            if data.image.is_none() {
+                for url in item.image_urls() {
+                    if let Ok(bytes) = client.get_bytes(&url) {
+                        if image::load_from_memory(&bytes).is_err() { continue; }
+                        if let Some(dir) = &cache_dir {
+                            if std::fs::create_dir_all(dir).is_ok() {
+                                let path = dir.join("photo.image");
+                                if std::fs::write(&path, &bytes).is_ok() { data.files.push(("preview_image".into(), path)); }
+                            }
+                        }
+                        data.image = Some(bytes); break;
+                    }
                 }
             }
-            if item.model_uuid.is_some() {
+            if let Some(uuid) = item.symbol_uuid() {
+                let cached = record.resources.get("symbol_json").or_else(|| record.resources.get("preview_symbol"))
+                    .and_then(|p| std::fs::read(p).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                let json = cached.map(Ok).unwrap_or_else(|| client.component_json(&uuid));
+                match json {
+                    Ok(json) => {
+                        if let Some(dir) = &cache_dir {
+                            if std::fs::create_dir_all(dir).is_ok() {
+                                let path = dir.join("symbol.json");
+                                if let Ok(bytes) = serde_json::to_vec(&json) { if std::fs::write(&path, bytes).is_ok() { data.files.push(("preview_symbol".into(), path)); } }
+                            }
+                        }
+                        match lceda_core::export::symbol_for_item(&item, item.name(), &json, &desc_fields) {
+                            Ok(symbol) => data.symbol = Some(symbol),
+                            Err(error) => data.symbol_note = Some(format!("原理图预览: {error}")),
+                        }
+                    },
+                    Err(error) => data.symbol_note = Some(format!("原理图预览: {error}")),
+                }
+            }
+            if let Some(uuid) = item.footprint_uuid() {
+                let cached = record.resources.get("footprint_json").or_else(|| record.resources.get("preview_footprint"))
+                    .and_then(|p| std::fs::read(p).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                let json = cached.map(Ok).unwrap_or_else(|| client.component_json(&uuid));
+                match json {
+                    Ok(json) => {
+                        if let Some(dir) = &cache_dir {
+                            if std::fs::create_dir_all(dir).is_ok() {
+                                let path = dir.join("footprint.json");
+                                if let Ok(bytes) = serde_json::to_vec(&json) { if std::fs::write(&path, bytes).is_ok() { data.files.push(("preview_footprint".into(), path)); } }
+                            }
+                        }
+                        match lceda_core::easyeda::parse_footprint(&json) {
+                            Ok(source) => data.footprint = Some(lceda_core::ir::footprint_ir(item.name(), "", source, Default::default())),
+                            Err(error) => data.footprint_note = Some(format!("封装预览: {error}")),
+                        }
+                    },
+                    Err(error) => data.footprint_note = Some(format!("封装预览: {error}")),
+                }
+            }
+            let local_obj = record.resources.get("obj").or_else(|| record.resources.get("preview_obj"));
+            if let Some(path) = local_obj {
+                data.mesh = std::fs::read(path).ok().and_then(|b| load_preview_mesh(&b).ok());
+            }
+            if data.mesh.is_none() && item.model_uuid.is_some() {
                 match client.download_obj_bytes(&item) {
                     Ok(bytes) => match load_preview_mesh(&bytes) {
-                        Ok(mesh) => data.mesh = Some(mesh),
+                        Ok(mesh) => {
+                            if let Some(dir) = &cache_dir {
+                                if std::fs::create_dir_all(dir).is_ok() {
+                                    let path = dir.join("preview.obj");
+                                    if std::fs::write(&path, &bytes).is_ok() { data.files.push(("preview_obj".into(), path)); }
+                                }
+                            }
+                            data.mesh = Some(mesh);
+                        },
                         Err(note) => data.mesh_note = Some(note),
                     },
                     Err(e) => data.mesh_note = Some(format!("3D: {e}")),
@@ -3521,50 +3547,31 @@ impl App {
         }));
     }
 
-    fn require_export(
-        &mut self,
-        has_item: bool,
-        supported: bool,
-        unsupported: &str,
-        mutate: impl FnOnce(&mut ExportRequest),
-    ) {
-        if self.busy() {
-            self.alert(i18n::t(self.lang, "working"));
-            return;
-        }
-        if !has_item {
-            self.alert(i18n::t(self.lang, "select_first"));
-            return;
-        }
-        if !supported {
-            self.alert(unsupported);
-            return;
-        }
-        self.run_export(mutate);
-    }
 
     fn run_export(&mut self, mutate: impl FnOnce(&mut ExportRequest)) {
+        if self.busy() { return; }
         let Some(item) = self.selected_item().cloned() else {
             self.alert(i18n::t(self.lang, "select_first"));
             return;
         };
         let out_dir = PathBuf::from(self.out_dir.trim());
-        if let Err(e) = std::fs::create_dir_all(&out_dir) {
-            self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
-            return;
-        }
         let mut req = ExportRequest {
             force: true,
             out_dir: out_dir.clone(),
             ..Default::default()
         };
         mutate(&mut req);
+        if !self.validate_export_target() { return; }
         self.apply_export_opts(&mut req);
+        if let Err(e) = std::fs::create_dir_all(&out_dir) {
+            self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
+            return;
+        }
         self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
         self.job = Some(Promise::spawn_thread("export", move || {
             let client = LcedaClient::new();
             let paths = export(&client, &item, &req)?;
-            Ok(format_paths(&paths, &out_dir))
+            Ok(JobReport { message: format_paths(&paths, &out_dir), exported: vec![(item, paths)], notify: true, failed: 0 })
         }));
     }
 
@@ -3700,6 +3707,7 @@ impl App {
             kicad_attach_3d: self.kicad_attach_3d,
             rename_footprint: self.rename_footprint,
             batch_merge: self.batch_merge,
+            preview_mode: self.preview_mode,
             hide_welcome: self.hide_welcome,
             lang: if self.lang_pinned {
                 Some(self.lang.as_code().into())
@@ -3737,12 +3745,21 @@ impl App {
         self.sch_scheme.colors(self.sch_custom)
     }
 
+    fn validate_export_target(&mut self) -> bool {
+        if self.out_dir.trim().is_empty() { self.alert(i18n::t(self.lang, "choose_output")); return false; }
+        true
+    }
+
     fn apply_export_opts(&self, req: &mut ExportRequest) {
         req.ad_embed_3d = self.ad_embed_3d;
         req.kicad_attach_3d = self.kicad_attach_3d;
         req.rename_footprint = self.rename_footprint;
         req.sch_colors = self.resolved_sch_colors();
         req.desc_fields = self.desc_fields.clone();
+        req.ad_library_dir = None;
+        for part in &self.lib.favs {
+            if let Some(path) = self.lib.binding_for_category(&part.cat_id) { req.ad_library_files.insert(part.lcsc.to_ascii_uppercase(), path.to_path_buf()); }
+        }
     }
 
     fn persist_window(&mut self, ctx: &egui::Context) {
@@ -3774,43 +3791,6 @@ impl App {
     }
 
     #[allow(dead_code)]
-    fn start_batch(&mut self) -> bool {
-        let Some(file) = rfd::FileDialog::new()
-            .add_filter("text", &["txt", "csv", "list"])
-            .pick_file()
-        else {
-            return false;
-        };
-        let out_dir = PathBuf::from(self.out_dir.trim());
-        if let Err(e) = std::fs::create_dir_all(&out_dir) {
-            self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
-            return false;
-        }
-        let mut req = self.batch_opts.request(out_dir.clone());
-        self.apply_export_opts(&mut req);
-        req.merge = self.batch_merge && (self.batch_opts.ad || self.batch_opts.kicad);
-        self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
-        self.job = Some(Promise::spawn_thread("batch", move || {
-            let text = std::fs::read_to_string(&file)
-                .map_err(|e| lceda_core::Error::msg(format!("read {}: {e}", file.display())))?;
-            let ids = lceda_core::models::parse_id_list(&text);
-            let client = LcedaClient::new();
-            let mut lines = Vec::new();
-            let mut fail = 0;
-            for (kw, result) in lceda_core::export::export_batch(&client, &ids, &req) {
-                match result {
-                    Ok(paths) => lines.push(format!("OK {kw}\n{}", format_paths(&paths, &out_dir))),
-                    Err(e) => {
-                        fail += 1;
-                        lines.push(format!("FAIL {kw}: {e}"));
-                    }
-                }
-            }
-            lines.push(format!("done, failed={fail}"));
-            Ok(lines.join("\n"))
-        }));
-        true
-    }
 
     fn tick_debug_shot(&mut self, ctx: &egui::Context) {
         if let Some(kw) = self.pending_search.take() {
@@ -3857,6 +3837,7 @@ impl App {
             self.mesh.is_some() || self.mesh_note.is_some() || self.image_tex.is_some();
         let want_batch = env::var("LCEDA_BATCH").is_ok();
         let want_detail = env::var("LCEDA_DETAIL").is_ok();
+        let want_library_picker = env::var("LCEDA_PICK_LIBRARY").is_ok();
         if jobs_idle && self.selected_item().is_some() {
             if want_batch && !self.show_batch {
                 self.show_batch = true;
@@ -3864,12 +3845,16 @@ impl App {
             if want_detail && !self.show_detail {
                 self.show_detail = true;
             }
+            if want_library_picker && !self.fav_pick {
+                self.add_to_fav();
+            }
         }
         let desc_ready = self.desc_preview_kw.trim().is_empty()
             || self.desc_preview_item.is_some()
             || self.desc_preview_note.is_some();
         let search_ready = self.keyword.is_empty() || (jobs_idle && preview_ready);
-        let dialog_ready = (!want_batch || self.show_batch) && (!want_detail || self.show_detail);
+        let dialog_ready = (!want_batch || self.show_batch) && (!want_detail || self.show_detail)
+            && (!want_library_picker || self.fav_pick);
         let waited = self.frame >= 40 && jobs_idle && desc_ready && search_ready && dialog_ready;
         if waited {
             self.shot_settle = self.shot_settle.saturating_add(1);
@@ -3895,6 +3880,452 @@ impl App {
             self.zoom = v;
         }
     }
+}
+
+impl App {
+    fn import_bom(&mut self) {
+        if self.busy() { return; }
+        let Some(path) = rfd::FileDialog::new().add_filter("BOM", &["csv", "tsv", "xlsx", "xls", "xlsb", "ods"]).pick_file() else { return; };
+        self.goto(NavPage::Favorites);
+        self.show_bom_import = true;
+        *self.bom_progress.lock().unwrap() = (0, 0);
+        self.bom_cancel.store(false, Ordering::SeqCst);
+        self.bom_job = Some(Promise::spawn_thread("bom-import", move || BomDocument::load(&path)));
+    }
+
+    fn match_bom(&mut self) {
+        if self.busy() { return; }
+        let Some(mut doc) = self.bom.clone() else { return; };
+        let library = self.lib.clone();
+        self.bom_cancel.store(false, Ordering::SeqCst);
+        let cancel = self.bom_cancel.clone();
+        let progress = self.bom_progress.clone();
+        *progress.lock().unwrap() = (0, doc.rows.len());
+        self.bom_job = Some(Promise::spawn_thread("bom-match", move || {
+            doc.resolve_with_control(&LcedaClient::new(), &library, &cancel, |done, total| {
+                *progress.lock().unwrap() = (done, total);
+            });
+            Ok(doc)
+        }));
+    }
+
+    fn bom_import_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_bom_import { return; }
+        let width = (ctx.screen_rect().width() - 72.0).min(1040.0).max(740.0);
+        let height = (ctx.screen_rect().height() - 132.0).max(380.0);
+        let mut open = true;
+        egui::Window::new(i18n::t(self.lang, "import_bom")).id(egui::Id::new("library_bom_import"))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).order(egui::Order::Foreground)
+            .collapsible(false).resizable(true).open(&mut open)
+            .default_size(egui::vec2(width, height)).min_width(740.0)
+            .max_size(egui::vec2(width, height)).frame(theme::card_frame())
+            .show(ctx, |ui| {
+                ui.set_width(width - 24.0);
+                ui.set_min_height(height - 30.0);
+                ui.horizontal(|ui| {
+                    ui.label(i18n::t(self.lang, "bom_target_library"));
+                    let current = if self.fav_cat == UNCAT { i18n::t(self.lang, "uncategorized").to_string() }
+                        else { self.lib.cat(&self.fav_cat).map(|c| c.name.clone()).unwrap_or_default() };
+                    ui.add_enabled_ui(!self.busy(), |ui| {
+                        egui::ComboBox::from_id_salt("bom_target_library").selected_text(current).show_ui(ui, |ui| {
+                            for category in &self.lib.cats {
+                                let label = if category.id == UNCAT { i18n::t(self.lang, "uncategorized") } else { &category.name };
+                                ui.selectable_value(&mut self.fav_cat, category.id.clone(), label);
+                            }
+                        });
+                    });
+                });
+                ui.add_space(6.0);
+                ui.add_enabled_ui(!self.show_detail && self.alert.is_none(), |ui| self.page_bom(ui));
+            });
+        if !open || (!self.show_detail && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))) {
+            self.show_bom_import = false;
+            self.bom_cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn bind_library_dialog(&mut self, ctx: &egui::Context) {
+        let Some(cat_id) = self.bind_cat.clone() else { return; };
+        let lang = self.lang;
+        let mut open = true;
+        let mut bind = false;
+        let mut cancel = false;
+        let name = if cat_id == UNCAT { i18n::t(lang, "uncategorized").to_string() }
+            else { self.lib.cat(&cat_id).map(|c| c.name.clone()).unwrap_or_default() };
+        fit_window(i18n::t(lang, "bind_library"), "bind_library_dialog", 600.0).open(&mut open).show(ctx, |ui| {
+            ui.label(theme::heading(name));
+            ui.add(egui::Label::new(i18n::t(lang, "bind_library_hint")).wrap());
+            ui.add_space(10.0);
+            ui.add_sized([ui.available_width(), 34.0], theme::edit_single(&mut self.bind_path, "Library.SchLib"));
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(i18n::t(lang, "choose_library_file")).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Altium SchLib", &["SchLib"]).pick_file() { self.bind_path = path.display().to_string(); }
+                }
+                if ui.button(i18n::t(lang, "new_library_file")).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Altium SchLib", &["SchLib"]).set_file_name("Library.SchLib").save_file() { self.bind_path = path.display().to_string(); }
+                }
+            });
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                cancel = theme::pill_button(ui, i18n::t(lang, "cancel"), true, false).clicked();
+                bind = theme::pill_button(ui, i18n::t(lang, "bind_and_sync"), !self.busy() && !self.bind_path.trim().is_empty(), true).clicked();
+            });
+        });
+        if bind {
+            let path = PathBuf::from(self.bind_path.trim());
+            if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("SchLib")) {
+                self.alert(i18n::t(lang, "bind_extension_error"));
+            } else if let Err(error) = lceda_core::bound_ad::validate_binding(&path) {
+                self.alert(error.to_string());
+            } else {
+                let mut next = self.lib.clone();
+                match next.bind_library(&cat_id, &path) {
+                    Ok(()) => {
+                        match next.try_save() {
+                            Ok(()) => { self.lib = next; self.pending_library_sync.insert(cat_id); self.bind_cat = None; }
+                            Err(error) => self.alert(format!("保存库绑定失败: {error}")),
+                        }
+                    }
+                    Err(error) => self.alert(error),
+                }
+            }
+        }
+        if cancel || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.bind_cat = None; }
+    }
+
+    fn start_library_sync(&mut self) {
+        self.library_sync_after = None;
+        let categories = std::mem::take(&mut self.pending_library_sync);
+        let mut req = ExportRequest { ad: true, source_json: true, out_dir: PathBuf::from(self.out_dir.trim()), ..Default::default() };
+        self.apply_export_opts(&mut req);
+        req.ad_library_dir = None;
+        req.ad_library_files.clear();
+        let mut ids = Vec::new();
+        for category in categories {
+            if let Some(path) = self.lib.binding_for_category(&category) {
+                for part in self.lib.favs_in(&category) {
+                    let id = part.lcsc.to_ascii_uppercase();
+                    req.ad_library_files.insert(id.clone(), path.to_path_buf());
+                    ids.push(id);
+                }
+            }
+        }
+        if ids.is_empty() { return; }
+        if self.out_dir.trim().is_empty() { self.alert(i18n::t(self.lang, "choose_output")); return; }
+        let library = self.lib.clone();
+        let heading = i18n::t(self.lang, "sync_library").to_string();
+        self.log(&heading);
+        self.job = Some(Promise::spawn_thread("sync-bound-library", move || {
+            let client = LcedaClient::new();
+            let mut items = Vec::new();
+            let mut errors = Vec::new();
+            for id in ids {
+                if let Some(item) = library.cached_item(&id) { items.push(item); continue; }
+                match client.search(&id) {
+                    Ok(found) => match found.into_iter().find(|item| item.lcsc_id().as_deref() == Some(id.as_str())) {
+                        Some(item) => items.push(item),
+                        None => errors.push(format!("{id}: 未找到相同编号，请先搜索并确认器件")),
+                    },
+                    Err(error) => errors.push(format!("{id}: {error}")),
+                }
+            }
+            let mut report = export_report(&client, &items, &req);
+            report.notify = false;
+            report.failed += errors.len();
+            report.message = format!("{heading}\n{}\n{}", errors.join("\n"), report.message);
+            Ok(report)
+        }));
+    }
+
+    fn page_bom(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let busy = self.busy();
+        let mut import = false;
+        let mut resolve = false;
+        let mut export = false;
+        let mut preview = None;
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(theme::heading(i18n::t(lang, "bom_import_review")).size(20.0));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                import = theme::pill_button(ui, i18n::t(lang, "import_bom"), !busy, self.bom.is_none()).clicked();
+            });
+        });
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(i18n::t(lang, "bom_hint")).color(theme::secondary()).size(12.0));
+        ui.add_space(8.0);
+        if let Some(doc) = &mut self.bom {
+            let confirmed = doc.rows.iter().filter(|r| r.included && r.confirmed).count();
+            let included = doc.rows.iter().filter(|r| r.included).count();
+            theme::show_card(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(egui::Label::new(theme::heading(&doc.source)).truncate()).on_hover_text(&doc.source);
+                    theme::badge(ui, &format!("{confirmed} / {included} {}", i18n::t(lang, "bom_confirmed")), confirmed == included && included > 0);
+                    if self.bom_job.is_some() {
+                        let (done, total) = *self.bom_progress.lock().unwrap();
+                        ui.spinner();
+                        ui.label(format!("{done} / {total}"));
+                        if total > 0 && ui.button(i18n::t(lang, "bom_cancel")).clicked() { self.bom_cancel.store(true, Ordering::SeqCst); }
+                        if self.bom_cancel.load(Ordering::SeqCst) { ui.label(i18n::t(lang, "bom_stopping")); }
+                    } else {
+                        resolve = theme::pill_button(ui, i18n::t(lang, if doc.rows.iter().any(|r| !r.candidates.is_empty()) { "bom_retry" } else { "match_bom" }), !busy, confirmed == 0).clicked();
+                        if theme::pill_button(ui, i18n::t(lang, "bom_confirm_exact"), !busy, false)
+                            .on_hover_text(i18n::t(lang, "bom_confirm_hint")).clicked() {
+                            doc.confirm_exact_ids();
+                        }
+                    }
+                    export = theme::pill_button(ui, i18n::t(lang, "bom_add_library"), !busy && confirmed > 0 && confirmed == included, true)
+                        .on_disabled_hover_text(i18n::t(lang, "bom_confirm_hint")).clicked();
+                });
+            });
+            for warning in doc.warnings.iter().take(3) {
+                ui.label(egui::RichText::new(warning).color(theme::secondary()).small());
+            }
+            ui.add_space(12.0);
+            egui::ScrollArea::horizontal().id_salt("bom_horizontal").show(ui, |ui| {
+                ui.set_min_width(730.0);
+                let height = ui.available_height().max(80.0);
+                egui_extras::TableBuilder::new(ui)
+                    .id_salt("bom_table")
+                    .striped(true)
+                    .resizable(true)
+                    .cell_layout(egui::Layout::top_down(egui::Align::Min))
+                    .column(egui_extras::Column::exact(55.0))
+                    .column(egui_extras::Column::initial(180.0).at_least(140.0))
+                    .column(egui_extras::Column::exact(48.0))
+                    .column(egui_extras::Column::remainder().at_least(270.0))
+                    .column(egui_extras::Column::exact(90.0))
+                    .min_scrolled_height(80.0)
+                    .max_scroll_height((height - 36.0).max(80.0))
+                    .header(30.0, |mut header| {
+                        for key in ["bom_exclude", "bom_input", "bom_qty", "bom_candidate", "bom_state"] {
+                            header.col(|ui| { ui.label(theme::heading(i18n::t(lang, key))); });
+                        }
+                    })
+                    .body(|body| {
+                        body.rows(94.0, doc.rows.len(), |mut table_row| {
+                            let index = table_row.index();
+                            let row = &mut doc.rows[index];
+                            table_row.col(|ui| {
+                                ui.add_enabled(!busy, egui::Checkbox::without_text(&mut row.included));
+                                ui.label(egui::RichText::new(format!("#{}", row.line)).small().color(theme::secondary()));
+                            });
+                            table_row.col(|ui| {
+                                ui.add(egui::Label::new(theme::heading(if row.model.is_empty() { &row.lcsc } else { &row.model })).truncate()).on_hover_text(&row.model);
+                                ui.add(egui::Label::new(egui::RichText::new(format!("{}  {}  {}", row.lcsc, row.manufacturer, row.package)).small().color(theme::secondary())).truncate());
+                                ui.add(egui::Label::new(egui::RichText::new(&row.designators).small()).truncate()).on_hover_text(&row.designators);
+                            });
+                            table_row.col(|ui| { ui.label(row.quantity.to_string()); });
+                            table_row.col(|ui| {
+                                ui.add_enabled_ui(!busy && row.included && !row.validation_error, |ui| {
+                                    let caption = row.chosen().map(|i| format!("{}  ·  {}", i.lcsc_id().unwrap_or_default(), i.name()))
+                                        .unwrap_or_else(|| i18n::t(lang, "bom_choose").into());
+                                    egui::ComboBox::from_id_salt(("bom_candidate", index)).width(ui.available_width().min(390.0))
+                                        .selected_text(caption).show_ui(ui, |ui| {
+                                            ui.set_max_width(570.0);
+                                            let candidates = row.candidates.clone();
+                                            for (candidate_index, item) in candidates.iter().enumerate() {
+                                                let label = format!("{}  {}\n{}  ·  {}", item.lcsc_id().unwrap_or_default(), item.name(), item.manufacturer_label(), crate::library::package_from_item(item));
+                                                if ui.selectable_label(row.selected == Some(candidate_index), label).clicked() { row.choose(candidate_index); }
+                                            }
+                                        });
+                                    if let Some(chosen) = row.chosen().cloned() {
+                                        ui.label(egui::RichText::new(format!("{}  ·  {}", chosen.manufacturer_label(), crate::library::package_from_item(&chosen))).small().color(theme::secondary()));
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button(i18n::t(lang, "details")).clicked() { preview = Some(chosen.clone()); }
+                                            if !row.confirmed && ui.small_button(i18n::t(lang, "bom_confirm_choice")).clicked() {
+                                                if let Some(index) = row.selected { row.choose(index); }
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                            table_row.col(|ui| {
+                                if let Some(error) = &row.error { ui.label(egui::RichText::new(i18n::t(lang, "bom_error_state")).size(11.5).color(Color32::from_rgb(194, 87, 49))).on_hover_text(error); }
+                                else { theme::badge(ui, i18n::t(lang, if !row.included { "bom_excluded" } else if row.confirmed { "bom_confirmed" } else if row.candidates.is_empty() { "bom_unmatched" } else { "bom_unconfirmed" }), row.included && row.confirmed); }
+                            });
+                        });
+                    });
+            });
+        } else {
+            ui.add_space(50.0);
+            theme::show_card(ui, |ui| {
+                ui.add_space(25.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(theme::heading(i18n::t(lang, "bom_empty")).size(22.0));
+                    ui.add_space(10.0);
+                    ui.label(i18n::t(lang, "bom_empty_hint"));
+                    ui.add_space(18.0);
+                    import |= theme::action_button(ui, i18n::t(lang, "import_bom"), !busy, true, egui::vec2(180.0, 40.0)).clicked();
+                });
+                ui.add_space(25.0);
+            });
+        }
+        if import { self.import_bom(); }
+        if resolve { self.match_bom(); }
+        if let Some(item) = preview { self.detail = Some(item); self.show_detail = true; }
+        if export {
+            if let Some(doc) = &self.bom {
+                match doc.confirmed_parts() {
+                    Ok(parts) => {
+                        let mut items = Vec::new();
+                        for row in doc.rows.iter().filter(|r| r.included && r.confirmed) {
+                            if let Some(item) = row.chosen() {
+                                if !items.iter().any(|i: &SearchItem| i.lcsc_id() == item.lcsc_id()) { items.push(item.clone()); }
+                            }
+                        }
+                        let mut next = self.lib.clone();
+                        for item in &items { next.enrich_from_item(item); }
+                        for mut part in parts { part.cat_id = self.fav_cat.clone(); next.add_fav(part); }
+                        let mut totals = std::collections::BTreeMap::<String, (u64, Vec<String>)>::new();
+                        for row in doc.rows.iter().filter(|r| r.included && r.confirmed) {
+                            if let Some(id) = row.chosen().and_then(SearchItem::lcsc_id) {
+                                let entry = totals.entry(id).or_default();
+                                entry.0 += u64::from(row.quantity);
+                                if !row.designators.is_empty() { entry.1.push(row.designators.clone()); }
+                            }
+                        }
+                        for (id, (quantity, references)) in totals {
+                            let record = next.records.entry(id).or_default();
+                            record.parameters.insert("BOM数量".into(), quantity.to_string());
+                            record.parameters.insert("BOM位号".into(), references.join(","));
+                            record.parameters.insert("BOM源文件".into(), doc.source.clone());
+                        }
+                        match next.try_save() {
+                            Ok(()) => {
+                                self.lib = next;
+                                self.pending_library_sync.insert(self.fav_cat.clone());
+                                self.show_bom_import = false;
+                                self.fav_inside = true;
+                                self.goto(NavPage::Favorites);
+                            }
+                            Err(error) => self.alert(format!("导入器件库失败: {error}")),
+                        }
+                    }
+                    Err(error) => self.alert(error),
+                }
+            }
+        }
+    }
+
+    fn keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.dialog_open() { return; }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.goto(NavPage::Search);
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new("mid_search")));
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) { self.import_bom(); }
+        if !self.busy() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) { self.ask_export_selected(); }
+    }
+
+    fn status_bar(&mut self, ctx: &egui::Context) {
+        let mut folder = false;
+        egui::TopBottomPanel::bottom("workstation_status").exact_height(36.0)
+            .frame(egui::Frame::new().fill(theme::fill()).inner_margin(egui::Margin::symmetric(16, 4)))
+            .show(ctx, |ui| {
+                ui.spacing_mut().interact_size.y = 24.0;
+                ui.spacing_mut().button_padding = egui::vec2(9.0, 3.0);
+                // Reserve the action first so long paths cannot push it beyond the window edge.
+                ui.allocate_ui_with_layout(ui.available_size(), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(egui::Button::new(egui::RichText::new(i18n::t(self.lang, "activity")).size(11.5))
+                        .wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(0.0, 24.0)).corner_radius(5)).clicked() {
+                        self.show_activity = true;
+                    }
+                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if self.busy() { ui.add(egui::Spinner::new().size(14.0)); }
+                        let state = if self.job.is_some() { "working" } else if self.search.is_some() || self.resolve.is_some() { "searching" } else if self.bom_job.is_some() { "match_bom" } else { "ready" };
+                        ui.add(egui::Label::new(egui::RichText::new(i18n::t(self.lang, state)).size(11.5).color(theme::secondary())).extend());
+                        ui.separator();
+                        folder = ui.add(egui::Label::new(egui::RichText::new(&self.out_dir).size(11.5).color(theme::secondary())).truncate().sense(egui::Sense::click()))
+                            .on_hover_text(format!("{}\n{}", self.out_dir, i18n::t(self.lang, "open_folder"))).clicked();
+                    });
+                });
+            });
+        if folder { self.open_out_dir(); }
+    }
+
+    fn activity_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_activity { return; }
+        let mut open = true;
+        fit_window(i18n::t(self.lang, "activity"), "activity_window", 650.0).open(&mut open).resizable(true).show(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height(420.0).stick_to_bottom(true).show(ui, |ui| {
+                for entry in &self.logs { ui.add(egui::Label::new(entry).selectable(true)); ui.separator(); }
+            });
+            if ui.button(i18n::t(self.lang, "ok")).clicked() { self.show_activity = false; }
+        });
+        if !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.show_activity = false; }
+    }
+
+    fn clear_queue_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_clear_queue { return; }
+        let mut open = true;
+        let mut clear = false;
+        let mut cancel = false;
+        fit_window(i18n::t(self.lang, "clear_queue_title"), "clear_queue", 380.0).open(&mut open).show(ctx, |ui| {
+            ui.label(i18n::t(self.lang, "clear_queue_hint"));
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                cancel = theme::pill_button(ui, i18n::t(self.lang, "cancel"), true, false).clicked();
+                clear = theme::pill_button(ui, i18n::t(self.lang, "clear_confirm"), true, true).clicked();
+            });
+        });
+        if clear { self.lib.clear_queue(); self.lib.save(); }
+        if clear || cancel || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.confirm_clear_queue = false; }
+    }
+
+    fn export_exact_items(&mut self, items: Vec<SearchItem>) {
+        if self.busy() || items.is_empty() { return; }
+        if !self.validate_export_target() { return; }
+        let mut req = self.batch_opts.request(PathBuf::from(self.out_dir.trim()));
+        self.apply_export_opts(&mut req);
+        req.merge = self.batch_merge;
+        self.job = Some(Promise::spawn_thread("export-confirmed", move || {
+            Ok(export_report(&LcedaClient::new(), &items, &req))
+        }));
+    }
+}
+
+fn can_merge_library_parts(ad: bool, kicad: bool, parts: impl IntoIterator<Item = (String, bool, bool)>) -> bool {
+    let mut ad_parts = std::collections::HashSet::new();
+    let mut kicad_parts = std::collections::HashSet::new();
+    for (id, has_cad, bound_ad) in parts {
+        if !has_cad { continue; }
+        if kicad { kicad_parts.insert(id.clone()); }
+        if ad && !bound_ad { ad_parts.insert(id); }
+        if ad_parts.len() >= 2 || kicad_parts.len() >= 2 { return true; }
+    }
+    false
+}
+
+fn export_report(client: &LcedaClient, items: &[SearchItem], req: &ExportRequest) -> JobReport {
+    // Recheck resolved parts: an old preference or a failed lookup must never
+    // turn a single-part export into a merged library.
+    let mut req = req.clone();
+    req.merge &= can_merge_library_parts(req.ad, req.kicad, items.iter().map(|item| {
+        let id = item.lcsc_id().unwrap_or_else(|| item.name().to_string()).to_ascii_uppercase();
+        let bound = req.ad_library_dir.is_some() || req.ad_library_files.contains_key(&id);
+        (id, item.has_symbol_or_footprint(), bound)
+    }));
+    let mut report = JobReport { message: String::new(), exported: Vec::new(), notify: true, failed: 0 };
+    let mut fail = 0;
+    for item in items {
+        if item.model_uuid.is_none() && (req.step || req.obj) {
+            report.message.push_str(&format!("SKIP {}: no 3D resource; other requested assets continue\n", item.name()));
+        }
+    }
+    for (item, result) in lceda_core::export::export_items(client, items, &req) {
+        match result {
+            Ok(paths) => {
+                report.message.push_str(&format!("OK {}\n{}\n", item.name(), format_paths(&paths, &req.out_dir)));
+                report.exported.push((item, paths));
+            }
+            Err(e) => { fail += 1; report.message.push_str(&format!("FAIL {}: {e}\n", item.name())); }
+        }
+    }
+    report.message.push_str(&format!("done, failed={fail}"));
+    report.failed = fail;
+    report
 }
 
 fn donate_para(ui: &mut egui::Ui, mark: Color32, text: &str) {
@@ -3923,23 +4354,19 @@ fn paint_part_row(ui: &mut egui::Ui, title: &str, sub: &str, selected: bool) -> 
     if bg != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, 8.0, bg);
     }
-    ui.painter().text(
-        egui::pos2(rect.left() + 10.0, rect.top() + 6.0),
-        egui::Align2::LEFT_TOP,
-        title,
-        egui::FontId::proportional(14.0),
-        theme::label(),
-    );
-    if !sub.is_empty() {
-        ui.painter().text(
-            egui::pos2(rect.left() + 10.0, rect.top() + 24.0),
-            egui::Align2::LEFT_TOP,
-            sub,
-            egui::FontId::proportional(12.0),
-            theme::secondary(),
-        );
+    for (text, y, size, color) in [
+        (title, rect.top() + 6.0, 14.0, theme::label()),
+        (sub, rect.top() + 24.0, 12.0, theme::secondary()),
+    ] {
+        if text.is_empty() { continue; }
+        let mut job = egui::text::LayoutJob::simple_singleline(text.into(), egui::FontId::proportional(size), color);
+        job.wrap.max_width = (rect.width() - 20.0).max(1.0);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let galley = ui.fonts(|fonts| fonts.layout_job(job));
+        ui.painter_at(rect.shrink(2.0)).galley(egui::pos2(rect.left() + 10.0, y), galley, color);
     }
-    resp
+    resp.on_hover_text(format!("{title}\n{sub}"))
 }
 
 fn fit_window<'a>(
@@ -4423,36 +4850,6 @@ fn paint_well(ui: &egui::Ui, rect: egui::Rect) {
     );
 }
 
-fn action_grid(
-    ui: &mut egui::Ui,
-    id: &'static str,
-    rows: &[(&str, bool, bool, &str, bool, bool)],
-) -> Vec<(bool, bool)> {
-    const GAP: f32 = 8.0;
-    let total = ui.available_width().max(80.0);
-    let col = ((total - GAP) / 2.0).floor().max(48.0);
-    let mut out = Vec::with_capacity(rows.len());
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing([GAP, 6.0])
-        .min_col_width(col)
-        .max_col_width(col)
-        .show(ui, |ui| {
-            for row in rows {
-                let a = theme::action_button(ui, row.0, row.1, row.2, egui::vec2(col, BTN_H)).clicked();
-                let b = if row.3.is_empty() {
-                    ui.allocate_exact_size(egui::vec2(col, BTN_H), egui::Sense::hover());
-                    false
-                } else {
-                    theme::action_button(ui, row.3, row.4, row.5, egui::vec2(col, BTN_H)).clicked()
-                };
-                out.push((a, b));
-                ui.end_row();
-            }
-        });
-    out
-}
-
 fn load_preview_mesh(bytes: &[u8]) -> Result<Mesh, String> {
     if bytes.starts_with(b"%PDF") || bytes.starts_with(b"<") || bytes.starts_with(b"{") {
         return Err("3D 接口返回的不是 OBJ".into());
@@ -4588,16 +4985,6 @@ fn clamp_parts_max(window_w: f32, nav_w: f32) -> f32 {
     (window_w - nav_w - RIGHT_MIN).clamp(PARTS_MIN, PARTS_MAX)
 }
 
-fn clamp_photo_w(w: f32, area_w: f32) -> f32 {
-    let max = (area_w - GAP - ACTIONS_MIN).max(PHOTO_MIN);
-    w.clamp(PHOTO_MIN.min(max), max)
-}
-
-fn clamp_top_h(h: f32, area_h: f32, min_top: f32) -> f32 {
-    let max = (area_h - GAP - MESH_MIN).max(min_top);
-    h.clamp(min_top.min(max), max)
-}
-
 fn split_grip_rect(gap: egui::Rect, vertical: bool) -> egui::Rect {
     if vertical {
         egui::Rect::from_center_size(
@@ -4645,28 +5032,6 @@ fn parts_split_drag(ctx: &egui::Context, panel: egui::Rect) -> (f32, bool) {
             done = resp.drag_stopped();
         });
     (delta, done)
-}
-
-fn drag_split(ui: &mut egui::Ui, id: &'static str, gap: egui::Rect, vertical: bool) -> (f32, bool) {
-    if gap.width() < 1.0 || gap.height() < 1.0 {
-        return (0.0, false);
-    }
-    let resp = ui.interact(gap, egui::Id::new(id), egui::Sense::drag());
-    let hot = resp.hovered() || resp.dragged();
-    if hot {
-        ui.ctx().set_cursor_icon(if vertical {
-            egui::CursorIcon::ResizeHorizontal
-        } else {
-            egui::CursorIcon::ResizeVertical
-        });
-        paint_split_grip(ui.painter(), gap, vertical, true);
-    }
-    let delta = if vertical {
-        resp.drag_delta().x
-    } else {
-        resp.drag_delta().y
-    };
-    (delta, resp.drag_stopped())
 }
 
 fn load_pay_tex(ctx: &egui::Context) -> Option<PayTex> {
@@ -4891,6 +5256,19 @@ mod layout_tests {
     use super::*;
 
     #[test]
+    fn merge_is_only_available_for_multiple_distinct_parts_in_the_same_export() {
+        let part = |id: &str, cad, bound| (id.to_string(), cad, bound);
+        assert!(!can_merge_library_parts(true, true, [part("C1", true, false)]));
+        assert!(!can_merge_library_parts(true, true, [part("C1", true, false), part("C1", true, false)]));
+        assert!(!can_merge_library_parts(true, true, [part("C1", true, false), part("C2", false, false)]));
+        assert!(!can_merge_library_parts(false, false, [part("C1", true, false), part("C2", true, false)]));
+        assert!(can_merge_library_parts(true, false, [part("C1", true, false), part("C2", true, false)]));
+        assert!(!can_merge_library_parts(true, false, [part("C1", true, true), part("C2", true, true)]));
+        assert!(!can_merge_library_parts(true, false, [part("C1", true, false), part("C2", true, true)]));
+        assert!(can_merge_library_parts(true, true, [part("C1", true, true), part("C2", true, true)]));
+    }
+
+    #[test]
     fn parts_min_keeps_lcsc_prefix() {
         assert!(PARTS_MIN >= 200.0);
         let max = clamp_parts_max(1180.0, 208.0);
@@ -4900,22 +5278,6 @@ mod layout_tests {
         let tight = clamp_parts_max(960.0, 208.0);
         assert!(tight >= PARTS_MIN);
         assert!(960.0 - 208.0 - tight >= RIGHT_MIN - 1.0);
-    }
-
-    #[test]
-    fn photo_keeps_id_and_buttons() {
-        let w = clamp_photo_w(80.0, 800.0);
-        assert!(w >= PHOTO_MIN);
-        let wide = clamp_photo_w(700.0, 800.0);
-        assert!(wide + GAP + ACTIONS_MIN <= 800.0 + 0.5);
-    }
-
-    #[test]
-    fn top_keeps_preview_and_mesh() {
-        let h = clamp_top_h(40.0, 700.0, TOP_MIN);
-        assert!(h >= TOP_MIN);
-        let tall = clamp_top_h(680.0, 700.0, TOP_MIN);
-        assert!(tall + GAP + MESH_MIN <= 700.0 + 0.5);
     }
 
     #[test]

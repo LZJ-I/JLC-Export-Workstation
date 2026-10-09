@@ -79,12 +79,35 @@ impl ThemeMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewMode {
+    Schematic,
+    #[default]
+    Model3d,
+    Footprint,
+}
+
+impl PreviewMode {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Schematic => "schematic", Self::Model3d => "3d", Self::Footprint => "footprint" }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value { "schematic" => Self::Schematic, "footprint" => Self::Footprint, _ => Self::Model3d }
+    }
+
+    pub fn i18n_key(self) -> &'static str {
+        match self { Self::Schematic => "schematic_preview", Self::Model3d => "model3d", Self::Footprint => "footprint_preview" }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prefs {
     pub ad_embed_3d: bool,
     pub kicad_attach_3d: bool,
     pub rename_footprint: bool,
     pub batch_merge: bool,
+    pub preview_mode: PreviewMode,
     pub hide_welcome: bool,
     pub lang: Option<String>,
     pub theme: ThemeMode,
@@ -120,6 +143,7 @@ impl Default for Prefs {
             kicad_attach_3d: true,
             rename_footprint: false,
             batch_merge: false,
+            preview_mode: PreviewMode::default(),
             hide_welcome: false,
             lang: None,
             theme: ThemeMode::Auto,
@@ -172,6 +196,7 @@ fn from_json(v: &Value) -> Prefs {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         batch_merge: v.get("batch_merge").and_then(Value::as_bool).unwrap_or(false),
+        preview_mode: v.get("preview_mode").and_then(Value::as_str).map(PreviewMode::parse).unwrap_or_default(),
         hide_welcome: v.get("hide_welcome").and_then(Value::as_bool).unwrap_or(false),
         lang: v
             .get("lang")
@@ -305,6 +330,7 @@ fn to_json(prefs: &Prefs) -> Value {
         "kicad_attach_3d": prefs.kicad_attach_3d,
         "rename_footprint": prefs.rename_footprint,
         "batch_merge": prefs.batch_merge,
+        "preview_mode": prefs.preview_mode.as_str(),
         "hide_welcome": prefs.hide_welcome,
         "theme": prefs.theme.as_str(),
         "always_on_top": prefs.always_on_top,
@@ -357,8 +383,7 @@ fn to_json(prefs: &Prefs) -> Value {
 }
 
 fn prefs_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "LZJ-I", "lceda-assistant")
-        .map(|d| d.config_dir().join("prefs.json"))
+    crate::profile_dir().map(|d| d.join("prefs.json"))
 }
 
 #[cfg(test)]
@@ -374,6 +399,31 @@ mod tests {
     fn default_prefs_survive_json() {
         let prefs = Prefs::default();
         assert_eq!(roundtrip(&prefs), prefs);
+    }
+
+    #[test]
+    fn preview_choice_is_remembered_and_unknown_choices_fall_back() {
+        for mode in [PreviewMode::Schematic, PreviewMode::Footprint, PreviewMode::Model3d] {
+            let prefs = Prefs { preview_mode: mode, ..Default::default() };
+            assert_eq!(roundtrip(&prefs).preview_mode, mode);
+        }
+        assert_eq!(from_json(&json!({"preview_mode": "old-split-view"})).preview_mode, PreviewMode::Model3d);
+    }
+
+    #[test]
+    fn obsolete_fixed_ad_directory_is_discarded_without_changing_export_settings() {
+        let prefs = from_json(&json!({
+            "ad_library_enabled": true, "ad_library_dir": "D:/old-managed-library",
+            "out_dir": "D:/exports", "export_ad": true, "ad_embed_3d": false,
+            "desc_fields": ["lcsc", "mpn"],
+        }));
+        let saved = to_json(&prefs);
+        assert!(saved.get("ad_library_enabled").is_none());
+        assert!(saved.get("ad_library_dir").is_none());
+        assert_eq!(prefs.out_dir.as_deref(), Some("D:/exports"));
+        assert!(prefs.export_ad);
+        assert!(!prefs.ad_embed_3d);
+        assert_eq!(prefs.desc_fields, vec![DescField::Lcsc, DescField::Mpn]);
     }
 
     #[test]
