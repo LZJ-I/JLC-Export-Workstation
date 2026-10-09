@@ -159,6 +159,65 @@ fn merged_library_write_failure_cannot_report_successful_rows() {
 
 const OPAQUE: &[u8] = b"custom third-party library data must survive\0\xff";
 
+#[test]
+fn mixed_ad_and_kicad_bindings_sync_only_requested_targets() {
+    let dir = TemporaryDirectory::new("mixed-bound-sync");
+    let first = cached_item(&dir.0, "C167747", "FNR3015S2R2MT");
+    let second = cached_item(&dir.0, "C205463", "Other-MPN");
+    let sch = dir.0.join("AD.SchLib");
+    let sym = dir.0.join("KiCad.kicad_sym");
+    let mut req = ExportRequest { ad: true, kicad: true, bound_only: true, out_dir: dir.0.clone(), ..Default::default() };
+    req.ad_library_files.insert("C167747".into(), sch.clone());
+    req.kicad_library_files.insert("C205463".into(), sym.clone());
+    let rows = export_items(&LcedaClient::new(), &[first.clone(), second.clone()], &req);
+    let ad = rows[0].1.as_ref().unwrap(); let ki = rows[1].1.as_ref().unwrap();
+    assert_eq!(ad.schlib.as_ref(), Some(&sch)); assert!(ad.kicad_sym.is_none());
+    assert_eq!(ki.kicad_sym.as_ref(), Some(&sym)); assert!(ki.schlib.is_none());
+    assert!(!dir.0.join(first.export_stem()).join("FNR3015S2R2MT.kicad_sym").exists());
+    assert!(!dir.0.join(second.export_stem()).join("Other-MPN.SchLib").exists());
+    let before = fs::read(&sym).unwrap();
+    req.ad_library_files.insert("C205463".into(), sch.clone());
+    req.kicad_library_files.insert("C167747".into(), sym.clone());
+    let rows = export_items(&LcedaClient::new(), &[first, second], &req);
+    assert!(rows.iter().all(|(_, result)| result.as_ref().is_ok_and(|p| p.schlib.is_some() && p.kicad_sym.is_some())));
+    let after = fs::read_to_string(&sym).unwrap();
+    assert!(after.contains("(symbol \"C167747\"")); assert!(after.contains("(symbol \"C205463\"")); assert_ne!(after.as_bytes(), before);
+}
+
+#[test]
+fn independent_export_copies_from_a_bound_library_leave_both_targets_untouched() {
+    let dir = TemporaryDirectory::new("export-bound-copies");
+    let item = cached_item(&dir.0, "C167747", "FNR3015S2R2MT");
+    let sch = dir.0.join("Bound.SchLib"); let sym = dir.0.join("Bound.kicad_sym");
+    seed_custom_library(&sch);
+    fs::write(&sym, "(kicad_symbol_lib (version 20241209) (generator custom) (symbol \"User\"))").unwrap();
+    let ad_before = fs::read(&sch).unwrap(); let ki_before = fs::read(&sym).unwrap();
+    let mut req = ExportRequest { ad: true, kicad: true, sync_bindings: false, out_dir: dir.0.clone(), ..Default::default() };
+    req.ad_library_files.insert("C167747".into(), sch.clone()); req.kicad_library_files.insert("C167747".into(), sym.clone());
+    let rows = export_items(&LcedaClient::new(), &[item], &req); let p = rows[0].1.as_ref().unwrap();
+    assert_ne!(p.schlib.as_ref(), Some(&sch)); assert_ne!(p.kicad_sym.as_ref(), Some(&sym));
+    assert!(p.schlib.as_ref().unwrap().is_file()); assert!(p.kicad_sym.as_ref().unwrap().is_file());
+    assert_eq!(ad_before, fs::read(&sch).unwrap()); assert_eq!(ki_before, fs::read(&sym).unwrap());
+}
+
+#[test]
+fn mixed_bound_and_unbound_kicad_merge_keeps_targets_and_prevents_clobbering() {
+    let dir = TemporaryDirectory::new("mixed-kicad-merge");
+    let first = cached_item(&dir.0, "C167747", "FNR3015S2R2MT");
+    let second = cached_item(&dir.0, "C205463", "Other-MPN");
+    let bound = dir.0.join("bound.kicad_sym");
+    let mut req = ExportRequest { kicad: true, merge: true, merge_name: "combined".into(), out_dir: dir.0.clone(), ..Default::default() };
+    req.kicad_library_files.insert("C167747".into(), bound.clone());
+    let rows = export_items(&LcedaClient::new(), &[first.clone(), second.clone()], &req);
+    assert_eq!(rows[0].1.as_ref().unwrap().kicad_sym.as_ref(), Some(&bound));
+    assert_eq!(rows[1].1.as_ref().unwrap().kicad_sym.as_ref(), Some(&dir.0.join("combined.kicad_sym")));
+    assert!(!fs::read_to_string(dir.0.join("combined.kicad_sym")).unwrap().contains("(symbol \"FNR3015S2R2MT\""));
+    let before = fs::read(&bound).unwrap();
+    req.merge_name = "bound".into();
+    let rows = export_items(&LcedaClient::new(), &[second], &req);
+    assert!(rows[0].1.is_err()); assert_eq!(before, fs::read(&bound).unwrap());
+}
+
 fn seed_custom_library(sch: &Path) {
     fs::create_dir_all(sch.parent().unwrap()).unwrap();
     let mut entry = managed_entry("CustomOriginal", "Custom-MPN");

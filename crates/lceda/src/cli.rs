@@ -67,6 +67,9 @@ pub enum Cmd {
         /// Add/update this part in an existing SchLib and its matching PcbLib.
         #[arg(long, requires = "ad")]
         ad_library_file: Option<PathBuf>,
+        /// Add/update this part in a KiCad symbol library and its matching .pretty directory.
+        #[arg(long, requires = "kicad")]
+        kicad_library_file: Option<PathBuf>,
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
         #[arg(long)]
@@ -174,6 +177,7 @@ pub fn run() -> Result<i32> {
             rename_footprint,
             sch_color,
             ad_library_file,
+            kicad_library_file,
             output,
             force,
         }) => {
@@ -197,6 +201,10 @@ pub fn run() -> Result<i32> {
             if let Some(path) = ad_library_file {
                 let id = item.lcsc_id().ok_or_else(|| anyhow::anyhow!("绑定 AD 库需要明确的 C 编号"))?;
                 req.ad_library_files.insert(id, path);
+            }
+            if let Some(path) = kicad_library_file {
+                let id = item.lcsc_id().ok_or_else(|| anyhow::anyhow!("绑定 KiCad 库需要明确的 C 编号"))?;
+                req.kicad_library_files.insert(id, path);
             }
             let paths = export::export(&client, &item, &req).context("export failed")?;
             print_paths(&paths);
@@ -299,6 +307,9 @@ fn build_req(
         desc_fields: prefs.desc_fields.clone(),
         ad_library_dir: None,
         ad_library_files: Default::default(),
+        kicad_library_files: Default::default(),
+        bound_only: false,
+        sync_bindings: true,
     };
     if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
     {

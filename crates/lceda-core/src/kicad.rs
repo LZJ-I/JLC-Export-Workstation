@@ -27,7 +27,7 @@ pub fn pretty_dir(out_dir: &Path, base: &str) -> std::path::PathBuf {
     out_dir.join(format!("{}.pretty", sanitize_filename(base)))
 }
 
-fn symbol_lib_text_many(symbols: &[SymbolIr]) -> String {
+pub(crate) fn symbol_lib_text_many(symbols: &[SymbolIr]) -> String {
     let mut out = String::new();
     out.push_str("(kicad_symbol_lib\n");
     out.push_str("  (version 20241209)\n");
@@ -39,13 +39,14 @@ fn symbol_lib_text_many(symbols: &[SymbolIr]) -> String {
     out
 }
 
-fn symbol_entry(symbol: &SymbolIr) -> String {
+pub(crate) fn symbol_entry(symbol: &SymbolIr) -> String {
     let name = ident(&symbol.name);
     let mut out = String::new();
     out.push_str(&format!("  (symbol {name}\n"));
     out.push_str("    (exclude_from_sim no)\n    (in_bom yes)\n    (on_board yes)\n");
     push_prop(&mut out, "Reference", &guess_ref(symbol), 0.0, 5.08);
-    push_prop(&mut out, "Value", &symbol.name, 0.0, -5.08);
+    let value = if symbol.meta.mpn.is_empty() { &symbol.name } else { &symbol.meta.mpn };
+    push_prop(&mut out, "Value", value, 0.0, -5.08);
     let fp = if symbol.meta.footprint_lib.is_empty() {
         String::new()
     } else {
@@ -125,7 +126,7 @@ fn symbol_entry(symbol: &SymbolIr) -> String {
     out
 }
 
-fn footprint_mod_text(fp: &FootprintIr, step_rel: Option<&str>) -> String {
+pub(crate) fn footprint_mod_text(fp: &FootprintIr, step_rel: Option<&str>) -> String {
     let name = unescape_ident(&fp.name);
     let smd = fp.pads.iter().all(|p| p.hole <= 1e-6);
     let mut out = String::new();

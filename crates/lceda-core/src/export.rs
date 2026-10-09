@@ -43,6 +43,11 @@ pub struct ExportRequest {
     pub ad_library_dir: Option<PathBuf>,
     /// Per-part library bindings selected by the desktop's library categories.
     pub ad_library_files: BTreeMap<String, PathBuf>,
+    pub kicad_library_files: BTreeMap<String, PathBuf>,
+    /// A background sync writes only explicitly mapped formats for each part.
+    pub bound_only: bool,
+    /// False exports independent copies while retaining binding collision protection.
+    pub sync_bindings: bool,
 }
 
 impl Default for ExportRequest {
@@ -66,6 +71,9 @@ impl Default for ExportRequest {
             desc_fields: DescField::library(),
             ad_library_dir: None,
             ad_library_files: BTreeMap::new(),
+            kicad_library_files: BTreeMap::new(),
+            bound_only: false,
+            sync_bindings: true,
         }
     }
 }
@@ -193,7 +201,7 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             out.footprint_json = footprint_json;
         }
 
-        let has_bound_target = item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id));
+        let has_bound_target = req.sync_bindings && item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id));
         if req.ad && !req.merge && !has_bound_target && req.ad_library_dir.is_none() {
             protect_ad_outputs(req, &part_dir, &base, symbol_ir.is_some(), footprint_ir.is_some())?;
             if let Err(e) = export_altium(
@@ -211,7 +219,9 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
                 eprintln!("{e}");
             }
         }
-        if req.kicad && !req.merge {
+        let has_kicad_target = req.sync_bindings && item.lcsc_id().is_some_and(|id| req.kicad_library_files.contains_key(&id));
+        if req.kicad && !req.merge && !has_kicad_target {
+            protect_kicad_outputs(req, &part_dir, &base)?;
             export_kicad(
                 &mut out,
                 &part_dir,
@@ -239,7 +249,7 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             symbol: symbol_ir.clone(), footprint: footprint_ir.clone(),
             step: if req.ad_embed_3d { step_bytes.clone() } else { None },
         };
-        let bound = item.lcsc_id().and_then(|id| req.ad_library_files.get(&id));
+        let bound = item.lcsc_id().filter(|_| req.sync_bindings).and_then(|id| req.ad_library_files.get(&id));
         if let Some(path) = bound {
             let (sch, pcb) = crate::bound_ad::update(path, entry(), req.sch_colors)?;
             out.schlib = sch.is_file().then_some(sch);
@@ -248,6 +258,17 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
             let (sch, pcb) = crate::managed_ad::update(dir, entry(), req.sch_colors)?;
             out.schlib = sch.is_file().then_some(sch);
             out.pcblib = pcb.is_file().then_some(pcb);
+        }
+    }
+    if req.kicad && req.sync_bindings {
+        if let Some(path) = item.lcsc_id().and_then(|id| req.kicad_library_files.get(&id)) {
+            let entry = crate::managed_ad::Entry {
+                id: item.lcsc_id().unwrap(), symbol: symbol_ir.clone(), footprint: footprint_ir.clone(),
+                step: step_bytes.clone().filter(|_| req.kicad_attach_3d),
+            };
+            let (symbol, footprint) = crate::bound_kicad::update(path, entry)?;
+            out.kicad_sym = symbol;
+            out.kicad_mod = footprint;
         }
     }
     if !out.has_files() {
@@ -301,7 +322,7 @@ pub fn export_batch(
                             paths.schlib = merged.schlib.clone();
                             paths.pcblib = merged.pcblib.clone();
                         }
-                        if req.kicad {
+                        if req.kicad && !part_is_kicad_bound(req, &collected[idx]) {
                             paths.kicad_sym = merged.kicad_sym.clone();
                             paths.kicad_mod = merged.kicad_mod.clone();
                         }
@@ -324,6 +345,11 @@ pub fn export_items(client: &LcedaClient, items: &[SearchItem], req: &ExportRequ
     let mut collected = Vec::new();
     for item in items {
         let mut part_req = req.clone();
+        if req.bound_only {
+            let id = item.lcsc_id().unwrap_or_default();
+            part_req.ad &= req.ad_library_files.contains_key(&id);
+            part_req.kicad &= req.kicad_library_files.contains_key(&id);
+        }
         if item.model_uuid.is_none() { part_req.step = false; part_req.obj = false; }
         if !item.has_symbol_or_footprint() { part_req.ad = false; part_req.kicad = false; part_req.pads = false; part_req.source_json = false; }
         if item.datasheet_url().is_none() { part_req.datasheet = false; }
@@ -337,8 +363,8 @@ pub fn export_items(client: &LcedaClient, items: &[SearchItem], req: &ExportRequ
         match write_merged_libraries(req, &collected) {
             Ok(paths) => for (item, result) in &mut rows {
                 if let Ok(p) = result {
-                    if req.ad && req.ad_library_dir.is_none() && !item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id)) { p.schlib = paths.schlib.clone(); p.pcblib = paths.pcblib.clone(); }
-                    if req.kicad { p.kicad_sym = paths.kicad_sym.clone(); p.kicad_mod = paths.kicad_mod.clone(); }
+                    if req.ad && req.ad_library_dir.is_none() && !(req.sync_bindings && item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id))) { p.schlib = paths.schlib.clone(); p.pcblib = paths.pcblib.clone(); }
+                    if req.kicad && !(req.sync_bindings && item.lcsc_id().is_some_and(|id| req.kicad_library_files.contains_key(&id))) { p.kicad_sym = paths.kicad_sym.clone(); p.kicad_mod = paths.kicad_mod.clone(); }
                 }
             },
             Err(e) => {
@@ -354,7 +380,30 @@ pub fn export_items(client: &LcedaClient, items: &[SearchItem], req: &ExportRequ
 fn part_is_bound(req: &ExportRequest, part: &PartExport) -> bool {
     part.symbol.as_ref().map(|s| &s.meta.lcsc)
         .or_else(|| part.footprint.as_ref().map(|p| &p.meta.lcsc))
-        .is_some_and(|id| req.ad_library_files.contains_key(id))
+        .is_some_and(|id| req.sync_bindings && req.ad_library_files.contains_key(id))
+}
+
+fn part_is_kicad_bound(req: &ExportRequest, part: &PartExport) -> bool {
+    part.symbol.as_ref().map(|s| &s.meta.lcsc)
+        .or_else(|| part.footprint.as_ref().map(|p| &p.meta.lcsc))
+        .is_some_and(|id| req.sync_bindings && req.kicad_library_files.contains_key(id))
+}
+
+fn protect_kicad_outputs(req: &ExportRequest, directory: &Path, name: &str) -> Result<()> {
+    let candidate = [directory.join(format!("{name}.kicad_sym")), directory.join(format!("{name}.pretty")), directory.join(format!("{name}.3dshapes"))];
+    for reserved in req.kicad_library_files.values() {
+        let targets = crate::bound_kicad::targets(reserved)?;
+        for target in [&targets.symbol, &targets.pretty, &targets.shapes] {
+            let identity = ad_path_identity(target)?;
+            for candidate in &candidate {
+                let output = ad_path_identity(candidate)?;
+                if identity == output || output.starts_with(&format!("{identity}\\")) {
+                    return Err(Error::msg(format!("普通 KiCad 导出目标 {} 与绑定库冲突，请更换导出目录或库名称；原库保持不变", candidate.display())));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Ordinary exports must never rebuild a file reserved for incremental library updates.
@@ -481,11 +530,13 @@ fn write_merged_libraries(req: &ExportRequest, parts: &[PartExport]) -> Result<D
         }
     }
 
-    if req.kicad {
-        let mut symbols: Vec<SymbolIr> = parts.iter().filter_map(|p| p.symbol.clone()).collect();
+    let kicad_parts: Vec<_> = parts.iter().filter(|part| !part_is_kicad_bound(req, part)).collect();
+    if req.kicad && !kicad_parts.is_empty() {
+        protect_kicad_outputs(req, &req.out_dir, &name)?;
+        let mut symbols: Vec<SymbolIr> = kicad_parts.iter().filter_map(|p| p.symbol.clone()).collect();
         let pretty = kicad::pretty_dir(&req.out_dir, &name);
         let shapes = req.out_dir.join(format!("{name}.3dshapes"));
-        for part in parts {
+        for part in kicad_parts {
             let Some(fp) = part.footprint.as_ref() else {
                 continue;
             };

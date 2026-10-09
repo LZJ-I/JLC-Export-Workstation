@@ -4,6 +4,7 @@
 
 pub mod altium;
 pub mod bound_ad;
+pub mod bound_kicad;
 pub mod client;
 pub mod desc;
 pub mod easyeda;
