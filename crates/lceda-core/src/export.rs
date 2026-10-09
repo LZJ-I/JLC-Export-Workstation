@@ -139,6 +139,8 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
         }
     }
 
+    check_bound_model(req, item, step_bytes.as_deref())?;
+
     if req.obj {
         if item.model_uuid.is_none() {
             return Err(Error::No3dModel);
@@ -381,6 +383,15 @@ fn part_is_bound(req: &ExportRequest, part: &PartExport) -> bool {
     part.symbol.as_ref().map(|s| &s.meta.lcsc)
         .or_else(|| part.footprint.as_ref().map(|p| &p.meta.lcsc))
         .is_some_and(|id| req.sync_bindings && req.ad_library_files.contains_key(id))
+}
+
+fn check_bound_model(req: &ExportRequest, item: &SearchItem, step: Option<&[u8]>) -> Result<()> {
+    if !req.sync_bindings || item.model_uuid.is_none() || step.is_some() { return Ok(()); }
+    let id = item.lcsc_id().unwrap_or_default();
+    let needs_model = (req.ad && req.ad_embed_3d && (req.ad_library_files.contains_key(&id) || req.ad_library_dir.is_some())) ||
+        (req.kicad && req.kicad_attach_3d && req.kicad_library_files.contains_key(&id));
+    if needs_model { return Err(Error::msg("该器件有 3D 模型，但此次 STEP 下载失败；绑定库同步已取消，原库保持不变。请重试，或关闭相应的 3D 附带设置后同步。")); }
+    Ok(())
 }
 
 fn part_is_kicad_bound(req: &ExportRequest, part: &PartExport) -> bool {
@@ -783,6 +794,26 @@ fn write_json(path: &Path, value: &Value, force: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_model_download_cannot_silently_remove_3d_from_bound_components() {
+        let mut item = SearchItem { index: 1, display_title: "part".into(), title: "part".into(), manufacturer: String::new(),
+            model_uuid: Some("model".into()), raw: serde_json::json!({"product_code":"C2040"}) };
+        for ad in [false, true] {
+            let mut req = ExportRequest { ad, kicad: !ad, ..Default::default() };
+            if ad { req.ad_library_files.insert("C2040".into(), "Parts.SchLib".into()); }
+            else { req.kicad_library_files.insert("C2040".into(), "Parts.kicad_sym".into()); }
+            assert!(check_bound_model(&req, &item, None).is_err());
+            assert!(check_bound_model(&req, &item, Some(b"STEP")).is_ok());
+            req.sync_bindings = false; assert!(check_bound_model(&req, &item, None).is_ok());
+            req.sync_bindings = true; req.ad_embed_3d = false; req.kicad_attach_3d = false;
+            assert!(check_bound_model(&req, &item, None).is_ok());
+        }
+        item.model_uuid = None;
+        let mut req = ExportRequest { ad: true, ..Default::default() };
+        req.ad_library_files.insert("C2040".into(), "Parts.SchLib".into());
+        assert!(check_bound_model(&req, &item, None).is_ok());
+    }
     use crate::ir::{FootprintIr, IrPad};
 
     fn sample_fp(name: &str) -> FootprintIr {

@@ -6,12 +6,21 @@ use std::path::{Component, Path, PathBuf};
 
 pub const UNCAT: &str = "uncat";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LibraryFormat { Ad, KiCad }
+impl LibraryFormat {
+    pub const ALL: [Self; 2] = [Self::Ad, Self::KiCad];
+    pub fn name(self) -> &'static str { match self { Self::Ad => "AD", Self::KiCad => "KiCad" } }
+    pub fn extension(self) -> &'static str { match self { Self::Ad => "SchLib", Self::KiCad => "kicad_sym" } }
+}
+
 #[derive(Debug, Clone)]
 pub struct Category {
     pub id: String,
     pub name: String,
     pub parent: Option<String>,
     pub binding: Option<PathBuf>,
+    pub kicad_binding: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +66,7 @@ impl Default for Library {
                 name: "默认收藏夹".into(),
                 parent: None,
                 binding: None,
+                kicad_binding: None,
             }],
             favs: Vec::new(),
             queue: Vec::new(),
@@ -173,6 +183,7 @@ impl Library {
                             .filter(|s| !s.is_empty())
                             .map(|s| s.to_string()),
                         binding: None,
+                        kicad_binding: None,
                     })
                 })
                 .collect();
@@ -187,6 +198,7 @@ impl Library {
                         name: "默认收藏夹".into(),
                         parent: None,
                         binding: None,
+                        kicad_binding: None,
                     },
                 );
             }
@@ -194,9 +206,11 @@ impl Library {
         // Reuse validation so malformed or conflicting persisted bindings cannot target the same file.
         if let Some(cats) = v.get("cats").and_then(Value::as_array) {
             for category in cats {
-                if let (Some(id), Some(path)) = (category.get("id").and_then(Value::as_str), category.get("binding").and_then(Value::as_str)) {
-                    if let Err(error) = lib.bind_library(id, Path::new(path)) {
-                        eprintln!("忽略无效分类库绑定 {id}: {error}");
+                for (format, key) in [(LibraryFormat::Ad, "binding"), (LibraryFormat::KiCad, "kicad_binding")] {
+                    if let (Some(id), Some(path)) = (category.get("id").and_then(Value::as_str), category.get(key).and_then(Value::as_str)) {
+                        if let Err(error) = lib.set_binding(id, format, Path::new(path)) {
+                            eprintln!("忽略无效分类库绑定 {id}: {error}");
+                        }
                     }
                 }
             }
@@ -260,6 +274,7 @@ impl Library {
                 "name": c.name,
                 "parent": c.parent,
                 "binding": c.binding,
+                "kicad_binding": c.kicad_binding,
             })).collect::<Vec<_>>(),
             "favs": self.favs.iter().map(part_json).collect::<Vec<_>>(),
             "queue": self.queue.iter().map(part_json).collect::<Vec<_>>(),
@@ -285,35 +300,57 @@ impl Library {
 
     /// Binding is local to a category; child categories do not inherit their parent's target.
     pub fn binding_for_category(&self, cat_id: &str) -> Option<&Path> {
-        self.cat(cat_id)?.binding.as_deref()
+        self.binding_for(cat_id, LibraryFormat::Ad)
     }
 
+    pub fn binding_for(&self, cat_id: &str, format: LibraryFormat) -> Option<&Path> {
+        let category = self.cat(cat_id)?;
+        match format { LibraryFormat::Ad => category.binding.as_deref(), LibraryFormat::KiCad => category.kicad_binding.as_deref() }
+    }
+
+    #[cfg(test)]
     pub fn binding_for_part(&self, lcsc: &str) -> Option<&Path> {
+        self.binding_for_part_format(lcsc, LibraryFormat::Ad)
+    }
+
+    pub fn binding_for_part_format(&self, lcsc: &str, format: LibraryFormat) -> Option<&Path> {
         let part = self.favs.iter().find(|part| part.lcsc.eq_ignore_ascii_case(lcsc))?;
-        self.binding_for_category(&part.cat_id)
+        self.binding_for(&part.cat_id, format)
     }
 
     pub fn bound_categories(&self) -> Vec<(&Category, &Path)> {
-        self.cats.iter().filter_map(|category| Some((category, category.binding.as_deref()?))).collect()
+        self.cats.iter().filter_map(|category| Some((category, category.binding.as_deref().or(category.kicad_binding.as_deref())?))).collect()
     }
 
+    #[cfg(test)]
     pub fn bind_library(&mut self, cat_id: &str, path: &Path) -> Result<(), String> {
+        self.set_binding(cat_id, LibraryFormat::Ad, path)
+    }
+
+    pub fn set_binding(&mut self, cat_id: &str, format: LibraryFormat, path: &Path) -> Result<(), String> {
         if self.cat(cat_id).is_none() { return Err("没有找到器件库分类".into()); }
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(format.extension())) { return Err(format!("请选择 .{} 库文件", format.extension())); }
         let target = normalize_binding(path)?;
         let identity = binding_identity(&target, cfg!(windows));
         if let Some(other) = self.cats.iter().find(|category| category.id != cat_id &&
-            category.binding.as_ref().is_some_and(|bound| binding_identity(bound, cfg!(windows)) == identity)) {
+            self.binding_for(&category.id, format).is_some_and(|bound| binding_identity(bound, cfg!(windows)) == identity)) {
             return Err(format!("库文件已绑定到分类“{}”，请选择其它文件", other.name));
         }
-        self.cats.iter_mut().find(|category| category.id == cat_id).unwrap().binding = Some(target);
+        let category = self.cats.iter_mut().find(|category| category.id == cat_id).unwrap();
+        match format { LibraryFormat::Ad => category.binding = Some(target), LibraryFormat::KiCad => category.kicad_binding = Some(target) }
         Ok(())
     }
 
     /// Removing a binding never modifies or removes the external library file.
+    #[cfg(test)]
     pub fn unbind_library(&mut self, cat_id: &str) -> Result<(), String> {
+        self.clear_binding(cat_id, LibraryFormat::Ad)
+    }
+
+    pub fn clear_binding(&mut self, cat_id: &str, format: LibraryFormat) -> Result<(), String> {
         let category = self.cats.iter_mut().find(|category| category.id == cat_id)
             .ok_or("没有找到器件库分类")?;
-        category.binding = None;
+        match format { LibraryFormat::Ad => category.binding = None, LibraryFormat::KiCad => category.kicad_binding = None }
         Ok(())
     }
 
@@ -338,6 +375,7 @@ impl Library {
             name: name.into(),
             parent: None,
             binding: None,
+            kicad_binding: None,
         });
         Some(id)
     }
@@ -357,6 +395,7 @@ impl Library {
             name: name.into(),
             parent: Some(parent.into()),
             binding: None,
+            kicad_binding: None,
         });
         Some(id)
     }
@@ -578,6 +617,25 @@ fn timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ad_and_kicad_bindings_are_independent_durable_and_not_inherited() {
+        let mut lib = Library::default();
+        let parent = lib.add_root("both").unwrap();
+        let child = lib.add_child(&parent, "child").unwrap();
+        let directory = std::env::temp_dir().join(format!("lceda-dual-binding-{}", lceda_core::util::unique_id()));
+        let ad = directory.join("Parts.SchLib"); let ki = directory.join("Parts.kicad_sym");
+        lib.set_binding(&parent, LibraryFormat::Ad, &ad).unwrap();
+        lib.set_binding(&parent, LibraryFormat::KiCad, &ki).unwrap();
+        assert!(lib.set_binding(&child, LibraryFormat::KiCad, &ki).is_err());
+        assert!(lib.set_binding(&child, LibraryFormat::KiCad, &ad).is_err());
+        let mut loaded = Library::from_json(&lib.to_json());
+        for format in LibraryFormat::ALL { assert_eq!(loaded.binding_for(&parent, format), lib.binding_for(&parent, format)); assert!(loaded.binding_for(&child, format).is_none()); }
+        loaded.clear_binding(&parent, LibraryFormat::Ad).unwrap();
+        assert!(loaded.binding_for(&parent, LibraryFormat::Ad).is_none());
+        assert!(loaded.binding_for(&parent, LibraryFormat::KiCad).is_some());
+        assert_eq!(loaded.bound_categories().len(), 1);
+    }
 
     #[test]
     fn category_bindings_roundtrip_and_old_categories_remain_unbound() {

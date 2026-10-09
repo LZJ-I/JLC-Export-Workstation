@@ -52,7 +52,7 @@ The centered **Activity** button reserves its space in the status bar, so long o
 
 **Add to library** always asks for the destination, including when only one library exists. **Library** retains favorite categories (right-click to create / rename / import / export / delete). **Export list** is a queue you can import, export, or clear.
 
-**Combine these parts into one library** appears only when a batch contains multiple parts that can be combined. It is absent from single-part export and Settings. Bound AD parts still sync to their own library files.
+**Combine these parts into one library** appears only when a batch contains multiple parts that can be combined. It is absent from single-part export and Settings. Exports produce independent copies in the output folder; automatic sync and the Sync library menu update bindings.
 
 **Settings** controls language, appearance, the save folder, which boxes are pre-ticked on Export, 3D attach options, footprint renaming, and **schematic colors** for Altium `.SchLib`:
 
@@ -75,19 +75,22 @@ Use **Library → Import BOM…** for CSV / TSV / Excel (xlsx, xls, xlsb, ods). 
 
 Library retains existing favorites and categories. The additional local search, notes and asset-management UI has been removed; existing favorites, settings and internal preview caches remain. LCSC remains the online search provider.
 
-### Bind each library to Altium files
+### Library exports and binding synchronization
 
-Right-click a library and choose **Bind library file…**. Select an existing or new `.SchLib`; the companion `.PcbLib` uses the same folder and stem. Each library has one binding, and duplicate bindings are rejected. Adding parts, importing a BOM or changing AD export settings schedules synchronization. Use **Sync library files** to retry manually.
+**Library → Export…** offers **Export selected part… / Export current library…** without first using the export queue. Current-library export includes only that category, with optional merging for multiple parts. Exports create independent copies in the output folder.
 
-Synchronization inherits colors, description fields, footprint renaming and 3D embedding settings. Stable C-number names prevent collisions; re-exporting updates the same component. Comment retains the MPN. Other existing components and extra streams are preserved. Removing favorites or unbinding does not remove external components.
+The **Sync library** dropdown updates all bindings in the current library, AD only, KiCad only, or every library. The category context menu provides the same controls. **Bind library file… → AD / KiCad** selects an existing or new target. Each category can bind one target per format; duplicate file bindings are rejected.
 
-Updates use file locking, paired replacement, interruption recovery and previous-generation backups named `.filename.jlc-backup`. Unsupported, corrupt or concurrently modified files are rejected. Use a library copy for your first trial.
+- **AD:** choose `.SchLib` with its same-stem `.PcbLib`. Stable C-number names allow updates while Comment retains the MPN. Unrelated components, fonts, models and extra streams are retained.
+- **KiCad:** choose `.kicad_sym` with same-stem `.pretty/` and `.3dshapes/` folders. Stable C-number identifiers connect symbols, footprints and models; Value retains the MPN. Uses **KiCad 9 format** and upgrades older symbol-library versions while preserving untouched symbols and unknown fields.
 
-The global persistent-folder option has been removed. Automatic synchronization uses only per-library bindings. Unbound parts export to the ordinary output folder. Ordinary exports never rebuild a bound library first.
+Adding parts, importing BOMs and changing export settings automatically schedule synchronization. Removing parts or unbinding preserves external components. Ordinary exports check for path collisions with bound files.
 
-Install the two file libraries once in Altium library management. Later exports update the same paths; Altium may need a refresh or library reopen. This version does not include an AD plugin that places parts into the active schematic.
+Both formats use file locking, recoverable transactions and `.filename.jlc-backup` previous-generation backups. Keep KiCad's `.filename.jlc-meta.json` ownership record with the library. Unowned name conflicts and manually edited managed components are rejected without overwriting them; use a new target after backing up if needed. Failures are shown and can be retried from the menu.
 
-AD binding is implemented in this release. [KiCad binding was assessed](docs/KICAD_BINDING_ASSESSMENT_ZH.md) but is not implemented; existing individual and merged KiCad exports remain available.
+Install AD's two libraries once. In KiCad, add the symbol file and `.pretty` library once using the file stem as the nickname; model references use the binding's absolute path. Refresh or reopen libraries after synchronization as needed. The app does not edit KiCad global/project library tables or place parts in an active schematic.
+
+See [KiCad binding implementation and verification](docs/KICAD_BINDING_ASSESSMENT_ZH.md). The legacy global fixed AD-library option has been removed.
 
 Shortcuts: `Ctrl+F` search, `Ctrl+O` import BOM, `Ctrl+Enter` export checklist.
 
@@ -114,6 +117,7 @@ lceda get C2040 --ad --no-ad-3d -o ./out
 lceda get C2040 --ad --rename-footprint -o ./out
 lceda get C2040 --ad --sch-color altium -o ./out
 lceda get C2040 --ad --ad-library-file ./MyParts.SchLib -o ./out
+lceda get C2040 --kicad --kicad-library-file ./MyParts.kicad_sym -o ./out
 lceda get C2040 --source -o ./out
 lceda get C2040 --datasheet -o ./out
 lceda batch ids.txt --ad --kicad --pads --step -o ./out

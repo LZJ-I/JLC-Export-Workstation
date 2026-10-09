@@ -5,7 +5,7 @@ use super::theme::{self, ACCENT};
 use crate::i18n::{self, Lang};
 use crate::bom::BomDocument;
 use crate::instance::InstanceGuard;
-use crate::library::{part_from_item, Library, SavedPart, UNCAT};
+use crate::library::{part_from_item, Library, LibraryFormat, SavedPart, UNCAT};
 use crate::prefs::{ExportSection, SettingsTab, ThemeMode, PreviewMode};
 use lceda_core::desc::{DescField, PropGroup, PropRow};
 use crate::sponsor;
@@ -231,8 +231,9 @@ struct App {
     lang_pinned: bool,
     show_bom_import: bool,
     bind_cat: Option<String>,
+    bind_format: LibraryFormat,
     bind_path: String,
-    pending_library_sync: BTreeSet<String>,
+    pending_library_sync: BTreeSet<(String, LibraryFormat)>,
     library_sync_after: Option<Instant>,
     symbol: Option<SymbolIr>,
     symbol_note: Option<String>,
@@ -355,6 +356,7 @@ impl App {
             lang_pinned: prefs.lang.is_some(),
             show_bom_import: false,
             bind_cat: None,
+            bind_format: LibraryFormat::Ad,
             bind_path: String::new(),
             pending_library_sync: BTreeSet::new(),
             library_sync_after: None,
@@ -1078,7 +1080,7 @@ impl App {
     fn settings_export(&mut self, ui: &mut egui::Ui) -> bool {
         let lang = self.lang;
         let mut persist = false;
-        let previous = (self.ad_embed_3d, self.rename_footprint, self.resolved_sch_colors(), self.desc_fields.clone());
+        let previous = (self.ad_embed_3d, self.kicad_attach_3d, self.rename_footprint, self.resolved_sch_colors(), self.desc_fields.clone());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             for (sec, key) in [
@@ -1101,9 +1103,10 @@ impl App {
             ExportSection::Schematic => persist |= self.sch_color_card(ui),
             ExportSection::Description => persist |= self.settings_desc_card(ui),
         }
-        let current = (self.ad_embed_3d, self.rename_footprint, self.resolved_sch_colors(), self.desc_fields.clone());
+        let current = (self.ad_embed_3d, self.kicad_attach_3d, self.rename_footprint, self.resolved_sch_colors(), self.desc_fields.clone());
         if current != previous {
-            self.pending_library_sync.extend(self.lib.bound_categories().into_iter().map(|(category, _)| category.id.clone()));
+            let ids: Vec<_> = self.lib.bound_categories().into_iter().map(|(category, _)| category.id.clone()).collect();
+            for id in ids { self.queue_library_sync(&id, None); }
             self.library_sync_after = Some(Instant::now() + Duration::from_millis(700));
         }
         persist
@@ -1735,13 +1738,12 @@ impl App {
         let parts: Vec<_> = if let Some(items) = &self.export_items_pending {
             items.iter().map(|item| {
                 let id = item.lcsc_id().unwrap_or_else(|| item.name().to_string());
-                let bound = self.lib.binding_for_part(&id).is_some();
-                (id.to_ascii_uppercase(), item.has_symbol_or_footprint(), bound)
+                (id.to_ascii_uppercase(), item.has_symbol_or_footprint(), false, false)
             }).collect()
         } else if let Some(ids) = &self.export_ids_pending {
             ids.iter().map(|id| {
                 let cad = self.lib.cached_item(id).map(|item| item.has_symbol_or_footprint()).unwrap_or(true);
-                (id.to_ascii_uppercase(), cad, self.lib.binding_for_part(id).is_some())
+                (id.to_ascii_uppercase(), cad, false, false)
             }).collect()
         } else { Vec::new() };
         can_merge_library_parts(self.batch_opts.ad, self.batch_opts.kicad, parts)
@@ -1761,6 +1763,7 @@ impl App {
                 .or_else(|| self.export_ids_pending.as_ref().map(|ids| ids.len().max(1))).unwrap_or(1);
             ui.label(theme::heading(format!("{count} {}", i18n::t(lang, "components"))));
             ui.label(egui::RichText::new(i18n::t(lang, "batch_hint")).color(theme::secondary()));
+            ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, "export_copy_hint")).small().color(theme::secondary())).wrap());
             ui.add_space(8.0);
             let before = self.batch_opts;
             egui::Grid::new("batch_opts")
@@ -2502,9 +2505,7 @@ impl App {
         let mut open_rename = false;
         let mut delete = false;
         let mut import_bom = false;
-        let mut bind_library: Option<String> = None;
-        let mut unbind_library: Option<String> = None;
-        let mut sync_library: Option<String> = None;
+        let mut library_action = None;
         let cats: Vec<(String, String, usize)> = self
             .lib
             .cats
@@ -2537,6 +2538,22 @@ impl App {
                 import_bom = theme::pill_button(ui, i18n::t(lang, "import_bom"), !self.busy(), true).clicked();
                 if ui.button(i18n::t(lang, "new_cat")).clicked() { open_new = true; }
             });
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                dropdown_menu(ui, i18n::t(lang, "library_export_menu"), |ui| {
+                    theme::prepare_menu(ui);
+                    let selected = selected_lcsc.as_ref().filter(|id| parts.iter().any(|part| &part.0 == *id));
+                    if ui.add_enabled(!self.busy() && selected.is_some(), egui::Button::new(i18n::t(lang, "export_library_part"))).clicked() {
+                        export_part = selected.cloned(); ui.close();
+                    }
+                    if ui.add_enabled(!self.busy() && !parts.is_empty(), egui::Button::new(i18n::t(lang, "export_library_all"))).clicked() {
+                        export_cat = true; ui.close();
+                    }
+                });
+                dropdown_menu(ui, i18n::t(lang, "library_sync_menu"), |ui| {
+                    library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy());
+                });
+            });
             ui.add_space(8.0);
             if self.fav_inside {
                 ui.horizontal(|ui| {
@@ -2545,16 +2562,16 @@ impl App {
                     }
                     ui.add(egui::Label::new(theme::heading(cat_title)).truncate());
                 });
-                let path = self.lib.binding_for_category(&self.fav_cat).map(|p| p.display().to_string());
-                let binding_caption = path.as_ref().map(|p| format!("{} {p}", i18n::t(lang, "bound_library"))).unwrap_or_else(|| i18n::t(lang, "unbound_library").into());
-                let response = ui.add(egui::Label::new(egui::RichText::new(&binding_caption).small().color(theme::secondary())).truncate()).on_hover_text(&binding_caption);
-                response.context_menu(|ui| {
-                    if ui.button(i18n::t(lang, "bind_library")).clicked() { bind_library = Some(self.fav_cat.clone()); ui.close(); }
-                    if path.is_some() {
-                        if ui.button(i18n::t(lang, "sync_library")).clicked() { sync_library = Some(self.fav_cat.clone()); ui.close(); }
-                        if ui.button(i18n::t(lang, "unbind_library")).clicked() { unbind_library = Some(self.fav_cat.clone()); ui.close(); }
+                for format in LibraryFormat::ALL {
+                    let caption = self.lib.binding_for(&self.fav_cat, format).map(|p| format!("{} · {}", format.name(), p.display()));
+                    if let Some(caption) = caption {
+                        let response = ui.add(egui::Label::new(egui::RichText::new(&caption).small().color(theme::secondary())).truncate()).on_hover_text(&caption);
+                        response.context_menu(|ui| { library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy()); });
                     }
-                });
+                }
+                if LibraryFormat::ALL.into_iter().all(|f| self.lib.binding_for(&self.fav_cat, f).is_none()) {
+                    ui.label(egui::RichText::new(i18n::t(lang, "unbound_library")).small().color(theme::secondary()));
+                }
                 ui.add_space(8.0);
                 if parts.is_empty() {
                     ui.label(egui::RichText::new(i18n::t(lang, "fav_empty")).color(theme::secondary()));
@@ -2590,8 +2607,8 @@ impl App {
                     ui.set_width(ui.available_width());
                     for (id, name, n) in &cats {
                         let selected = self.fav_cat == *id;
-                        let binding = self.lib.binding_for_category(id);
-                        let subtitle = if let Some(path) = binding { format!("{n} {unit} · {}", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("{n} {unit}") };
+                        let formats: Vec<_> = LibraryFormat::ALL.into_iter().filter(|f| self.lib.binding_for(id, *f).is_some()).map(LibraryFormat::name).collect();
+                        let subtitle = if formats.is_empty() { format!("{n} {unit}") } else { format!("{n} {unit} · {}", formats.join(" + ")) };
                         let r = paint_part_row(ui, name, &subtitle, selected);
                         if r.double_clicked() {
                             enter_cat = Some(id.clone());
@@ -2600,11 +2617,7 @@ impl App {
                         }
                         r.context_menu(|ui| {
                             theme::prepare_menu(ui);
-                            if ui.button(i18n::t(lang, "bind_library")).clicked() { bind_library = Some(id.clone()); ui.close(); }
-                            if binding.is_some() {
-                                if ui.button(i18n::t(lang, "sync_library")).clicked() { sync_library = Some(id.clone()); ui.close(); }
-                                if ui.button(i18n::t(lang, "unbind_library")).clicked() { unbind_library = Some(id.clone()); ui.close(); }
-                            }
+                            if let Some(action) = library_menu(ui, &self.lib, id, lang, self.busy()) { library_action = Some(action); }
                             ui.separator();
                             if ui.button(i18n::t(lang, "new_cat")).clicked() {
                                 open_new = true;
@@ -2654,24 +2667,7 @@ impl App {
                 });
             }
         });
-        if let Some(id) = bind_library {
-            self.bind_path = self.lib.binding_for_category(&id).map(|p| p.display().to_string()).unwrap_or_else(|| {
-                let name = self.lib.cat(&id).map(|c| c.name.as_str()).unwrap_or("Library");
-                PathBuf::from(&self.out_dir).join(format!("{}.SchLib", lceda_core::util::sanitize_filename(name))).display().to_string()
-            });
-            self.bind_cat = Some(id);
-        }
-        if let Some(id) = unbind_library {
-            let mut next = self.lib.clone();
-            match next.unbind_library(&id) {
-                Ok(()) => match next.try_save() {
-                    Ok(()) => { self.lib = next; self.pending_library_sync.remove(&id); }
-                    Err(error) => self.alert(format!("保存库绑定失败: {error}")),
-                },
-                Err(error) => self.alert(error),
-            }
-        }
-        if let Some(id) = sync_library { self.pending_library_sync.insert(id); }
+        if let Some(action) = library_action { self.handle_library_action(action); }
         if import_bom { self.import_bom(); }
         if let Some(id) = select_cat {
             self.fav_cat = id;
@@ -2883,8 +2879,15 @@ impl App {
                     });
                 });
             });
-            if let Some(path) = item.as_ref().and_then(SearchItem::lcsc_id).and_then(|id| self.lib.binding_for_part(&id)) {
-                ui.add(egui::Label::new(egui::RichText::new(format!("{} {}", i18n::t(lang, "bound_library"), path.display())).small().color(theme::secondary())).truncate()).on_hover_text(path.display().to_string());
+            if let Some(id) = item.as_ref().and_then(SearchItem::lcsc_id) {
+                let bindings: Vec<_> = LibraryFormat::ALL.into_iter().filter_map(|format| {
+                    self.lib.binding_for_part_format(&id, format).map(|path| (format, path))
+                }).collect();
+                if !bindings.is_empty() {
+                    let caption = bindings.iter().map(|(format, path)| format!("{} · {}", format.name(), path.file_name().unwrap_or_default().to_string_lossy())).collect::<Vec<_>>().join("  /  ");
+                    let tooltip = bindings.iter().map(|(format, path)| format!("{}: {}", format.name(), path.display())).collect::<Vec<_>>().join("\n");
+                    ui.add(egui::Label::new(egui::RichText::new(caption).small().color(theme::secondary())).truncate()).on_hover_text(tooltip);
+                }
             }
         });
         if export { self.ask_export_selected(); }
@@ -3154,7 +3157,7 @@ impl App {
         match next.try_save() {
             Ok(()) => {
                 self.lib = next;
-                self.pending_library_sync.insert(cat_id.to_string());
+                self.queue_library_sync(cat_id, None);
                 self.log(i18n::t(self.lang, "added_fav"));
             }
             Err(error) => self.alert(format!("保存器件库失败: {error}")),
@@ -3757,8 +3760,10 @@ impl App {
         req.sch_colors = self.resolved_sch_colors();
         req.desc_fields = self.desc_fields.clone();
         req.ad_library_dir = None;
+        req.sync_bindings = false;
         for part in &self.lib.favs {
             if let Some(path) = self.lib.binding_for_category(&part.cat_id) { req.ad_library_files.insert(part.lcsc.to_ascii_uppercase(), path.to_path_buf()); }
+            if let Some(path) = self.lib.binding_for(&part.cat_id, LibraryFormat::KiCad) { req.kicad_library_files.insert(part.lcsc.to_ascii_uppercase(), path.to_path_buf()); }
         }
     }
 
@@ -3950,19 +3955,33 @@ impl App {
         let mut open = true;
         let mut bind = false;
         let mut cancel = false;
+        let format = self.bind_format;
+        let extension = format.extension();
         let name = if cat_id == UNCAT { i18n::t(lang, "uncategorized").to_string() }
             else { self.lib.cat(&cat_id).map(|c| c.name.clone()).unwrap_or_default() };
-        fit_window(i18n::t(lang, "bind_library"), "bind_library_dialog", 600.0).open(&mut open).show(ctx, |ui| {
+        let title = format!("{} · {}", i18n::t(lang, "bind_library"), format.name());
+        fit_window(&title, "bind_library_dialog", 600.0).open(&mut open).show(ctx, |ui| {
             ui.label(theme::heading(name));
-            ui.add(egui::Label::new(i18n::t(lang, "bind_library_hint")).wrap());
+            ui.add(egui::Label::new(i18n::t(lang, if format == LibraryFormat::Ad { "bind_library_hint" } else { "bind_kicad_hint" })).wrap());
             ui.add_space(10.0);
-            ui.add_sized([ui.available_width(), 34.0], theme::edit_single(&mut self.bind_path, "Library.SchLib"));
+            ui.add_sized([ui.available_width(), 34.0], theme::edit_single(&mut self.bind_path, &format!("Library.{extension}")));
+            let path = PathBuf::from(self.bind_path.trim());
+            if format == LibraryFormat::KiCad {
+                if let Ok(paths) = lceda_core::bound_kicad::targets(&path) {
+                    for path in [&paths.pretty, &paths.shapes] {
+                        ui.add(egui::Label::new(egui::RichText::new(path.display().to_string()).small().color(theme::secondary())).truncate()).on_hover_text(path.display().to_string());
+                    }
+                }
+            } else {
+                let paired = path.with_extension("PcbLib").display().to_string();
+                ui.add(egui::Label::new(egui::RichText::new(&paired).small().color(theme::secondary())).truncate()).on_hover_text(paired);
+            }
             ui.horizontal_wrapped(|ui| {
                 if ui.button(i18n::t(lang, "choose_library_file")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Altium SchLib", &["SchLib"]).pick_file() { self.bind_path = path.display().to_string(); }
+                    if let Some(path) = rfd::FileDialog::new().add_filter(format.name(), &[extension]).pick_file() { self.bind_path = path.display().to_string(); }
                 }
                 if ui.button(i18n::t(lang, "new_library_file")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Altium SchLib", &["SchLib"]).set_file_name("Library.SchLib").save_file() { self.bind_path = path.display().to_string(); }
+                    if let Some(path) = rfd::FileDialog::new().add_filter(format.name(), &[extension]).set_file_name(format!("Library.{extension}")).save_file() { self.bind_path = path.display().to_string(); }
                 }
             });
             ui.add_space(14.0);
@@ -3973,16 +3992,18 @@ impl App {
         });
         if bind {
             let path = PathBuf::from(self.bind_path.trim());
-            if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("SchLib")) {
-                self.alert(i18n::t(lang, "bind_extension_error"));
-            } else if let Err(error) = lceda_core::bound_ad::validate_binding(&path) {
+            let validated = match format {
+                LibraryFormat::Ad => lceda_core::bound_ad::validate_binding(&path),
+                LibraryFormat::KiCad => lceda_core::bound_kicad::validate_binding(&path),
+            };
+            if let Err(error) = validated {
                 self.alert(error.to_string());
             } else {
                 let mut next = self.lib.clone();
-                match next.bind_library(&cat_id, &path) {
+                match next.set_binding(&cat_id, format, &path) {
                     Ok(()) => {
                         match next.try_save() {
-                            Ok(()) => { self.lib = next; self.pending_library_sync.insert(cat_id); self.bind_cat = None; }
+                            Ok(()) => { self.lib = next; self.queue_library_sync(&cat_id, Some(format)); self.bind_cat = None; }
                             Err(error) => self.alert(format!("保存库绑定失败: {error}")),
                         }
                     }
@@ -3996,17 +4017,22 @@ impl App {
     fn start_library_sync(&mut self) {
         self.library_sync_after = None;
         let categories = std::mem::take(&mut self.pending_library_sync);
-        let mut req = ExportRequest { ad: true, source_json: true, out_dir: PathBuf::from(self.out_dir.trim()), ..Default::default() };
+        let mut req = ExportRequest { ad: true, kicad: true, bound_only: true, source_json: true, out_dir: PathBuf::from(self.out_dir.trim()), ..Default::default() };
         self.apply_export_opts(&mut req);
+        req.sync_bindings = true;
         req.ad_library_dir = None;
         req.ad_library_files.clear();
-        let mut ids = Vec::new();
-        for category in categories {
-            if let Some(path) = self.lib.binding_for_category(&category) {
+        req.kicad_library_files.clear();
+        let mut ids = BTreeSet::new();
+        for (category, format) in categories {
+            if let Some(path) = self.lib.binding_for(&category, format) {
                 for part in self.lib.favs_in(&category) {
                     let id = part.lcsc.to_ascii_uppercase();
-                    req.ad_library_files.insert(id.clone(), path.to_path_buf());
-                    ids.push(id);
+                    match format {
+                        LibraryFormat::Ad => { req.ad_library_files.insert(id.clone(), path.to_path_buf()); }
+                        LibraryFormat::KiCad => { req.kicad_library_files.insert(id.clone(), path.to_path_buf()); }
+                    }
+                    ids.insert(id);
                 }
             }
         }
@@ -4030,11 +4056,49 @@ impl App {
                 }
             }
             let mut report = export_report(&client, &items, &req);
-            report.notify = false;
             report.failed += errors.len();
+            report.notify = report.failed > 0;
             report.message = format!("{heading}\n{}\n{}", errors.join("\n"), report.message);
             Ok(report)
         }));
+    }
+
+    fn queue_library_sync(&mut self, category: &str, format: Option<LibraryFormat>) {
+        for candidate in LibraryFormat::ALL {
+            if format.is_none_or(|selected| selected == candidate) && self.lib.binding_for(category, candidate).is_some() {
+                self.pending_library_sync.insert((category.to_string(), candidate));
+            }
+        }
+    }
+
+    fn handle_library_action(&mut self, action: LibraryAction) {
+        match action {
+            LibraryAction::Bind(id, format) => {
+                self.bind_path = self.lib.binding_for(&id, format).map(|p| p.display().to_string()).unwrap_or_else(|| {
+                    let name = if id == UNCAT { i18n::t(self.lang, "uncategorized") }
+                        else { self.lib.cat(&id).map(|c| c.name.as_str()).unwrap_or("Library") };
+                    PathBuf::from(&self.out_dir).join(format!("{}.{}", lceda_core::util::sanitize_filename(name), format.extension())).display().to_string()
+                });
+                self.bind_format = format;
+                self.bind_cat = Some(id);
+            }
+            LibraryAction::Unbind(id, format) => {
+                let mut next = self.lib.clone();
+                match next.clear_binding(&id, format) {
+                    Ok(()) => match next.try_save() {
+                        Ok(()) => { self.lib = next; self.pending_library_sync.remove(&(id, format)); }
+                        Err(error) => self.alert(format!("保存库绑定失败: {error}")),
+                    },
+                    Err(error) => self.alert(error),
+                }
+            }
+            LibraryAction::Sync(id, format) => { self.queue_library_sync(&id, format); self.library_sync_after = None; }
+            LibraryAction::SyncAll => {
+                let ids: Vec<_> = self.lib.bound_categories().iter().map(|(c, _)| c.id.clone()).collect();
+                for id in ids { self.queue_library_sync(&id, None); }
+                self.library_sync_after = None;
+            }
+        }
     }
 
     fn page_bom(&mut self, ui: &mut egui::Ui) {
@@ -4195,7 +4259,7 @@ impl App {
                         match next.try_save() {
                             Ok(()) => {
                                 self.lib = next;
-                                self.pending_library_sync.insert(self.fav_cat.clone());
+                                self.queue_library_sync(&self.fav_cat.clone(), None);
                                 self.show_bom_import = false;
                                 self.fav_inside = true;
                                 self.goto(NavPage::Favorites);
@@ -4286,12 +4350,65 @@ impl App {
     }
 }
 
-fn can_merge_library_parts(ad: bool, kicad: bool, parts: impl IntoIterator<Item = (String, bool, bool)>) -> bool {
+enum LibraryAction {
+    Bind(String, LibraryFormat), Unbind(String, LibraryFormat),
+    Sync(String, Option<LibraryFormat>), SyncAll,
+}
+
+fn dropdown_menu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    // Paint the disclosure icon so it works with every Windows/CJK font fallback.
+    let menu = ui.menu_button(format!("{label}    "), contents);
+    let center = menu.response.rect.right_center() - egui::vec2(11.0, 0.0);
+    let color = ui.style().interact(&menu.response).fg_stroke.color;
+    ui.painter().add(egui::Shape::convex_polygon(vec![center + egui::vec2(-3.5, -2.0), center + egui::vec2(3.5, -2.0), center + egui::vec2(0.0, 2.5)], color, egui::Stroke::NONE));
+    menu
+}
+
+fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang, busy: bool) -> Option<LibraryAction> {
+    theme::prepare_menu(ui);
+    let mut action = None;
+    let bound = LibraryFormat::ALL.into_iter().any(|f| library.binding_for(category, f).is_some());
+    if ui.add_enabled(!busy && bound, egui::Button::new(i18n::t(lang, "sync_current_library"))).clicked() {
+        action = Some(LibraryAction::Sync(category.into(), None)); ui.close();
+    }
+    for format in LibraryFormat::ALL {
+        if library.binding_for(category, format).is_some() {
+            let label = format!("{} {}", i18n::t(lang, "sync_format_prefix"), format.name());
+            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                action = Some(LibraryAction::Sync(category.into(), Some(format))); ui.close();
+            }
+        }
+    }
+    ui.separator();
+    ui.menu_button(i18n::t(lang, "bind_library"), |ui| {
+        for format in LibraryFormat::ALL {
+            if ui.add_enabled(!busy, egui::Button::new(format!("{} (.{})", format.name(), format.extension()))).clicked() {
+                action = Some(LibraryAction::Bind(category.into(), format)); ui.close();
+            }
+        }
+    });
+    if bound {
+        ui.menu_button(i18n::t(lang, "unbind_library"), |ui| {
+            for format in LibraryFormat::ALL {
+                if library.binding_for(category, format).is_some() && ui.add_enabled(!busy, egui::Button::new(format.name())).clicked() {
+                    action = Some(LibraryAction::Unbind(category.into(), format)); ui.close();
+                }
+            }
+        });
+    }
+    ui.separator();
+    if ui.add_enabled(!busy && !library.bound_categories().is_empty(), egui::Button::new(i18n::t(lang, "sync_all_libraries"))).clicked() {
+        action = Some(LibraryAction::SyncAll); ui.close();
+    }
+    action
+}
+
+fn can_merge_library_parts(ad: bool, kicad: bool, parts: impl IntoIterator<Item = (String, bool, bool, bool)>) -> bool {
     let mut ad_parts = std::collections::HashSet::new();
     let mut kicad_parts = std::collections::HashSet::new();
-    for (id, has_cad, bound_ad) in parts {
+    for (id, has_cad, bound_ad, bound_kicad) in parts {
         if !has_cad { continue; }
-        if kicad { kicad_parts.insert(id.clone()); }
+        if kicad && !bound_kicad { kicad_parts.insert(id.clone()); }
         if ad && !bound_ad { ad_parts.insert(id); }
         if ad_parts.len() >= 2 || kicad_parts.len() >= 2 { return true; }
     }
@@ -4304,8 +4421,9 @@ fn export_report(client: &LcedaClient, items: &[SearchItem], req: &ExportRequest
     let mut req = req.clone();
     req.merge &= can_merge_library_parts(req.ad, req.kicad, items.iter().map(|item| {
         let id = item.lcsc_id().unwrap_or_else(|| item.name().to_string()).to_ascii_uppercase();
-        let bound = req.ad_library_dir.is_some() || req.ad_library_files.contains_key(&id);
-        (id, item.has_symbol_or_footprint(), bound)
+        let bound = req.ad_library_dir.is_some() || (req.sync_bindings && req.ad_library_files.contains_key(&id));
+        let kicad_bound = req.sync_bindings && req.kicad_library_files.contains_key(&id);
+        (id, item.has_symbol_or_footprint(), bound, kicad_bound)
     }));
     let mut report = JobReport { message: String::new(), exported: Vec::new(), notify: true, failed: 0 };
     let mut fail = 0;
@@ -5257,7 +5375,7 @@ mod layout_tests {
 
     #[test]
     fn merge_is_only_available_for_multiple_distinct_parts_in_the_same_export() {
-        let part = |id: &str, cad, bound| (id.to_string(), cad, bound);
+        let part = |id: &str, cad, bound| (id.to_string(), cad, bound, false);
         assert!(!can_merge_library_parts(true, true, [part("C1", true, false)]));
         assert!(!can_merge_library_parts(true, true, [part("C1", true, false), part("C1", true, false)]));
         assert!(!can_merge_library_parts(true, true, [part("C1", true, false), part("C2", false, false)]));
@@ -5266,6 +5384,8 @@ mod layout_tests {
         assert!(!can_merge_library_parts(true, false, [part("C1", true, true), part("C2", true, true)]));
         assert!(!can_merge_library_parts(true, false, [part("C1", true, false), part("C2", true, true)]));
         assert!(can_merge_library_parts(true, true, [part("C1", true, true), part("C2", true, true)]));
+        assert!(!can_merge_library_parts(true, true, [("C1".into(), true, true, true), ("C2".into(), true, true, true)]));
+        assert!(!can_merge_library_parts(false, true, [("C1".into(), true, false, true), ("C2".into(), true, false, true)]));
     }
 
     #[test]
