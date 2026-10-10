@@ -172,7 +172,7 @@ fn mixed_ad_and_kicad_bindings_sync_only_requested_targets() {
     let rows = export_items(&LcedaClient::new(), &[first.clone(), second.clone()], &req);
     let ad = rows[0].1.as_ref().unwrap(); let ki = rows[1].1.as_ref().unwrap();
     assert_eq!(ad.schlib.as_ref(), Some(&sch)); assert!(ad.kicad_sym.is_none());
-    assert_eq!(ki.kicad_sym.as_ref(), Some(&sym)); assert!(ki.schlib.is_none());
+    assert_eq!(fs::canonicalize(ki.kicad_sym.as_ref().unwrap()).unwrap(), fs::canonicalize(&sym).unwrap()); assert!(ki.schlib.is_none());
     assert!(!dir.0.join(first.export_stem()).join("FNR3015S2R2MT.kicad_sym").exists());
     assert!(!dir.0.join(second.export_stem()).join("Other-MPN.SchLib").exists());
     let before = fs::read(&sym).unwrap();
@@ -209,7 +209,7 @@ fn mixed_bound_and_unbound_kicad_merge_keeps_targets_and_prevents_clobbering() {
     let mut req = ExportRequest { kicad: true, merge: true, merge_name: "combined".into(), out_dir: dir.0.clone(), ..Default::default() };
     req.kicad_library_files.insert("C167747".into(), bound.clone());
     let rows = export_items(&LcedaClient::new(), &[first.clone(), second.clone()], &req);
-    assert_eq!(rows[0].1.as_ref().unwrap().kicad_sym.as_ref(), Some(&bound));
+    assert_eq!(fs::canonicalize(rows[0].1.as_ref().unwrap().kicad_sym.as_ref().unwrap()).unwrap(), fs::canonicalize(&bound).unwrap());
     assert_eq!(rows[1].1.as_ref().unwrap().kicad_sym.as_ref(), Some(&dir.0.join("combined.kicad_sym")));
     assert!(!fs::read_to_string(dir.0.join("combined.kicad_sym")).unwrap().contains("(symbol \"FNR3015S2R2MT\""));
     let before = fs::read(&bound).unwrap();

@@ -32,6 +32,14 @@ pub fn write_library(path: &Path, parts: &[PcbLibPart<'_>]) -> Result<()> {
         return Err(Error::Altium("PcbLib 没有封装".into()));
     }
 
+    write_contents(path, parts)
+}
+
+pub(crate) fn write_empty(path: &Path) -> Result<()> {
+    write_contents(path, &[])
+}
+
+fn write_contents(path: &Path, parts: &[PcbLibPart<'_>]) -> Result<()> {
     let mut used = HashSet::new();
     let keys: Vec<String> = parts
         .iter()

@@ -13,7 +13,7 @@ pub fn write(path: &Path, symbol: &SymbolIr) -> Result<()> {
 /// Read the very same records that are written into SchLib. Preview consumers
 /// must not reconstruct labels, font IDs or coordinates from the source JSON.
 pub fn preview(symbol: &SymbolIr, colors: SchColors) -> Result<super::sch_preview::SchPreview> {
-    let header = file_header_many(&[symbol.name.clone()], colors);
+    let header = file_header_many(&[symbol], &[symbol.name.clone()], colors);
     let data = component_data(symbol, &symbol.name, colors);
     let pin_text = pin_text_data_stream(symbol, colors);
     super::sch_preview::SchPreview::from_streams(&header, &data, pin_text.as_deref())
@@ -31,13 +31,22 @@ pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchCol
     if symbols.is_empty() {
         return Err(Error::Altium("SchLib 没有元件".into()));
     }
+    write_library(path, symbols, colors)
+}
+
+/// Empty seed used only when AD creates a new bound library.
+pub(crate) fn write_empty(path: &Path, colors: SchColors) -> Result<()> {
+    write_library(path, &[], colors)
+}
+
+fn write_library(path: &Path, symbols: &[&SymbolIr], colors: SchColors) -> Result<()> {
     let mut used = HashSet::new();
     let keys: Vec<String> = symbols
         .iter()
         .map(|s| unique_altium_section_key(&s.name, &mut used))
         .collect();
     let mut cfb = CfbDoc::create(path)?;
-    cfb.stream("FileHeader", &file_header_many(&keys, colors))?;
+    cfb.stream("FileHeader", &file_header_many(symbols, &keys, colors))?;
     cfb.stream("Storage", &empty_storage())?;
 
     let key_pairs: Vec<(String, String)> = symbols
@@ -52,7 +61,7 @@ pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchCol
 
     for (sym, key) in symbols.iter().zip(keys.iter()) {
         cfb.storage(key)?;
-        cfb.stream(&format!("{key}/Data"), &component_data(sym, key, colors))?;
+        cfb.stream(&format!("{key}/Data"), &component_data(sym, &sym.name, colors))?;
         if let Some(text) = pin_text_data_stream(sym, colors) {
             cfb.stream(&format!("{key}/PinTextData"), &text)?;
         }
@@ -60,10 +69,10 @@ pub fn write_many_with_colors(path: &Path, symbols: &[&SymbolIr], colors: SchCol
     cfb.finish()
 }
 
-fn file_header_many(names: &[String], colors: SchColors) -> Vec<u8> {
+fn file_header_many(symbols: &[&SymbolIr], keys: &[String], colors: SchColors) -> Vec<u8> {
     let mut w = BinWriter::new();
     let uid = unique_id();
-    let n = names.len();
+    let n = symbols.len();
     let extra = colors.pin_text_fonts();
     let font_count = 1 + extra.len();
     let pin_face = colors.pin_font_name();
@@ -84,13 +93,13 @@ fn file_header_many(names: &[String], colors: SchColors) -> Vec<u8> {
          |AREACOLOR={}|COMPCOUNT={n}",
         colors.background
     ));
-    for (i, name) in names.iter().enumerate() {
-        raw.push_str(&format!("|LIBREF{i}={name}|PARTCOUNT{i}=2"));
+    for (i, symbol) in symbols.iter().enumerate() {
+        raw.push_str(&format!("|LIBREF{i}={}|PARTCOUNT{i}=2|COMPDESCR{i}={}", symbol.name, parameter_text(&symbol.description)));
     }
     w.write_params_raw(&raw);
     w.write_i32(n as i32);
-    for name in names {
-        w.write_string_block(name);
+    for key in keys {
+        w.write_string_block(key);
     }
     w.into_vec()
 }
@@ -127,7 +136,7 @@ fn component_data(symbol: &SymbolIr, libref: &str, colors: SchColors) -> Vec<u8>
     let mut header = vec![
         ("RECORD", "1".into()),
         ("LIBREFERENCE", libref.into()),
-        ("COMPONENTDESCRIPTION", symbol.description.clone()),
+        ("COMPONENTDESCRIPTION", parameter_text(&symbol.description)),
         ("PARTCOUNT", "2".into()),
         ("DISPLAYMODECOUNT", "1".into()),
         ("INDEXINSHEET", "-1".into()),
@@ -255,6 +264,11 @@ fn write_footprint_implementation(w: &mut BinWriter, symbol: &SymbolIr) {
         ]);
     }
     w.write_params(&[("RECORD", "48".into())]);
+}
+
+fn parameter_text(value: &str) -> String {
+    // AD parameter values cannot contain their pipe separator.
+    value.replace('|', ";").replace('\0', "")
 }
 
 fn write_component_label(
@@ -506,6 +520,27 @@ fn dxp_num(mm: f64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_identity_and_description_are_independent_of_ole_storage_key() {
+        let path = std::env::temp_dir().join(format!("lceda-sch-identity-{}.SchLib", unique_id()));
+        let symbol = SymbolIr { name: "STM8S003F3P6TR/SOP20_LONG_MODEL_NAME_C52717".into(),
+            description: "controller | LCSC C52717".into(), designator: "U?".into(), meta: Default::default(),
+            pins: vec![], rects: vec![], polys: vec![], ellipses: vec![] };
+        write(&path, &symbol).unwrap();
+        let library = crate::native_library::inspect(&path, crate::native_library::LibraryFormat::Ad).unwrap();
+        assert_eq!(library.parts[0].name, symbol.name);
+        assert_eq!(library.parts[0].description, "controller ; LCSC C52717");
+        assert_ne!(library.parts[0].key, symbol.name);
+        let mut doc = cfb::open(&path).unwrap();
+        use std::io::Read;
+        let mut data = Vec::new(); doc.open_stream(format!("/{}/Data", library.parts[0].key)).unwrap().read_to_end(&mut data).unwrap();
+        assert!(String::from_utf8_lossy(&data).contains(&format!("|LIBREFERENCE={}|", symbol.name)));
+        let size = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+        let fields = super::super::parameters::decode(&data[4..4 + size]).unwrap();
+        assert_eq!(super::super::parameters::value(&fields, "DESIGNITEMID"), Some(symbol.name.as_str()));
+        drop(doc); std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn pin_text_both_matches_ad_library() {

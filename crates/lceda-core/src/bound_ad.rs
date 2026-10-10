@@ -14,7 +14,7 @@ fn invalid(message: impl AsRef<str>) -> Error {
 fn io_context(action: &str, error: std::io::Error) -> Error {
     Error::msg(format!("绑定 AD 库{action}失败：{error}。请关闭占用该库的 AD/其它程序，并检查目录写入权限后重试。"))
 }
-fn paired(path: &Path) -> Result<PathBuf> {
+pub(crate) fn paired(path: &Path) -> Result<PathBuf> {
     if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("SchLib")) || path.file_stem().is_none() {
         return Err(Error::msg("分类库绑定请选择 .SchLib 文件；封装同步到同名 .PcbLib"));
     }
@@ -460,6 +460,7 @@ fn merge_sch(original: &Path, fresh_path: &Path, staged: &Path, id: &str) -> Res
     let position = if let Some(position) = position { index.names[position] = id.into(); position }
         else { let position = index.names.len(); index.names.push(id.into()); position };
     set(&mut index.header, &format!("PARTCOUNT{position}"), value(&new.header, "PARTCOUNT0").unwrap_or("2"));
+    set(&mut index.header, &format!("COMPDESCR{position}"), value(&new.header, "COMPDESCR0").unwrap_or(""));
     set(&mut index.header, &format!("LIBREF{position}"), id);
     set(&mut index.header, "COMPCOUNT", index.names.len());
     if index.indexed { set(&mut index.header, "WEIGHT", index.names.len()); }
@@ -482,6 +483,25 @@ fn inflate_model(bytes: &[u8]) -> Result<Vec<u8>> {
         .map_err(|_| invalid("PCB 内嵌模型压缩数据无效"))?;
     if value.len() > 64 * 1024 * 1024 { return Err(invalid("PCB 单个模型展开后超过 64 MiB")); }
     Ok(value)
+}
+
+pub(crate) fn verify_editor_footprint(path: &Path, name: &str, step: Option<&[u8]>) -> Result<()> {
+    let mut doc = open(path)?;
+    let index = pcb_index(&mut doc)?;
+    let mapped = index.mappings.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, k)| k.as_str()).unwrap_or(name);
+    let key = index.names.iter().find(|key| key.eq_ignore_ascii_case(mapped))
+        .ok_or_else(|| invalid("AD 保存后的 PcbLib 找不到该封装"))?;
+    if let Some(expected) = step {
+        let data = stream(&mut doc, &format!("/{key}/Data"))?;
+        let mut found = false;
+        for (model, compressed) in &index.models {
+            let id = value(model, "ID").ok_or_else(|| invalid("模型 ID 缺失"))?;
+            if id.is_empty() { return Err(invalid("模型 ID 为空")); }
+            if data.windows(id.len()).any(|bytes| bytes.eq_ignore_ascii_case(id.as_bytes())) && inflate_model(compressed)? == expected { found = true; break; }
+        }
+        if !found { return Err(invalid("AD 保存后的封装未关联到本次 STEP 内嵌模型")); }
+    }
+    Ok(())
 }
 fn model_guid() -> String {
     let mut hex = String::new();
