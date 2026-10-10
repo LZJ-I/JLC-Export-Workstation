@@ -1,6 +1,7 @@
 use super::*;
 use lceda_core::native_library::NativePart;
 use std::{collections::{BTreeMap,BTreeSet},fs};
+use lceda_core::supplement::ResourceKinds;
 
 pub(super) struct NativeImportState {
     info: NativeLibrary,
@@ -11,8 +12,10 @@ pub(super) struct NativeImportState {
     scene: Option<SchPreview>,
     note: Option<String>,
     view: SymbolView,
+    resources: ResourceKinds,
+    resource_current: bool,
 }
-pub(super) struct PreparedImport {info:NativeLibrary,keys:Vec<String>,name:String,library:PathBuf,directory:PathBuf}
+pub(super) struct PreparedImport {info:NativeLibrary,keys:Vec<String>,name:String,library:PathBuf,directory:PathBuf,resources:ResourceKinds,resource_keys:Vec<String>}
 
 impl App {
     pub(super) fn import_native_library(&mut self,format:LibraryFormat){
@@ -31,7 +34,7 @@ impl App {
                     let selected=info.parts.iter().map(|p|p.key.clone()).collect();
                     let focused=info.parts.first().map(|p|p.key.clone());
                     let scene=focused.as_ref().and_then(|key|native_library::preview(&info.source,info.format,key,1).ok());
-                    self.native_import=Some(NativeImportState{info,name,filter:String::new(),selected,focused,scene,note:None,view:SymbolView::default()});
+                    self.native_import=Some(NativeImportState{info,name,filter:String::new(),selected,focused,scene,note:None,view:SymbolView::default(),resources:ResourceKinds::default(),resource_current:false});
                 }
                 Err(e)=>self.alert(e.to_string()),
             }
@@ -47,6 +50,10 @@ impl App {
                             self.lib=next;self.fav_cat=category;self.fav_inside=true;self.library_filter.clear();self.native_import=None;
                             self.log(format!("{} · {} {count} {}",prepared.info.format.name(),i18n::t(self.lang,"native_imported"),i18n::t(self.lang,"components")));
                             let id=self.lib.favs_in(&self.fav_cat).first().map(|p|p.lcsc.clone());if let Some(id)=id{self.select_saved(&id);}
+                            if prepared.resources.any(){
+                                let ids=self.lib.favs_in(&self.fav_cat).into_iter().filter(|p|self.lib.native(&p.lcsc).is_some_and(|r|r.library==prepared.library&&prepared.resource_keys.contains(&r.part.key))).map(|p|p.lcsc.clone()).collect();
+                                self.open_resource_assist(ids,prepared.resources);
+                            }
                         }
                         Err(e)=>{let _=fs::remove_dir_all(prepared.directory);self.alert(e);}
                     }
@@ -75,7 +82,7 @@ impl App {
                 ui.horizontal(|ui|{ui.label(i18n::t(lang,"native_library_name"));ui.add(egui::TextEdit::singleline(&mut state.name).desired_width((ui.available_width()-10.0).max(100.0)));});
                 ui.add_space(8.0);
                 let list_width=(ui.available_width()*0.48).max(230.0);
-                let body_height=(ctx.screen_rect().height()-320.0).clamp(180.0,400.0);
+                let body_height=(ctx.screen_rect().height()-358.0).clamp(160.0,400.0);
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),body_height),egui::Layout::left_to_right(egui::Align::Min),|ui|{
                     ui.set_max_height(body_height);
                     ui.allocate_ui_with_layout(egui::vec2(list_width,body_height),egui::Layout::top_down(egui::Align::Min),|ui|{
@@ -111,7 +118,19 @@ impl App {
                         else{paint_well(ui,rect);ui.painter_at(rect).text(rect.center(),egui::Align2::CENTER_CENTER,state.note.as_deref().unwrap_or(i18n::t(lang,"no_symbol_preview")),egui::FontId::proportional(12.0),theme::secondary());}
                     });
                 });
-                ui.add_space(10.0);ui.separator();
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui|{
+                    ui.label(egui::RichText::new(i18n::t(lang,"resource_after_import")).small().color(theme::secondary()));
+                    ui.checkbox(&mut state.resources.footprint,i18n::t(lang,"resource_footprint"));ui.checkbox(&mut state.resources.model3d,i18n::t(lang,"resource_3d"));
+                    if state.resources.any(){
+                        if state.resource_current&&!state.focused.as_ref().is_some_and(|key|state.selected.contains(key)){state.resource_current=false;}
+                        egui::ComboBox::from_id_salt("import_resource_scope").selected_text(i18n::t(lang,if state.resource_current{"resource_scope_current"}else{"resource_scope_all"})).show_ui(ui,|ui|{
+                            ui.selectable_value(&mut state.resource_current,false,i18n::t(lang,"resource_scope_all"));
+                            ui.add_enabled_ui(state.focused.as_ref().is_some_and(|key|state.selected.contains(key)),|ui|{ui.selectable_value(&mut state.resource_current,true,i18n::t(lang,"resource_scope_current"));});
+                        });
+                    }
+                });
+                ui.add_space(6.0);ui.separator();
                 ui.horizontal(|ui|{
                     ui.label(egui::RichText::new(format!("{} / {}",state.selected.len(),state.info.parts.len())).small().color(theme::secondary()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
@@ -127,6 +146,7 @@ impl App {
         if cancel||!open||ctx.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)){self.native_import=None;return;}
         if start{
             let info=state.info.clone();let keys:Vec<_>=state.selected.iter().cloned().collect();let name=state.name.clone();
+            let resources=state.resources;let resource_keys=if state.resource_current{state.focused.iter().cloned().collect()}else{keys.clone()};
             let Some(profile)=crate::profile_dir()else{self.alert("无法确定器件库目录");return;};
             self.native_save=Some(Promise::spawn_thread("copy-native-library",move||{
                 let parent=profile.join("library_sources");fs::create_dir_all(&parent)?;
@@ -138,37 +158,56 @@ impl App {
                     native_library::copy_companions(&info.source,&library,info.format)?;
                     native_library::inspect(&library,info.format)?;Ok(library)
                 })();
-                match result{Ok(library)=>Ok(PreparedImport{info,keys,name,library,directory}),Err(e)=>{let _=fs::remove_dir_all(directory);Err(e)}}
+                match result{Ok(library)=>Ok(PreparedImport{info,keys,name,library,directory,resources,resource_keys}),Err(e)=>{let _=fs::remove_dir_all(directory);Err(e)}}
             }));
         }
     }
     pub(super) fn queue_native_preview(&mut self){
         let Some(id)=self.native_selected.clone()else{return;};let Some(record)=self.lib.native(&id).cloned()else{return;};
+        let supplements=self.lib.record(&id).map(|r|r.supplements.clone()).unwrap_or_default();let lang=self.lang;
         self.image_tex=None;self.mesh=None;self.mesh_tex=None;self.mesh_note=None;self.symbol=None;self.native_scene=None;self.symbol_note=None;
         self.symbol_view.reset();self.footprint=None;self.footprint_note=Some(i18n::t(self.lang,"native_no_footprint").into());self.footprint_view.reset();
+        self.yaw=0.7;self.pitch=0.55;self.zoom=1.0;
         let unit=self.native_unit;
         self.preview=Some(Promise::spawn_thread("native-preview",move||{
-            let mut data=PreviewData{native_scene:None,lcsc:Some(id),files:Vec::new(),image:None,mesh:None,mesh_note:None,symbol:None,symbol_note:None,footprint:None,footprint_note:Some("此器件未加载配套封装图形；导出保留原库的封装关联。".into())};
+            let mut data=PreviewData{native_scene:None,lcsc:Some(id),files:Vec::new(),image:None,mesh:None,mesh_note:Some(i18n::t(lang,"native_no_model").into()),symbol:None,symbol_note:None,footprint:None,footprint_note:Some(i18n::t(lang,"native_no_footprint").into())};
             match native_library::preview(&record.library,record.format,&record.part.key,unit){Ok(scene)=>data.native_scene=Some(scene),Err(e)=>data.symbol_note=Some(e.to_string())}
+            if let Some(bundle)=supplements.iter().rev().find(|b|b.kinds.footprint){
+                match bundle.path("footprint_ir").and_then(|p|fs::read(p).ok()).and_then(|b|serde_json::from_slice(&b).ok()){
+                    Some(fp)=>{data.footprint=Some(fp);data.footprint_note=None;},None=>data.footprint_note=Some(i18n::t(lang,"resource_missing").into()),
+                }
+            }
+            if let Some(bundle)=supplements.iter().rev().find(|b|b.kinds.model3d){
+                data.mesh=bundle.path("obj").and_then(|p|fs::read(p).ok()).and_then(|b|load_preview_mesh(&b).ok());
+                if data.mesh.is_none(){data.mesh_note=Some(i18n::t(lang,if bundle.path("step").is_some_and(|p|p.is_file()){"resource_step_only"}else{"resource_missing"}).into());}
+            }
             data
         }));
     }
     pub(super) fn native_header(&mut self,ui:&mut egui::Ui){
         let Some(id)=self.native_selected.clone()else{return;};let Some(record)=self.lib.native(&id).cloned()else{return;};let lang=self.lang;
-        let mut export=false;let mut details=false;let mut folder=false;let page=native_lcsc(&record.part);
+        let mut export=false;let mut details=false;let mut folder=false;let mut resources=false;let page=native_lcsc(&record.part);
         theme::card_frame().show(ui,|ui|{
             ui.set_width(ui.available_width());
             ui.add(egui::Label::new(theme::heading(&record.part.name).size(18.0)).truncate()).on_hover_text(&record.part.name);
             ui.add(egui::Label::new(egui::RichText::new(format!("{} · {} · {} {} · {} {}",record.format.name(),record.source.file_name().unwrap_or_default().to_string_lossy(),record.part.pins,i18n::t(lang,"native_pins"),record.part.units,i18n::t(lang,"native_unit"))).small().color(theme::secondary())).truncate());
             if !record.part.description.is_empty(){ui.add(egui::Label::new(&record.part.description).truncate()).on_hover_text(&record.part.description);}
+            if let Some(saved)=self.lib.record(&id).filter(|r|!r.supplements.is_empty()){
+                let footprint=saved.supplements.iter().rev().find(|b|b.kinds.footprint).map(|b|b.supplier_id.as_str()).unwrap_or("—");
+                let model=saved.supplements.iter().rev().find(|b|b.kinds.model3d).map(|b|b.supplier_id.as_str()).unwrap_or("—");
+                let text=format!("{} · {}: {footprint} · 3D: {model}",i18n::t(lang,"resource_preview_source"),i18n::t(lang,"resource_footprint"));
+                ui.add(egui::Label::new(egui::RichText::new(&text).small().color(theme::secondary())).truncate()).on_hover_text(text);
+            }
             ui.add_space(6.0);ui.horizontal_wrapped(|ui|{
                 export=theme::pill_button(ui,i18n::t(lang,"native_export"),!self.busy(),true).clicked();
                 details=theme::pill_button(ui,i18n::t(lang,"details"),true,false).clicked();
+                resources=theme::pill_button(ui,i18n::t(lang,"resource_title"),!self.busy(),false).clicked();
                 folder=theme::pill_button(ui,i18n::t(lang,"native_open_source"),true,false).clicked();
                 if let Some(code)=&page{if theme::pill_button(ui,i18n::t(lang,"open_page"),true,false).clicked(){let _=webbrowser::open(&lceda_core::models::szlcsc_search_url(code));}}
             });
         });
-        if export{self.ask_export_ids(vec![id]);}if details{self.detail_query.clear();self.show_detail=true;}
+        if export{self.ask_export_ids(vec![id.clone()]);}if details{self.detail_query.clear();self.show_detail=true;}
+        if resources{self.open_resource_assist(vec![id],ResourceKinds::default());}
         if folder{if let Some(parent)=record.source.parent(){if !open_folder(parent){self.alert(format!("{}: {}",i18n::t(lang,"error"),parent.display()));}}}
     }
     pub(super) fn native_details(&mut self,ctx:&egui::Context){
@@ -181,7 +220,7 @@ impl App {
             theme::search_field(ui,query,i18n::t(lang,"details_search"),"native_details_query",egui::vec2(ui.available_width(),30.0));
             let mut rows=record.part.properties.clone();rows.insert(i18n::t(lang,"native_footprints").into(),record.part.footprints.join("; "));
             rows.insert(i18n::t(lang,"native_description").into(),record.part.description);
-            let rows:Vec<_>=rows.into_iter().map(|(name,value)|PropRow{group:PropGroup::General,name,value}).collect();
+            let rows:Vec<_>=rows.into_iter().map(|(name,value)|PropRow{group:PropGroup::Extra,name,value}).collect();
             egui::ScrollArea::vertical().max_height((ctx.screen_rect().height()-240.0).clamp(180.0,420.0)).show(ui,|ui|{
                 show_ad_props(ui,lang,&rows,query,None,"native_properties",false);
             });
@@ -194,6 +233,7 @@ impl App {
         fit_window(i18n::t(lang,"native_export"),"native_export",520.0).open(&mut open).show(ctx,|ui|{
             ui.label(theme::heading(format!("{} {}",ids.len(),i18n::t(lang,"components"))));
             ui.add(egui::Label::new(i18n::t(lang,"native_export_hint")).wrap());
+            if ids.iter().any(|id|self.lib.record(id).is_some_and(|r|!r.supplements.is_empty())){ui.checkbox(&mut self.native_export_resources,i18n::t(lang,"resource_export"));}
             ui.add_space(10.0);ui.horizontal(|ui|{
                 ui.add(egui::TextEdit::singleline(&mut self.out_dir).desired_width((ui.available_width()-82.0).max(120.0)));
                 if ui.button(i18n::t(lang,"browse")).clicked(){if let Some(path)=rfd::FileDialog::new().pick_folder(){self.out_dir=path.display().to_string();self.persist_prefs();}}
@@ -210,6 +250,7 @@ impl App {
         if self.busy()||!self.validate_export_target(){return;}
         let library=self.lib.clone();let output=PathBuf::from(self.out_dir.trim());let mut req=self.batch_opts.request(output.clone());self.apply_export_opts(&mut req);
         req.merge=self.batch_merge;
+        let include_resources=self.native_export_resources;
         self.job=Some(Promise::spawn_thread("export-native",move||{
             let root=output.join(format!("Library-{}",lceda_core::util::unique_id()));fs::create_dir_all(&output)?;fs::create_dir(&root)?;
             let mut groups:BTreeMap<(LibraryFormat,PathBuf),Vec<String>>=BTreeMap::new();let mut online=Vec::new();
@@ -219,7 +260,19 @@ impl App {
                 let sub=root.join(format!("{}-{}",format.name(),i+1));fs::create_dir(&sub)?;
                 let destination=sub.join(source.file_name().ok_or_else(||lceda_core::Error::msg("库文件名称无效"))?);
                 match native_library::export_subset(&source,format,&keys,&destination).and_then(|_|native_library::copy_companions(&source,&destination,format)){
-                    Ok(())=>messages.push(format!("OK {} · {} · {}",format.name(),keys.len(),destination.display())),
+                    Ok(())=>{
+                        messages.push(format!("OK {} · {} · {}",format.name(),keys.len(),destination.display()));
+                        if include_resources {
+                            for(id,record)in &library.records{
+                                if !record.native.as_ref().is_some_and(|r|r.library==source&&keys.contains(&r.part.key)){continue;}
+                                for(i,bundle)in record.supplements.iter().enumerate(){
+                                    let parent=sub.join("Resources");fs::create_dir_all(&parent)?;
+                                    let target=parent.join(format!("{id}-{}",i+1));
+                                    match lceda_core::supplement::export_bundle(bundle,&target){Ok(())=>messages.push(format!("OK Resources {} · {}",bundle.native_name,target.display())),Err(e)=>{failed+=1;messages.push(format!("FAIL Resources {}: {e}",bundle.native_name));}}
+                                }
+                            }
+                        }
+                    },
                     Err(e)=>{failed+=keys.len();messages.push(format!("FAIL {}: {e}",source.display()));let _=fs::remove_dir_all(sub);}
                 }
             }
@@ -232,7 +285,7 @@ impl App {
         }));
     }
 }
-fn native_lcsc(part:&NativePart)->Option<String>{
+pub(super) fn native_lcsc(part:&NativePart)->Option<String>{
     part.properties.iter().filter(|(k,_)|["LCSC","SUPPLIERPART","LCSC PART #","LCSC PART"].contains(&k.to_ascii_uppercase().as_str()))
         .map(|(_,v)|v.trim().to_ascii_uppercase()).find(|s|lceda_core::models::looks_like_lcsc_token(s))
 }

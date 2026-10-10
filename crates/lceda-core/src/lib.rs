@@ -17,6 +17,7 @@ pub mod managed_ad;
 pub mod models;
 pub mod native_library;
 pub mod parallel;
+pub mod supplement;
 pub mod pads;
 pub mod util;
 

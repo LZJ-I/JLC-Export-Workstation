@@ -71,7 +71,7 @@ Exporting Altium / KiCad / PADS also keeps EasyEDA JSON for inspection.
 
 ### Import BOM into a library
 
-Use **Library → Import → Import BOM…** for CSV / TSV / Excel (xlsx, xls, xlsb, ods). Select the destination library, match, and review manufacturer and package. Exact-ID confirmation preserves manual substitutions and only confirms candidates matching the original C-number. MPN-only rows require manual selection. All included rows must be confirmed and valid before **Add to this library**; unwanted rows can be excluded. Quantities and references are retained. Matching supports progress, cancellation and retry.
+Use **Library → Import → Import BOM…** for CSV / TSV / Excel (xlsx, xls, xlsb, ods). Select the destination library, match, and review manufacturer and package. Exact-ID confirmation preserves manual substitutions and only confirms candidates matching the original C-number. MPN-only rows require manual selection. All included rows must be confirmed and valid before **Add to this library**; unwanted rows can be excluded. Quantities and references are retained. Matching uses up to four workers, deduplicates queries, retains table order, and supports progress, cancellation and retry. Cancellation waits for in-flight requests and keeps completed results.
 
 Library retains existing favorites and categories. The additional local search, notes and asset-management UI has been removed; existing favorites, settings and internal preview caches remain. LCSC remains the online search provider.
 
@@ -81,7 +81,17 @@ Choose `.SchLib` or `.kicad_sym` from **Library → Import**. The review dialog 
 
 Names, descriptions, properties, footprint links and all units are retained. Imported parts support unit selection, details and filtering. Internal snapshots leave source files unchanged; importing the same source path again updates existing records. Native AD Chinese names, mixed encodings and storage mappings are supported. KiCad inheritance dependencies are preserved.
 
+Import does not search, download, or change any original symbols, footprints or 3D links. **Optional resources after import → Footprint / 3D model** are unchecked by default. Choose all imported parts or the previewed part. Opting in opens the resource dialog after import; candidates must still be searched and confirmed before downloading.
+
 **Export native format…** and the library's selected-part / current-library exports retain original formats and available same-stem `.PcbLib`, `.pretty` and `.3dshapes` companions. This version does not convert imported formats, edit native symbols or preview companion footprint / 3D geometry. Imported parts use separate local identities, so a symbol named C2040 is never mistaken for an online part. Binding synchronization updates separately added LCSC parts in the category; reimport the source to refresh native parts.
+
+### Optional footprint and 3D resources
+
+Use **Resources → Supplement current part / Supplement entire library**, the part card, or its context menu. Select all or individual parts, choose footprints, 3D, or both, then search by complete model / C-number and review source, manufacturer, package and preview. **Confirm unique exact matches** requires an explicit action; searches never confirm or download automatically, and batch retries retain other confirmed choices.
+
+Resources are saved separately from original `.PcbLib` / `.pretty` files. Original footprint alternatives, current choices, pin maps, model transforms and existing projects remain unchanged. New footprints have unique names. Model-only downloads save STEP and available OBJ previews without creating a footprint. Missing STEP downloads report failure while retaining existing resources. Searches and downloads use up to four workers with separate output directories. Native part previews show supplementary resources and their sources.
+
+Native export offers **Include supplementary resources (retain original links)**. A `Resources/` directory contains independent footprints, models and source manifests. Downloading both resources embeds STEP in the new AD footprint and links the new KiCad footprint to the accompanying STEP; original symbols retain their original assignments. Replacing assignments remains an explicit EDA operation after checking compatibility. Resource search uses LCSC parts, rather than a general multi-provider footprint / 3D search.
 
 ### Library exports and binding synchronization
 

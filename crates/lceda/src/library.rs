@@ -38,6 +38,7 @@ pub struct SavedPart {
 #[derive(Debug, Clone, Default)]
 pub struct PartRecord {
     pub native: Option<NativeRecord>,
+    pub supplements: Vec<lceda_core::supplement::ResourceBundle>,
     pub notes: String,
     pub package: String,
     pub parameters: BTreeMap<String, String>,
@@ -167,6 +168,13 @@ impl Library {
 
     pub fn native(&self,id:&str)->Option<&NativeRecord>{self.records.get(id)?.native.as_ref()}
 
+    pub fn add_supplement(&mut self, id: &str, bundle: lceda_core::supplement::ResourceBundle) -> Result<(), String> {
+        let record = self.records.get_mut(id).ok_or("补全器件已从器件库移除")?;
+        let native = record.native.as_ref().ok_or("仅支持给导入的原库器件补充资源")?;
+        if native.part.key != bundle.native_key || native.format != bundle.format { return Err("补充资源与原器件不一致".into()); }
+        record.supplements.push(bundle); record.updated_at = timestamp(); Ok(())
+    }
+
     /// Keep external-library identities separate from supplier IDs, including
     /// symbols literally named C2040. Reimporting the same source updates rows.
     pub fn add_native_parts(&mut self,info:&NativeLibrary,keys:&[String],name:&str,snapshot:&Path)->Result<(String,usize),String>{
@@ -271,6 +279,7 @@ impl Library {
                 });
                 lib.records.insert(lcsc.clone(), PartRecord {
                     native: data.get("native").and_then(|v|serde_json::from_value(v.clone()).ok()),
+                    supplements: data.get("supplements").and_then(|v|serde_json::from_value(v.clone()).ok()).unwrap_or_default(),
                     notes: data.get("notes").and_then(Value::as_str).unwrap_or("").into(),
                     package: data.get("package").and_then(Value::as_str).unwrap_or("").into(),
                     parameters: data.get("parameters").and_then(Value::as_object).map(|o| o.iter()
@@ -290,6 +299,7 @@ impl Library {
             let item = record.snapshot.as_ref();
             (lcsc, json!({
                 "native": record.native,
+                "supplements": record.supplements,
                 "notes": record.notes,
                 "package": record.package,
                 "parameters": record.parameters,
@@ -665,6 +675,22 @@ mod tests {
         let (same,_)=restored.add_native_parts(&info,&["C2040".into()],"UserLibrary",Path::new("/tmp/new-copy/UserLibrary.SchLib")).unwrap();
         assert_eq!(same,cat);assert_eq!(restored.favs.len(),2);assert_eq!(restored.native(&id).unwrap().library,Path::new("/tmp/new-copy/UserLibrary.SchLib"));
         assert!(restored.add_native_parts(&info,&["Missing".into()],"Invalid",Path::new("/tmp/none")).is_err());assert_eq!(restored.cats.len(),2);
+    }
+
+    #[test]
+    fn supplemental_resources_roundtrip_without_touching_shared_native_links(){
+        use lceda_core::supplement::{ResourceBundle,ResourceKinds};
+        let make=|key:&str|NativePart{key:key.into(),name:key.into(),description:String::new(),properties:BTreeMap::new(),footprints:vec!["SharedFootprint".into()],pins:2,units:1};
+        let info=NativeLibrary{source:PathBuf::from("/tmp/Shared.SchLib"),format:LibraryFormat::Ad,parts:vec![make("A"),make("B")],content_hash:1};
+        let mut library=Library::default();let(cat,_)=library.add_native_parts(&info,&["A".into(),"B".into()],"Shared",Path::new("/tmp/snapshot/Shared.SchLib")).unwrap();
+        let ids:Vec<_>=library.favs_in(&cat).iter().map(|p|p.lcsc.clone()).collect();
+        let bundle=ResourceBundle{directory:PathBuf::from("/tmp/resources/separate"),native_key:"A".into(),native_name:"A".into(),original_footprints:vec!["SharedFootprint".into()],supplier_id:"C25804".into(),supplier_name:"Resistor".into(),manufacturer:String::new(),format:LibraryFormat::Ad,kinds:ResourceKinds{footprint:true,model3d:false},files:BTreeMap::new(),hashes:BTreeMap::new()};
+        assert!(library.add_supplement(&ids[1],bundle.clone()).is_err());library.add_supplement(&ids[0],bundle).unwrap();
+        let mut restored=Library::from_json(&library.to_json());
+        assert_eq!(restored.record(&ids[0]).unwrap().supplements.len(),1);assert!(restored.record(&ids[1]).unwrap().supplements.is_empty());
+        for id in &ids{assert_eq!(restored.native(id).unwrap().part.footprints,["SharedFootprint"]);assert!(restored.cached_item(id).is_none());}
+        restored.add_native_parts(&info,&["A".into(),"B".into()],"Shared",Path::new("/tmp/new/Shared.SchLib")).unwrap();
+        assert_eq!(restored.record(&ids[0]).unwrap().supplements.len(),1);assert_eq!(restored.native(&ids[0]).unwrap().part.footprints,["SharedFootprint"]);
     }
 
     #[test]

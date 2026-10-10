@@ -31,6 +31,9 @@ use lceda_core::altium::sch_preview::SchPreview;
 #[path = "native_import.rs"]
 mod native_import;
 use native_import::{NativeImportState,PreparedImport};
+#[path = "resource_assist.rs"]
+mod resource_assist;
+use resource_assist::ResourceAssist;
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
 struct JobReport {
@@ -233,6 +236,7 @@ pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
 }
 
 struct App {
+    resource_assist: Option<ResourceAssist>,
     native_import: Option<NativeImportState>,
     native_load: Option<Promise<lceda_core::Result<NativeLibrary>>>,
     native_save: Option<Promise<lceda_core::Result<PreparedImport>>>,
@@ -240,6 +244,7 @@ struct App {
     native_scene: Option<SchPreview>,
     native_unit: usize,
     native_export: Option<Vec<String>>,
+    native_export_resources: bool,
     library_filter: String,
     lang: Lang,
     lang_pinned: bool,
@@ -366,7 +371,7 @@ impl App {
         let prefs = crate::prefs::load();
         let out_dir = prefs.out_dir.clone().unwrap_or(out_dir);
         let mut app = Self {
-            native_import:None,native_load:None,native_save:None,native_selected:None,native_scene:None,native_unit:1,native_export:None,library_filter:String::new(),
+            resource_assist:None,native_import:None,native_load:None,native_save:None,native_selected:None,native_scene:None,native_unit:1,native_export:None,native_export_resources:true,library_filter:String::new(),
             lang,
             lang_pinned: prefs.lang.is_some(),
             show_bom_import: false,
@@ -520,6 +525,11 @@ impl App {
                 app.load_native_library(path,format);
             }
             if let Ok(id)=env::var("LCEDA_NATIVE_SELECT"){app.select_saved(&id);}
+            if let Ok(scope)=env::var("LCEDA_RESOURCE_ASSIST"){
+                let ids=if scope=="all"{app.lib.favs.iter().filter(|p|app.lib.native(&p.lcsc).is_some()).map(|p|p.lcsc.clone()).collect()}else{app.native_selected.iter().cloned().collect()};
+                let choice=env::var("LCEDA_RESOURCE_KINDS").unwrap_or_default();
+                app.open_resource_assist(ids,lceda_core::supplement::ResourceKinds{footprint:choice=="footprint"||choice=="both",model3d:choice=="3d"||choice=="both"});
+            }
             if let Ok(path) = env::var("LCEDA_BOM_FILE") {
                 if let Ok(mut doc) = BomDocument::load(Path::new(&path)) {
                     for row in &mut doc.rows {
@@ -2013,7 +2023,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some() || self.native_load.is_some() || self.native_save.is_some()
+        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some() || self.native_load.is_some() || self.native_save.is_some() || self.resource_assist.as_ref().is_some_and(ResourceAssist::is_busy)
     }
 
     fn selected_item(&self) -> Option<&SearchItem> {
@@ -2155,6 +2165,7 @@ impl eframe::App for App {
         self.bom_import_dialog(ctx);
         self.native_import_dialog(ctx);
         self.native_export_dialog(ctx);
+        self.resource_assist_dialog(ctx);
         self.bind_library_dialog(ctx);
         self.show_welcome(ctx);
         self.show_detail(ctx);
@@ -2184,6 +2195,7 @@ impl eframe::App for App {
 impl App {
     fn poll_jobs(&mut self, ctx: &egui::Context) {
         self.poll_native_jobs(ctx);
+        self.poll_resource_assist(ctx);
         if !self.busy() && !self.pending_library_sync.is_empty() && self.library_sync_after.is_none_or(|when| Instant::now() >= when) { self.start_library_sync(); }
         if self.bom_job.as_ref().is_some_and(|p| p.ready().is_some()) {
             match self.bom_job.take().unwrap().block_and_take() {
@@ -2535,6 +2547,7 @@ impl App {
         let mut import_bom = false;
         let mut import_format = None;
         let mut library_action = None;
+        let mut resource_ids = None;
         let cats: Vec<(String, String, usize)> = self
             .lib
             .cats
@@ -2589,6 +2602,12 @@ impl App {
                 dropdown_menu(ui, i18n::t(lang, "library_sync_menu"), |ui| {
                     library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy());
                 });
+                dropdown_menu(ui,i18n::t(lang,"resource_menu"),|ui|{
+                    theme::prepare_menu(ui);
+                    if ui.add_enabled(!self.busy()&&selected_lcsc.as_ref().is_some_and(|id|self.lib.native(id).is_some()),egui::Button::new(i18n::t(lang,"resource_current"))).clicked(){resource_ids=selected_lcsc.clone().map(|id|vec![id]);ui.close();}
+                    let ids:Vec<_>=parts.iter().filter(|p|self.lib.native(&p.0).is_some()).map(|p|p.0.clone()).collect();
+                    if ui.add_enabled(!self.busy()&&!ids.is_empty(),egui::Button::new(i18n::t(lang,"resource_library"))).clicked(){resource_ids=Some(ids);ui.close();}
+                });
             });
             ui.add_space(8.0);
             if self.fav_inside {
@@ -2629,6 +2648,7 @@ impl App {
                         }
                         resp.context_menu(|ui| {
                             theme::prepare_menu(ui);
+                            if self.lib.native(lcsc).is_some()&&ui.add_enabled(!self.busy(),egui::Button::new(i18n::t(lang,"resource_current"))).clicked(){resource_ids=Some(vec![lcsc.clone()]);ui.close();}
                             if ui
                                 .add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "export_default")))
                                 .clicked()
@@ -2713,6 +2733,7 @@ impl App {
         if let Some(action) = library_action { self.handle_library_action(action); }
         if import_bom { self.import_bom(); }
         if let Some(format)=import_format{self.import_native_library(format);}
+        if let Some(ids)=resource_ids{self.open_resource_assist(ids,Default::default());}
         if let Some(id) = select_cat {
             self.fav_cat = id;
         }
@@ -3049,7 +3070,7 @@ impl App {
             );
             self.mesh_tex = Some(tex);
         } else {
-            let msg = if self.selected_item().map(|i| i.model_uuid.is_some()).unwrap_or(false) {
+            let msg = if self.native_selected.is_some() || self.selected_item().map(|i| i.model_uuid.is_some()).unwrap_or(false) {
                 self.mesh_note
                     .as_deref()
                     .unwrap_or(i18n::t(self.lang, "mesh_fail"))
@@ -3504,6 +3525,7 @@ impl App {
             || self.native_load.is_some()
             || self.native_save.is_some()
             || self.native_export.is_some()
+            || self.resource_assist.is_some()
     }
 
     fn queue_preview(&mut self) {
@@ -3904,6 +3926,7 @@ impl App {
             && self.job.is_none()
             && self.native_load.is_none()
             && self.native_save.is_none()
+            && self.resource_assist.as_ref().is_none_or(|s|!s.is_busy())
             && self.desc_preview_job.is_none();
         let preview_ready =
             self.mesh.is_some() || self.mesh_note.is_some() || self.image_tex.is_some();
