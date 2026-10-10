@@ -48,6 +48,8 @@ pub struct ExportRequest {
     pub bound_only: bool,
     /// False exports independent copies while retaining binding collision protection.
     pub sync_bindings: bool,
+    /// AD owns bound-library edits when connected; never fall back after errors.
+    pub ad_bridge: Option<crate::ad_bridge::Bridge>,
 }
 
 impl Default for ExportRequest {
@@ -74,6 +76,7 @@ impl Default for ExportRequest {
             kicad_library_files: BTreeMap::new(),
             bound_only: false,
             sync_bindings: true,
+            ad_bridge: None,
         }
     }
 }
@@ -253,7 +256,19 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
         };
         let bound = item.lcsc_id().filter(|_| req.sync_bindings).and_then(|id| req.ad_library_files.get(&id));
         if let Some(path) = bound {
-            let (sch, pcb) = crate::bound_ad::update(path, entry(), req.sch_colors)?;
+            let (sch, pcb) = if let Some(bridge) = &req.ad_bridge {
+                let synced = bridge.update(path, entry(), req.sch_colors)?;
+                let label = if synced.component.is_empty() { item.lcsc_id().unwrap_or_default() } else { synced.component.clone() };
+                out.ad_sync = Some(format!("AD 已核验 · {label}{}{}",
+                    if synced.existing && !synced.component.is_empty() { "（已有符号保留）" } else { "" },
+                    if synced.footprint_existing && footprint_ir.is_some() { "（已有封装及 3D 保留）" } else { "" }));
+                (synced.schlib, synced.pcblib)
+            } else {
+                crate::ad_bridge::require_editor_closed()?;
+                let paths = crate::bound_ad::update(path, entry(), req.sch_colors)?;
+                out.ad_sync = Some(format!("库文件已写入 · {}（未在 AD 内加载验证）", item.lcsc_id().unwrap_or_default()));
+                paths
+            };
             out.schlib = sch.is_file().then_some(sch);
             out.pcblib = pcb.is_file().then_some(pcb);
         } else if let Some(dir) = &req.ad_library_dir {

@@ -162,6 +162,7 @@ pub struct DownloadPaths {
     pub footprint_json: Option<PathBuf>,
     pub schlib: Option<PathBuf>,
     pub pcblib: Option<PathBuf>,
+    pub ad_sync: Option<String>,
     pub kicad_sym: Option<PathBuf>,
     pub kicad_mod: Option<PathBuf>,
     pub pads_c: Option<PathBuf>,

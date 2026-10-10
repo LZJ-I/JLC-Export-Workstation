@@ -3,6 +3,7 @@
 //! 搜索、拉取 STEP/OBJ、解析 EasyEDA 源，并在进程内写出 Altium / KiCad / PADS 库。
 
 pub mod altium;
+pub mod ad_bridge;
 pub mod bound_ad;
 pub mod bound_kicad;
 pub mod client;

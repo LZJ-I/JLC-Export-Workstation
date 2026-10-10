@@ -310,6 +310,7 @@ fn build_req(
         kicad_library_files: Default::default(),
         bound_only: false,
         sync_bindings: true,
+        ad_bridge: None,
     };
     if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
     {

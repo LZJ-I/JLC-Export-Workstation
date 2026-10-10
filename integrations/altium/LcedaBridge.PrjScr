@@ -1,0 +1,9 @@
+[Design]
+Version=1.0
+HierarchyMode=0
+
+[Document1]
+DocumentPath=LcedaBridge.pas
+
+[Document2]
+DocumentPath=LcedaBridge.dfm
