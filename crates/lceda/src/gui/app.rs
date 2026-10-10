@@ -26,6 +26,11 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use lceda_core::native_library::{self,NativeLibrary};
+use lceda_core::altium::sch_preview::SchPreview;
+#[path = "native_import.rs"]
+mod native_import;
+use native_import::{NativeImportState,PreparedImport};
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
 struct JobReport {
@@ -174,6 +179,7 @@ impl BatchOpts {
 }
 
 struct PreviewData {
+    native_scene: Option<SchPreview>,
     lcsc: Option<String>,
     files: Vec<(String, PathBuf)>,
     image: Option<Vec<u8>>,
@@ -227,6 +233,14 @@ pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
 }
 
 struct App {
+    native_import: Option<NativeImportState>,
+    native_load: Option<Promise<lceda_core::Result<NativeLibrary>>>,
+    native_save: Option<Promise<lceda_core::Result<PreparedImport>>>,
+    native_selected: Option<String>,
+    native_scene: Option<SchPreview>,
+    native_unit: usize,
+    native_export: Option<Vec<String>>,
+    library_filter: String,
     lang: Lang,
     lang_pinned: bool,
     show_bom_import: bool,
@@ -352,6 +366,7 @@ impl App {
         let prefs = crate::prefs::load();
         let out_dir = prefs.out_dir.clone().unwrap_or(out_dir);
         let mut app = Self {
+            native_import:None,native_load:None,native_save:None,native_selected:None,native_scene:None,native_unit:1,native_export:None,library_filter:String::new(),
             lang,
             lang_pinned: prefs.lang.is_some(),
             show_bom_import: false,
@@ -499,6 +514,12 @@ impl App {
             desc_preview_note: None,
         };
         if skip_update {
+            if let Ok(path)=env::var("LCEDA_NATIVE_FILE"){
+                let path=PathBuf::from(path);
+                let format=if path.extension().is_some_and(|s|s.eq_ignore_ascii_case("SchLib")){LibraryFormat::Ad}else{LibraryFormat::KiCad};
+                app.load_native_library(path,format);
+            }
+            if let Ok(id)=env::var("LCEDA_NATIVE_SELECT"){app.select_saved(&id);}
             if let Ok(path) = env::var("LCEDA_BOM_FILE") {
                 if let Ok(mut doc) = BomDocument::load(Path::new(&path)) {
                     for row in &mut doc.rows {
@@ -643,6 +664,7 @@ impl App {
     }
 
     fn show_detail(&mut self, ctx: &egui::Context) {
+        if self.native_selected.is_some() { self.native_details(ctx); return; }
         if !self.show_detail {
             return;
         }
@@ -1991,7 +2013,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some()
+        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some() || self.native_load.is_some() || self.native_save.is_some()
     }
 
     fn selected_item(&self) -> Option<&SearchItem> {
@@ -2131,6 +2153,8 @@ impl eframe::App for App {
             });
         self.show_modal_scrim(ctx);
         self.bom_import_dialog(ctx);
+        self.native_import_dialog(ctx);
+        self.native_export_dialog(ctx);
         self.bind_library_dialog(ctx);
         self.show_welcome(ctx);
         self.show_detail(ctx);
@@ -2159,6 +2183,7 @@ impl eframe::App for App {
 
 impl App {
     fn poll_jobs(&mut self, ctx: &egui::Context) {
+        self.poll_native_jobs(ctx);
         if !self.busy() && !self.pending_library_sync.is_empty() && self.library_sync_after.is_none_or(|when| Instant::now() >= when) { self.start_library_sync(); }
         if self.bom_job.as_ref().is_some_and(|p| p.ready().is_some()) {
             match self.bom_job.take().unwrap().block_and_take() {
@@ -2224,6 +2249,7 @@ impl App {
                 self.mesh = data.mesh.map(Arc::new);
                 self.mesh_note = data.mesh_note;
                 self.symbol = data.symbol;
+                self.native_scene = data.native_scene;
                 self.symbol_note = data.symbol_note;
                 self.footprint = data.footprint;
                 self.footprint_note = data.footprint_note;
@@ -2507,6 +2533,7 @@ impl App {
         let mut open_rename = false;
         let mut delete = false;
         let mut import_bom = false;
+        let mut import_format = None;
         let mut library_action = None;
         let cats: Vec<(String, String, usize)> = self
             .lib
@@ -2527,7 +2554,7 @@ impl App {
             .into_iter()
             .map(|p| (p.lcsc.clone(), p.name.clone(), p.manufacturer.clone()))
             .collect();
-        let selected_lcsc = self.detail.as_ref().and_then(|d| d.lcsc_id());
+        let selected_lcsc = self.native_selected.clone().or_else(||self.detail.as_ref().and_then(|d| d.lcsc_id()));
         let cat_title = cats
             .iter()
             .find(|(id, _, _)| id == &self.fav_cat)
@@ -2537,7 +2564,14 @@ impl App {
         theme::card_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
             ui.horizontal_wrapped(|ui| {
-                import_bom = theme::pill_button(ui, i18n::t(lang, "import_bom"), !self.busy(), true).clicked();
+                dropdown_menu(ui,i18n::t(lang,"library_import_menu"),|ui|{
+                    theme::prepare_menu(ui);
+                    if ui.add_enabled(!self.busy(),egui::Button::new(i18n::t(lang,"import_bom"))).clicked(){import_bom=true;ui.close();}
+                    for format in LibraryFormat::ALL {
+                        let text=i18n::t(lang,if format==LibraryFormat::Ad{"import_ad_library"}else{"import_kicad_library"});
+                        if ui.add_enabled(!self.busy(),egui::Button::new(text)).clicked(){import_format=Some(format);ui.close();}
+                    }
+                });
                 if ui.button(i18n::t(lang, "new_cat")).clicked() { open_new = true; }
             });
             ui.add_space(6.0);
@@ -2575,14 +2609,21 @@ impl App {
                     ui.label(egui::RichText::new(i18n::t(lang, "unbound_library")).small().color(theme::secondary()));
                 }
                 ui.add_space(8.0);
+                theme::search_field(ui,&mut self.library_filter,i18n::t(lang,"native_filter"),"library_part_filter",egui::vec2(ui.available_width(),30.0));
+                ui.add_space(6.0);
                 if parts.is_empty() {
                     ui.label(egui::RichText::new(i18n::t(lang, "fav_empty")).color(theme::secondary()));
                 }
                 egui::ScrollArea::vertical().id_salt("fav_list").show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     for (lcsc, name, mfr) in &parts {
+                        let native=self.lib.native(lcsc);
+                        let subtitle=if let Some(record)=native{format!("{} · {} {} · {}",record.format.name(),record.part.pins,i18n::t(lang,"native_pins"),record.part.description)}else{format!("{lcsc}  {mfr}")};
+                        let filter=self.library_filter.trim().to_lowercase();
+                        let footprints=native.map(|record|record.part.footprints.join(" ")).unwrap_or_default();
+                        if !filter.is_empty()&&!format!("{name} {subtitle} {mfr} {footprints}").to_lowercase().contains(&filter){continue;}
                         let selected = selected_lcsc.as_deref() == Some(lcsc.as_str());
-                        let resp = paint_part_row(ui, name, &format!("{lcsc}  {mfr}"), selected);
+                        let resp = paint_part_row(ui, name, &subtitle, selected);
                         if resp.clicked() {
                             pick = Some(lcsc.clone());
                         }
@@ -2671,11 +2712,13 @@ impl App {
         });
         if let Some(action) = library_action { self.handle_library_action(action); }
         if import_bom { self.import_bom(); }
+        if let Some(format)=import_format{self.import_native_library(format);}
         if let Some(id) = select_cat {
             self.fav_cat = id;
         }
         if let Some(id) = enter_cat {
             self.fav_cat = id;
+            self.library_filter.clear();
             self.fav_inside = true;
         }
         if leave {
@@ -2809,6 +2852,7 @@ impl App {
         ui.add_space(GAP);
         let area = ui.available_rect_before_wrap();
         let previous = self.preview_mode;
+        let previous_unit=self.native_unit;
         card_shell(ui, area, "part_preview", |ui| {
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("preview_mode")
@@ -2819,6 +2863,11 @@ impl App {
                             ui.selectable_value(&mut self.preview_mode, mode, i18n::t(self.lang, mode.i18n_key()));
                         }
                     });
+                if let Some(record)=self.native_selected.as_ref().and_then(|id|self.lib.native(id)).filter(|r|r.part.units>1){
+                    egui::ComboBox::from_id_salt("native_unit").selected_text(format!("{} {}/{}",i18n::t(self.lang,"native_unit"),self.native_unit,record.part.units)).show_ui(ui,|ui|{
+                        for unit in 1..=record.part.units{ui.selectable_value(&mut self.native_unit,unit,format!("{} {unit}",i18n::t(self.lang,"native_unit")));}
+                    });
+                }
             });
             ui.add_space(6.0);
             match self.preview_mode {
@@ -2828,10 +2877,12 @@ impl App {
             }
         });
         if previous != self.preview_mode { self.persist_prefs(); }
+        if previous_unit!=self.native_unit{self.queue_native_preview();}
         ui.advance_cursor_after_rect(area);
     }
 
     fn part_header(&mut self, ui: &mut egui::Ui) {
+        if self.native_selected.is_some(){self.native_header(ui);return;}
         let item = self.selected_item().cloned();
         let lang = self.lang;
         let enabled = !self.busy() && item.is_some();
@@ -2902,7 +2953,9 @@ impl App {
     fn schematic_canvas(&mut self, ui: &mut egui::Ui) {
         let (well, response) = ui.allocate_exact_size(ui.available_size().max(egui::vec2(1.0, 1.0)), egui::Sense::hover());
         response.on_hover_text(i18n::t(self.lang, "schematic_gestures"));
-        if let Some(symbol) = &self.symbol {
+        if let Some(scene)=&self.native_scene{
+            self.symbol_view.show_native(ui,well,scene,self.dialog_open());
+        } else if let Some(symbol) = &self.symbol {
             self.symbol_view.show(ui, well, symbol, self.resolved_sch_colors(), self.dialog_open());
         } else {
             paint_well(ui, well);
@@ -3049,6 +3102,9 @@ impl App {
     }
 
     fn select_saved(&mut self, lcsc: &str) {
+        if self.lib.native(lcsc).is_some(){
+            self.native_selected=Some(lcsc.to_string());self.detail=None;self.resolve=None;self.native_unit=1;self.queue_native_preview();return;
+        }
         let normalized = if lceda_core::models::looks_like_lcsc_token(lcsc) { lcsc.to_ascii_uppercase() } else { lcsc.to_string() };
         let lcsc = normalized.as_str();
         if let Some(item) = self.cache.get(lcsc).cloned().or_else(|| self.lib.cached_item(lcsc)) {
@@ -3069,6 +3125,7 @@ impl App {
     }
 
     fn ask_export_selected(&mut self) {
+        if let Some(id)=self.native_selected.clone(){self.ask_export_ids(vec![id]);return;}
         if self.selected_item().is_none() {
             self.alert(i18n::t(self.lang, "select_first"));
             return;
@@ -3082,6 +3139,7 @@ impl App {
             self.alert(i18n::t(self.lang, "batch_none"));
             return;
         }
+        if ids.iter().any(|id|self.lib.native(id).is_some()){self.native_export=Some(ids);return;}
         self.export_ids_pending = Some(ids);
         self.show_batch = true;
     }
@@ -3442,9 +3500,14 @@ impl App {
             || self.confirm_clear_queue
             || self.show_bom_import
             || self.bind_cat.is_some()
+            || self.native_import.is_some()
+            || self.native_load.is_some()
+            || self.native_save.is_some()
+            || self.native_export.is_some()
     }
 
     fn queue_preview(&mut self) {
+        self.native_selected=None;self.native_scene=None;
         let Some(item) = self.selected_item().cloned() else { return; };
         self.image_tex = None;
         self.mesh = None;
@@ -3464,7 +3527,7 @@ impl App {
         let desc_fields = self.desc_fields.clone();
         self.preview = Some(Promise::spawn_thread("preview", move || {
             let client = LcedaClient::new();
-            let mut data = PreviewData { lcsc: id.clone(), files: Vec::new(), image: None, mesh: None, mesh_note: None, symbol: None, symbol_note: None, footprint: None, footprint_note: None };
+            let mut data = PreviewData { native_scene:None,lcsc: id.clone(), files: Vec::new(), image: None, mesh: None, mesh_note: None, symbol: None, symbol_note: None, footprint: None, footprint_note: None };
             let cache_dir = if env::var_os("LCEDA_SHOT").is_some() {
                 crate::profile_dir().map(|d| d.join("cache"))
             } else {
@@ -3839,6 +3902,8 @@ impl App {
         let jobs_idle = self.search.is_none()
             && self.preview.is_none()
             && self.job.is_none()
+            && self.native_load.is_none()
+            && self.native_save.is_none()
             && self.desc_preview_job.is_none();
         let preview_ready =
             self.mesh.is_some() || self.mesh_note.is_some() || self.image_tex.is_some();
@@ -4029,6 +4094,7 @@ impl App {
         for (category, format) in categories {
             if let Some(path) = self.lib.binding_for(&category, format) {
                 for part in self.lib.favs_in(&category) {
+                    if self.lib.native(&part.lcsc).is_some(){continue;}
                     let id = part.lcsc.to_ascii_uppercase();
                     match format {
                         LibraryFormat::Ad => { req.ad_library_files.insert(id.clone(), path.to_path_buf()); }

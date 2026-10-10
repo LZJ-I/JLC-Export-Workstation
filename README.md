@@ -34,7 +34,7 @@ Open `lceda.exe` (Windows) or `lceda` (Linux / macOS). Files go to `lceda-out` u
 
 Each part gets a subfolder named `MPN_LCSC_Manufacturer`. Files inside use the MPN.
 
-The sidebar switches between **Search**, **Library**, **Export list**, **Sponsor**, **Settings**, and **About**. BOM import is inside Library. Drag the title bar to move, or double-click to maximize. Window size, splitters, and theme are remembered.
+The sidebar switches between **Search**, **Library**, **Export list**, **Sponsor**, **Settings**, and **About**. Library's **Import** dropdown offers **Import BOM… / Import AD library… / Import KiCad library…**. Drag the title bar to move, or double-click to maximize. Window size, splitters, and theme are remembered.
 
 1. Type an MPN (e.g. `STM32F103C8T6`) or LCSC id (e.g. `C8734`), then press Enter or **Search**. Double-click a row to add it to the export list.
 2. The search field and part preview start empty. Search for an MPN or LCSC code, then select a part. The header shows a larger part photo, resource status and actions. One full-size canvas has a remembered dropdown for **Schematic / 3D / Footprint**. Scroll to zoom, drag, and double-click to reset. The schematic reads actual AD export records, including designator, MPN and visible pin text, with the exported fonts, sizes and colors. The footprint shows actual pads, holes and outlines.
@@ -71,9 +71,17 @@ Exporting Altium / KiCad / PADS also keeps EasyEDA JSON for inspection.
 
 ### Import BOM into a library
 
-Use **Library → Import BOM…** for CSV / TSV / Excel (xlsx, xls, xlsb, ods). Select the destination library, match, and review manufacturer and package. Exact-ID confirmation preserves manual substitutions and only confirms candidates matching the original C-number. MPN-only rows require manual selection. All included rows must be confirmed and valid before **Add to this library**; unwanted rows can be excluded. Quantities and references are retained. Matching supports progress, cancellation and retry.
+Use **Library → Import → Import BOM…** for CSV / TSV / Excel (xlsx, xls, xlsb, ods). Select the destination library, match, and review manufacturer and package. Exact-ID confirmation preserves manual substitutions and only confirms candidates matching the original C-number. MPN-only rows require manual selection. All included rows must be confirmed and valid before **Add to this library**; unwanted rows can be excluded. Quantities and references are retained. Matching supports progress, cancellation and retry.
 
 Library retains existing favorites and categories. The additional local search, notes and asset-management UI has been removed; existing favorites, settings and internal preview caches remain. LCSC remains the online search provider.
+
+### Import existing AD / KiCad libraries
+
+Choose `.SchLib` or `.kicad_sym` from **Library → Import**. The review dialog has a searchable checkbox list on the left and the original symbol preview on the right. Confirm to create a category, named after the source file or your chosen name. Cancel creates no records or resource copies.
+
+Names, descriptions, properties, footprint links and all units are retained. Imported parts support unit selection, details and filtering. Internal snapshots leave source files unchanged; importing the same source path again updates existing records. Native AD Chinese names, mixed encodings and storage mappings are supported. KiCad inheritance dependencies are preserved.
+
+**Export native format…** and the library's selected-part / current-library exports retain original formats and available same-stem `.PcbLib`, `.pretty` and `.3dshapes` companions. This version does not convert imported formats, edit native symbols or preview companion footprint / 3D geometry. Imported parts use separate local identities, so a symbol named C2040 is never mistaken for an online part. Binding synchronization updates separately added LCSC parts in the category; reimport the source to refresh native parts.
 
 ### Library exports and binding synchronization
 

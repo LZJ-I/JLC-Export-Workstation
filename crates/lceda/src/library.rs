@@ -3,15 +3,18 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use serde::{Deserialize, Serialize};
+use lceda_core::native_library::{self,NativeLibrary,NativePart};
+pub use lceda_core::native_library::LibraryFormat;
 
 pub const UNCAT: &str = "uncat";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LibraryFormat { Ad, KiCad }
-impl LibraryFormat {
-    pub const ALL: [Self; 2] = [Self::Ad, Self::KiCad];
-    pub fn name(self) -> &'static str { match self { Self::Ad => "AD", Self::KiCad => "KiCad" } }
-    pub fn extension(self) -> &'static str { match self { Self::Ad => "SchLib", Self::KiCad => "kicad_sym" } }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeRecord {
+    pub format: LibraryFormat,
+    pub source: PathBuf,
+    pub library: PathBuf,
+    pub part: NativePart,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +37,7 @@ pub struct SavedPart {
 /// A durable local snapshot. Files are checked on use, rather than trusting stale flags.
 #[derive(Debug, Clone, Default)]
 pub struct PartRecord {
+    pub native: Option<NativeRecord>,
     pub notes: String,
     pub package: String,
     pub parameters: BTreeMap<String, String>,
@@ -161,6 +165,36 @@ impl Library {
         self.records.get(lcsc)
     }
 
+    pub fn native(&self,id:&str)->Option<&NativeRecord>{self.records.get(id)?.native.as_ref()}
+
+    /// Keep external-library identities separate from supplier IDs, including
+    /// symbols literally named C2040. Reimporting the same source updates rows.
+    pub fn add_native_parts(&mut self,info:&NativeLibrary,keys:&[String],name:&str,snapshot:&Path)->Result<(String,usize),String>{
+        if name.trim().is_empty()||keys.is_empty(){return Err("请填写库名并勾选器件".into());}
+        let source=fs::canonicalize(&info.source).unwrap_or_else(|_|info.source.clone());
+        let identity=source.to_string_lossy();let identity=if cfg!(windows){identity.to_lowercase()}else{identity.into_owned()};
+        let mut rows=Vec::new();
+        for key in keys {
+            let part=info.parts.iter().find(|p|&p.key==key).ok_or_else(||"所选器件已不在库中".to_string())?;
+            let token=format!("{}\n{identity}\n{}",info.format.name(),part.key);
+            let id=format!("LOCAL-{:016x}",native_library::content_hash(token.as_bytes()));rows.push((id,part.clone()));
+        }
+        let existing=rows.iter().find_map(|(id,_)|self.favs.iter().find(|p|&p.lcsc==id).map(|p|p.cat_id.clone()));
+        let category=if let Some(id)=existing{ id }else{
+            let mut title=name.trim().to_string();let mut suffix=2;
+            while self.cats.iter().any(|c|c.name==title){title=format!("{} ({suffix})",name.trim());suffix+=1;}
+            self.add_root(&title).ok_or_else(||"无法创建器件库".to_string())?
+        };
+        for (id,part) in rows {
+            let manufacturer=part.properties.iter().find(|(k,_)|k.eq_ignore_ascii_case("Manufacturer")).map(|(_,v)|v.clone()).unwrap_or_default();
+            self.add_fav(SavedPart{lcsc:id.clone(),name:part.name.clone(),manufacturer,cat_id:category.clone()});
+            let record=self.records.entry(id).or_default();record.parameters=part.properties.clone();
+            record.package=part.footprints.join("; ");record.native=Some(NativeRecord{format:info.format,source:info.source.clone(),library:snapshot.to_path_buf(),part});
+            record.updated_at=timestamp();
+        }
+        Ok((category,keys.len()))
+    }
+
     #[cfg(test)]
     pub fn set_notes(&mut self, lcsc: &str, notes: String) {
         let record = self.records.entry(lcsc.to_string()).or_default();
@@ -236,6 +270,7 @@ impl Library {
                     raw: raw.clone(),
                 });
                 lib.records.insert(lcsc.clone(), PartRecord {
+                    native: data.get("native").and_then(|v|serde_json::from_value(v.clone()).ok()),
                     notes: data.get("notes").and_then(Value::as_str).unwrap_or("").into(),
                     package: data.get("package").and_then(Value::as_str).unwrap_or("").into(),
                     parameters: data.get("parameters").and_then(Value::as_object).map(|o| o.iter()
@@ -254,6 +289,7 @@ impl Library {
         let records: BTreeMap<_, _> = self.records.iter().map(|(lcsc, record)| {
             let item = record.snapshot.as_ref();
             (lcsc, json!({
+                "native": record.native,
                 "notes": record.notes,
                 "package": record.package,
                 "parameters": record.parameters,
@@ -617,6 +653,19 @@ fn timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_import_roundtrips_and_reimports_without_colliding_with_supplier_ids(){
+        let part=NativePart{key:"C2040".into(),name:"C2040".into(),description:"local C2040".into(),properties:BTreeMap::new(),footprints:vec![],pins:2,units:1};
+        let info=NativeLibrary{source:PathBuf::from("/tmp/UserLibrary.SchLib"),format:LibraryFormat::Ad,parts:vec![part],content_hash:1};
+        let mut library=Library::default();library.add_fav(SavedPart{lcsc:"C2040".into(),name:"RP2040".into(),manufacturer:String::new(),cat_id:UNCAT.into()});
+        let (cat,n)=library.add_native_parts(&info,&["C2040".into()],"UserLibrary",Path::new("/tmp/snapshot/UserLibrary.SchLib")).unwrap();assert_eq!(n,1);assert_eq!(library.favs.len(),2);
+        let id=library.favs_in(&cat)[0].lcsc.clone();assert!(id.starts_with("LOCAL-"));assert!(library.cached_item(&id).is_none());
+        let mut restored=Library::from_json(&library.to_json());assert_eq!(restored.native(&id).unwrap().part.name,"C2040");
+        let (same,_)=restored.add_native_parts(&info,&["C2040".into()],"UserLibrary",Path::new("/tmp/new-copy/UserLibrary.SchLib")).unwrap();
+        assert_eq!(same,cat);assert_eq!(restored.favs.len(),2);assert_eq!(restored.native(&id).unwrap().library,Path::new("/tmp/new-copy/UserLibrary.SchLib"));
+        assert!(restored.add_native_parts(&info,&["Missing".into()],"Invalid",Path::new("/tmp/none")).is_err());assert_eq!(restored.cats.len(),2);
+    }
 
     #[test]
     fn ad_and_kicad_bindings_are_independent_durable_and_not_inherited() {

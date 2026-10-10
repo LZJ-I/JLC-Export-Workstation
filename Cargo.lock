@@ -1997,6 +1997,7 @@ dependencies = [
  "lceda-core",
  "poll-promise",
  "rfd",
+ "serde",
  "serde_json",
  "ureq",
  "webbrowser",

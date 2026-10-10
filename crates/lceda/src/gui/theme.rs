@@ -185,6 +185,9 @@ fn install_cjk_fonts(ctx: &egui::Context) {
     for (name, paths) in [
         ("Times New Roman", ["C:\\Windows\\Fonts\\times.ttf", "/mnt/c/Windows/Fonts/times.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf"]),
         ("Verdana", ["C:\\Windows\\Fonts\\verdana.ttf", "/mnt/c/Windows/Fonts/verdana.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]),
+        ("Arial", ["C:\\Windows\\Fonts\\arial.ttf", "/mnt/c/Windows/Fonts/arial.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"]),
+        ("Courier New", ["C:\\Windows\\Fonts\\cour.ttf", "/mnt/c/Windows/Fonts/cour.ttf", "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf"]),
+        ("楷体", ["C:\\Windows\\Fonts\\simkai.ttf", "/mnt/c/Windows/Fonts/simkai.ttf", "/usr/share/fonts/truetype/arphic/ukai.ttc"]),
     ] {
         let mut family = Vec::new();
         for path in paths {

@@ -24,6 +24,7 @@ rfd = "0.15"
 directories = "6"
 webbrowser = "1"
 serde_json.workspace = true
+serde.workspace = true
 calamine = "0.36"
 csv = "1"
 encoding_rs.workspace = true

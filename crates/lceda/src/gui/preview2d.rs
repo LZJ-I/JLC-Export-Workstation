@@ -36,13 +36,26 @@ impl SymbolView {
     }
 
     pub fn show(&mut self, ui: &mut Ui, rect: Rect, symbol: &SymbolIr, colors: SchColors, locked: bool) {
-        let painter = ui.painter_at(rect);
         let dpi = ui.ctx().pixels_per_point();
         if self.scene.as_ref().is_none_or(|cache| cache.colors != colors || cache.dpi != dpi) {
             let prepared = lceda_core::altium::schlib::preview(symbol, colors)
                 .map(|scene| prepare_scene(ui, scene)).map_err(|error| error.to_string());
             self.scene = Some(SceneCache { colors, dpi, prepared });
         }
+        self.paint_scene(ui,rect,colors,locked);
+    }
+
+    pub fn show_native(&mut self,ui:&mut Ui,rect:Rect,scene:&SchPreview,locked:bool){
+        let colors=SchColors{background:scene.background,..SchColors::default()};
+        let dpi=ui.ctx().pixels_per_point();
+        if self.scene.as_ref().is_none_or(|cache|cache.dpi!=dpi){
+            self.scene=Some(SceneCache{colors,dpi,prepared:Ok(prepare_scene(ui,scene.clone()))});
+        }
+        self.paint_scene(ui,rect,colors,locked);
+    }
+
+    fn paint_scene(&mut self,ui:&mut Ui,rect:Rect,colors:SchColors,locked:bool){
+        let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 6, ad_color(colors.background));
         let bounds = match &self.scene.as_ref().unwrap().prepared {
             Ok(prepared) => prepared.bounds,
@@ -128,7 +141,8 @@ fn prepare_scene(ui: &Ui, scene: SchPreview) -> PreparedScene {
 
 fn layout_label(ui: &Ui, label: &lceda_core::altium::sch_preview::SchText, scale: f32) -> egui::epaint::TextShape {
     let color = ad_color(label.color);
-    let family = egui::FontFamily::Name(label.font.name.clone().into());
+    let requested = egui::FontFamily::Name(label.font.name.clone().into());
+    let family = ui.fonts(|fonts| if fonts.families().contains(&requested){requested}else{egui::FontFamily::Proportional});
     let font = FontId::new((label.font.points * MM_PER_POINT) as f32 * scale, family);
     let galley = ui.fonts(|fonts| fonts.layout_no_wrap(label.text.clone(), font, color));
     let anchor = match label.anchor {
