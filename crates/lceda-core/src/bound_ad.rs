@@ -591,10 +591,7 @@ fn journal_restore(journal: &Path, sch: &Path, pcb: &Path) -> Result<()> {
             if fs::read(path).ok().as_ref() != Some(&expected) {
                 let staged = journal.join(format!("{kind}.restore"));
                 persist_file(&staged, &expected)?;
-                fs::rename(&staged, path).or_else(|_| {
-                    if path.exists() { fs::remove_file(path)?; }
-                    fs::rename(&staged, path)
-                }).map_err(|error| io_context("恢复原件", error))?;
+                fs::rename(&staged, path).map_err(|error| io_context("恢复原件", error))?;
             }
         } else if path.exists() { fs::remove_file(path).map_err(|error| io_context("恢复新建文件", error))?; }
     }
@@ -613,9 +610,8 @@ fn check_original(path: &Path, expected: &Original) -> Result<()> {
     Ok(())
 }
 fn replace(staged: &Path, target: &Path) -> Result<()> {
-    // Unix rename replaces atomically; Windows requires removing the destination first.
-    #[cfg(windows)]
-    if target.exists() { fs::remove_file(target).map_err(|error| io_context("替换", error))?; }
+    // std::fs::rename replaces an existing file on Windows too. Deleting first
+    // leaves a missing destination if the following rename fails.
     fs::rename(staged, target).map_err(|error| io_context("替换", error))
 }
 
@@ -631,14 +627,12 @@ pub fn update(sch_path: &Path, mut entry: Entry, colors: SchColors) -> Result<(P
     fs::create_dir_all(parent).map_err(|error| io_context("创建目录", error))?;
     let stem = sch_path.file_name().unwrap().to_string_lossy();
     let lock_path = parent.join(format!(".{stem}.jlc-lock"));
-    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path)
-        .map_err(|error| io_context("创建锁", error))?;
-    lock.try_lock().map_err(|_| Error::msg("此分类绑定的 AD 库正在同步，请稍后重试"))?;
+    let _lock = crate::library_lock::acquire(&lock_path)?;
     let journal = parent.join(format!(".{stem}.jlc-transaction"));
     if journal.exists() { journal_restore(&journal, sch_path, &pcb_path)?; }
     validate_binding(sch_path)?;
-    let original_sch = original(sch_path)?;
-    let original_pcb = original(&pcb_path)?;
+    let mut original_sch = original(sch_path)?;
+    let mut original_pcb = original(&pcb_path)?;
     let working = parent.join(format!(".{stem}.jlc-stage-{}", crate::util::unique_id()));
     fs::create_dir(&working)?;
     let result = (|| -> Result<()> {
@@ -668,6 +662,10 @@ pub fn update(sch_path: &Path, mut entry: Entry, colors: SchColors) -> Result<(P
             "sch": original_sch.bytes.is_some(), "pcb": original_pcb.bytes.is_some()
         }))?)?;
         fs::rename(&prepared, &journal)?;
+        // Windows replacement needs these handles closed, including on WSL
+        // shares. The sidecar lock still excludes other synchronization tasks.
+        drop(original_sch._handle.take());
+        drop(original_pcb._handle.take());
         if sch_stage.exists() { replace(&sch_stage, sch_path)?; }
         if pcb_stage.exists() { replace(&pcb_stage, &pcb_path)?; }
         let previous = parent.join(format!(".{stem}.jlc-backup"));
@@ -675,6 +673,8 @@ pub fn update(sch_path: &Path, mut entry: Entry, colors: SchColors) -> Result<(P
         fs::rename(&journal, previous)?;
         Ok(())
     })();
+    drop(original_sch._handle.take());
+    drop(original_pcb._handle.take());
     if result.is_err() && journal.exists() {
         if let Err(error) = journal_restore(&journal, sch_path, &pcb_path) {
             let _ = fs::remove_dir_all(&working);
@@ -710,6 +710,15 @@ mod tests {
         }
     }
     fn component_bytes(path: &Path, key: &str) -> Vec<u8> { stream(&mut open(path).unwrap(), &format!("/{key}/Data")).unwrap() }
+
+    #[test]
+    fn failed_replacement_leaves_the_existing_file() {
+        let directory = Directory::new();
+        let target = directory.0.join("Original.SchLib");
+        fs::write(&target, b"original bytes").unwrap();
+        assert!(replace(&directory.0.join("missing-stage"), &target).is_err());
+        assert_eq!(fs::read(target).unwrap(), b"original bytes");
+    }
 
     #[test]
     fn native_mixed_encoding_header_without_trailing_index_retains_all_old_fields() {

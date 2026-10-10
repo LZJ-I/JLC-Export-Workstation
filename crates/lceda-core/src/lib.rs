@@ -12,6 +12,7 @@ pub mod error;
 pub mod export;
 pub mod ir;
 pub mod kicad;
+mod library_lock;
 pub mod mesh;
 pub mod managed_ad;
 pub mod models;

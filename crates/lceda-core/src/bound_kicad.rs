@@ -217,10 +217,9 @@ fn recover(journal: &Path, symbol: &Path) -> Result<()> {
     fs::remove_dir_all(journal)?; Ok(())
 }
 fn replace(from: &Path, to: &Path) -> Result<()> {
-    #[cfg(windows)] if to.exists() { fs::remove_file(to).map_err(invalid)?; }
     fs::rename(from, to).map_err(invalid)
 }
-fn transact(symbol: &Path, changes: Vec<Change>, fail_after: Option<usize>) -> Result<()> {
+fn transact(symbol: &Path, mut changes: Vec<Change>, fail_after: Option<usize>) -> Result<()> {
     let parent = symbol.parent().unwrap();
     let stage = sidecar(symbol, &format!("stage-{}", crate::util::unique_id()));
     let journal = sidecar(symbol, "transaction");
@@ -241,6 +240,9 @@ fn transact(symbol: &Path, changes: Vec<Change>, fail_after: Option<usize>) -> R
             fs::create_dir_all(change.path.parent().unwrap())?;
         }
         fs::rename(&prepared, &journal)?;
+        // Keep write guards through staging and validation, then release them
+        // before Windows replaces files. The transaction sidecar remains held.
+        for change in &mut changes { drop(change._handle.take()); }
         for (i, change) in changes.iter().enumerate() {
             if fail_after == Some(i) { return Err(invalid("模拟写入中断")); }
             replace(&stage.join(format!("{i}.new")), &change.path)?;
@@ -250,6 +252,7 @@ fn transact(symbol: &Path, changes: Vec<Change>, fail_after: Option<usize>) -> R
         fs::rename(&journal, previous)?;
         Ok(())
     })();
+    for change in &mut changes { drop(change._handle.take()); }
     if result.is_err() && journal.exists() {
         if let Err(error) = recover(&journal, symbol) { let _ = fs::remove_dir_all(stage); return Err(error); }
     }
@@ -269,8 +272,7 @@ fn update_inner(path: &Path, mut entry: Entry, fail_after: Option<usize>) -> Res
     let parent = absolute.parent().unwrap(); fs::create_dir_all(parent)?;
     let path = fs::canonicalize(parent)?.join(absolute.file_name().unwrap());
     let paths = targets(&path)?;
-    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(sidecar(&path, "lock")).map_err(invalid)?;
-    lock.try_lock().map_err(|_| invalid("此 KiCad 库正在同步，请稍后重试"))?;
+    let _lock = crate::library_lock::acquire(&sidecar(&path, "lock"))?;
     if sidecar(&path, "transaction").exists() { recover(&sidecar(&path, "transaction"), &path)?; }
     validate_binding(&path)?;
     let meta_path = sidecar(&path, "meta.json");
@@ -334,6 +336,13 @@ mod tests {
             step: Some(b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;".to_vec()) }
     }
     fn bytes(path: &Path) -> Vec<u8> { fs::read(path).unwrap() }
+    #[test]
+    fn failed_replacement_leaves_the_existing_file() {
+        let d = Directory::new(); let target = d.0.join("Original.kicad_sym");
+        fs::write(&target, b"original bytes").unwrap();
+        assert!(replace(&d.0.join("missing-stage"), &target).is_err());
+        assert_eq!(bytes(&target), b"original bytes");
+    }
     const CUSTOM: &str = "(symbol \"custom (quote \\\" 中文)\" (property \"Value\" \"retain\") (symbol \"custom_0_1\"))";
     #[test]
     fn retains_custom_symbols_unknown_fields_inheritance_and_updates_stable_ids() {

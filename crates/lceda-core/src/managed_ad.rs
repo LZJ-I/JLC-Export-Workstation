@@ -32,9 +32,7 @@ pub fn update(dir: &Path, entry: Entry, colors: SchColors) -> Result<(PathBuf, P
         return Err(Error::msg("固定 AD 库：器件没有可写入的符号或封装"));
     }
     fs::create_dir_all(dir)?;
-    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false)
-        .open(dir.join("JLC.lock"))?;
-    lock.try_lock().map_err(|_| Error::msg("固定 AD 库正在被另一个任务更新，请稍后重试"))?;
+    let _lock = crate::library_lock::acquire(&dir.join("JLC.lock"))?;
     // A transaction journal is retained through process crashes. Restore the last
     // complete generation before reading its catalogue.
     let pending = dir.join(".JLC-transaction");
@@ -107,8 +105,8 @@ pub fn update(dir: &Path, entry: Entry, colors: SchColors) -> Result<(PathBuf, P
         fs::rename(&backup, &pending)?;
         for name in FILES {
             let dest = dir.join(name);
-            if dest.exists() { fs::remove_file(&dest)?; }
             if staged.join(name).exists() { fs::rename(staged.join(name), dest)?; }
+            else if dest.exists() { fs::remove_file(&dest)?; }
         }
         // Removing the journal is the commit. The prior generation remains available.
         let previous = dir.join(".JLC-previous");

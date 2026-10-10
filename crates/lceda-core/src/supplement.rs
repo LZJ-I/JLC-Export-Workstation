@@ -199,7 +199,8 @@ mod tests {
             let output=root.join(format!("export-{}",format.name()));export_bundle(&bundle,&output).unwrap();
             if let Some(relative)=bundle.files.get("kicad_mod") {
                 let exported=fs::read_to_string(output.join(relative)).unwrap();
-                assert!(exported.contains(&output.to_string_lossy().to_string()));assert!(!exported.contains(&bundle.directory.to_string_lossy().to_string()));
+                assert!(exported.contains(&output.to_string_lossy().replace('\\', "/")));
+                assert!(!exported.contains(&bundle.directory.to_string_lossy().replace('\\', "/")));
             }
             assert_eq!(fs::read(&original).unwrap(),b"original bytes, keep links");
         }
