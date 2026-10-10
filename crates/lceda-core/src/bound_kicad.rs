@@ -7,6 +7,9 @@ use std::{collections::{BTreeMap, HashSet}, fs::{self, File, OpenOptions}, io::{
 
 const MAX_FILE: u64 = 64 * 1024 * 1024;
 const VERSION: u64 = 20241209;
+#[path = "native_kicad.rs"]
+mod native;
+pub(crate) use native::{inspect_library, preview_component, export_subset};
 fn invalid(message: impl std::fmt::Display) -> Error {
     Error::msg(format!("KiCad 绑定库同步失败：{message}。请检查库文件或关闭占用它的程序后重试。"))
 }

@@ -1,8 +1,8 @@
 //! Add components to a user-selected AD library while retaining unrelated CFB streams.
 //! Unsupported directory/header layouts are rejected before either original is changed.
-use crate::{altium::{self, binary::BinWriter, SchColors}, managed_ad::Entry, Error, Result};
+use crate::{altium::{self, binary::BinWriter, parameters, SchColors}, managed_ad::Entry, Error, Result};
 use encoding_rs::{GBK, WINDOWS_1252};
-use std::{collections::{HashMap, HashSet}, fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}};
+use std::{collections::{HashMap, HashSet}, fs::{self, File, OpenOptions}, io::{Cursor, Read, Seek, Write}, path::{Path, PathBuf}};
 
 type Document = cfb::CompoundFile<File>;
 type Parameters = Vec<(String, String)>;
@@ -22,16 +22,24 @@ fn paired(path: &Path) -> Result<PathBuf> {
 }
 fn open(path: &Path) -> Result<Document> {
     if fs::metadata(path)?.len() > MAX_FILE { return Err(invalid("库文件超过 256 MiB")); }
-    cfb::open(path).map_err(|error| invalid(format!("{}: {error}", path.display())))
+    cfb::open(path).map_err(|error| {
+        if matches!(error.kind(),std::io::ErrorKind::PermissionDenied|std::io::ErrorKind::WouldBlock)||matches!(error.raw_os_error(),Some(32|33)) {io_context("读取",error)}
+        else {invalid(format!("{}: {error}",path.display()))}
+    })
 }
-fn stream(doc: &mut Document, name: &str) -> Result<Vec<u8>> {
+fn open_memory(path:&Path)->Result<cfb::CompoundFile<Cursor<Vec<u8>>>>{
+    let mut bytes=Vec::new();File::open(path)?.take(MAX_FILE+1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64>MAX_FILE{return Err(invalid("库文件超过 256 MiB"));}
+    cfb::CompoundFile::open(Cursor::new(bytes)).map_err(|e|invalid(e.to_string()))
+}
+fn stream<T:Read+Seek>(doc: &mut cfb::CompoundFile<T>, name: &str) -> Result<Vec<u8>> {
     let mut value = Vec::new();
     let mut source = doc.open_stream(name).map_err(|error| invalid(format!("缺少或无法读取 {name}: {error}")))?;
     if source.len() > MAX_FILE { return Err(invalid(format!("{name} 过大"))); }
     source.read_to_end(&mut value)?;
     Ok(value)
 }
-fn put(doc: &mut Document, name: &str, bytes: &[u8]) -> Result<()> {
+fn put<T:Read+Write+Seek>(doc: &mut cfb::CompoundFile<T>, name: &str, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = Path::new(name).parent() { doc.create_storage_all(parent)?; }
     doc.create_stream(name)?.write_all(bytes)?;
     Ok(())
@@ -46,16 +54,10 @@ fn block<'a>(data: &'a [u8], offset: &mut usize) -> Result<(u8, &'a [u8])> {
     Ok(((size >> 24) as u8, payload))
 }
 fn params(bytes: &[u8]) -> Result<Parameters> {
-    let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
-    let (text, _, errors) = GBK.decode(bytes);
-    if errors { return Err(invalid("无法识别参数编码")); }
-    text.split('|').filter(|part| !part.is_empty()).map(|part| {
-        let (name, value) = part.split_once('=').ok_or_else(|| invalid("参数缺少等号"))?;
-        Ok((name.to_string(), value.to_string()))
-    }).collect()
+    parameters::decode(bytes).map_err(|error| invalid(error.to_string()))
 }
 fn value<'a>(parameters: &'a Parameters, name: &str) -> Option<&'a str> {
-    parameters.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.as_str())
+    parameters::value(parameters, name)
 }
 fn number(parameters: &Parameters, name: &str) -> Result<usize> {
     let count = value(parameters, name).and_then(|value| value.parse::<usize>().ok()).ok_or_else(|| invalid(format!("{name} 缺失或无效")))?;
@@ -108,8 +110,8 @@ fn encode_index(prefix: &[u8], names: &[String]) -> Vec<u8> {
     writer.into_vec()
 }
 
-struct SchIndex { header: Parameters, names: Vec<String>, mappings: Parameters }
-fn sch_index(doc: &mut Document) -> Result<SchIndex> {
+struct SchIndex { header: Parameters, raw_header: Vec<u8>, names: Vec<String>, references: Vec<String>, mappings: Parameters, indexed: bool }
+fn sch_index<T:Read+Seek>(doc: &mut cfb::CompoundFile<T>) -> Result<SchIndex> {
     let bytes = stream(doc, "/FileHeader")?;
     let mut offset = 0;
     let (flags, payload) = block(&bytes, &mut offset)?;
@@ -117,17 +119,15 @@ fn sch_index(doc: &mut Document) -> Result<SchIndex> {
     if flags != 0 || !value(&header, "HEADER").is_some_and(|header| header.starts_with("Protel for Windows - Schematic Library Editor Binary File Version 5.0")) {
         return Err(invalid("不是受支持的 SchLib 5.0"));
     }
-    let names = string_index(&bytes, offset)?;
-    if number(&header, "COMPCOUNT")? != names.len() { return Err(invalid("SchLib 组件数量不一致")); }
+    let raw_header = payload.to_vec();
+    let count = number(&header, "COMPCOUNT")?;
+    let indexed = offset != bytes.len();
+    let directory = if indexed { Some(string_index(&bytes, offset)?) } else { None };
+    if directory.as_ref().is_some_and(|names| names.len() != count) { return Err(invalid("SchLib 组件数量不一致")); }
     let fonts = number(&header, "FONTIDCOUNT")?;
     if fonts == 0 || fonts > 4096 { return Err(invalid("SchLib 字体表超出范围")); }
     for id in 1..=fonts {
         if value(&header, &format!("FONTNAME{id}")).is_none() { return Err(invalid("SchLib 字体名称缺失")); }
-    }
-    for (index, name) in names.iter().enumerate() {
-        if value(&header, &format!("LIBREF{index}")) != Some(name.as_str()) || !doc.is_storage(name) || !doc.is_stream(format!("{name}/Data")) {
-            return Err(invalid("SchLib 组件目录与存储不一致"));
-        }
     }
     let mappings = if doc.is_stream("/SectionKeys") {
         let bytes = stream(doc, "/SectionKeys")?;
@@ -138,11 +138,35 @@ fn sch_index(doc: &mut Document) -> Result<SchIndex> {
         let count = number(&mappings, "KeyCount")?;
         for i in 0..count {
             let key = value(&mappings, &format!("SectionKey{i}")).ok_or_else(|| invalid("SchLib SectionKeys 缺少映射"))?;
-            if value(&mappings, &format!("LibRef{i}")).is_none() || !names.iter().any(|name| name.eq_ignore_ascii_case(key)) { return Err(invalid("SchLib SectionKeys 无效")); }
+            validate_name(key)?;
+            if value(&mappings, &format!("LibRef{i}")).is_none() || !doc.is_stream(format!("/{key}/Data")) { return Err(invalid("SchLib SectionKeys 无效")); }
         }
         mappings
     } else { vec![("KeyCount".into(), "0".into())] };
-    Ok(SchIndex { header, names, mappings })
+    let mut names = Vec::new();
+    let mut references = Vec::new();
+    let mut unique = HashSet::new();
+    for i in 0..count {
+        let reference = value(&header, &format!("LIBREF{i}")).ok_or_else(|| invalid("SchLib 缺少组件名称"))?.to_string();
+        let mapped = (0..number(&mappings, "KeyCount")?).find_map(|j| {
+            (value(&mappings, &format!("LibRef{j}")) == Some(&reference)).then(|| value(&mappings, &format!("SectionKey{j}")).unwrap().to_string())
+        });
+        // Native AD preserves Unicode/spaces and substitutes slash in OLE names.
+        let implicit: String = reference.chars().map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
+            .scan(0usize, |length,c| { *length += c.len_utf16(); (*length <= 31).then_some(c) }).collect();
+        let expected = mapped.unwrap_or(implicit);
+        let key = directory.as_ref().map(|d| d[i].clone()).unwrap_or_else(|| expected.clone());
+        if !key.eq_ignore_ascii_case(&expected) { return Err(invalid("SchLib 二进制索引与名称映射不一致")); }
+        validate_name(&key)?;
+        if !unique.insert(key.to_lowercase()) || !doc.is_storage(format!("/{key}")) || !doc.is_stream(format!("/{key}/Data")) {
+            return Err(invalid(format!("SchLib 组件 {reference} 的目录与存储不一致")));
+        }
+        let display=(0..number(&mappings,"KeyCount")?).find_map(|j| {
+            (value(&mappings,&format!("SectionKey{j}"))==Some(key.as_str())).then(||value(&mappings,&format!("LibRef{j}")).unwrap().to_string())
+        }).unwrap_or(reference);
+        names.push(key); references.push(display);
+    }
+    Ok(SchIndex { header, raw_header, names, references, mappings, indexed })
 }
 
 struct PcbIndex { prefix: Vec<u8>, names: Vec<String>, mappings: Vec<(String, String)>, toc: Vec<Vec<u8>>, models: Vec<(Parameters, Vec<u8>)> }
@@ -224,6 +248,98 @@ pub fn validate_binding(sch_path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn inspect_library(path: &Path) -> Result<Vec<crate::native_library::NativePart>> {
+    let mut doc = open_memory(path)?; let index = sch_index(&mut doc)?;
+    let mut parts = Vec::new();
+    for (i,key) in index.names.iter().enumerate() {
+        let bytes = stream(&mut doc, &format!("/{key}/Data"))?;
+        let mut offset = 0; let mut properties = std::collections::BTreeMap::new();
+        let mut description = value(&index.header, &format!("COMPDESCR{i}")).unwrap_or("").to_string();
+        let mut footprints = Vec::new(); let mut pins = 0usize; let mut units = 1usize;
+        while offset < bytes.len() {
+            let (flags, payload) = block(&bytes, &mut offset)?;
+            if flags == 1 { if payload.get(..4) == Some(&2i32.to_le_bytes()) { pins += 1; } continue; }
+            if flags != 0 { continue; }
+            let p = params(payload)?;
+            match value(&p, "RECORD").unwrap_or("") {
+                "1" => {
+                    units = value(&p,"PARTCOUNT").and_then(|s| s.parse::<usize>().ok()).unwrap_or(2).saturating_sub(1).clamp(1,1024);
+                    if description.is_empty() { description = value(&p,"COMPONENTDESCRIPTION").unwrap_or("").to_string(); }
+                }
+                "2" => pins += 1,
+                "34" | "41" => {
+                    if let Some(name) = value(&p,"NAME") { properties.insert(name.to_string(), value(&p,"TEXT").unwrap_or("").to_string()); }
+                }
+                "45" if value(&p,"MODELTYPE").is_some_and(|s| s.eq_ignore_ascii_case("PCBLIB")) => {
+                    if let Some(name) = value(&p,"MODELNAME").filter(|name| !name.is_empty()) { footprints.push(name.to_string()); }
+                }
+                _ => {}
+            }
+        }
+        parts.push(crate::native_library::NativePart { key:key.clone(), name:index.references[i].clone(), description, properties, footprints, pins, units });
+    }
+    Ok(parts)
+}
+
+pub(crate) fn preview_component(path: &Path, key: &str, unit: usize) -> Result<altium::sch_preview::SchPreview> {
+    let mut doc = open_memory(path)?; let index = sch_index(&mut doc)?;
+    if !index.names.iter().any(|name| name == key) { return Err(invalid("没有找到原理图符号")); }
+    let header = stream(&mut doc,"/FileHeader")?;
+    let data = stream(&mut doc,&format!("/{key}/Data"))?;
+    let pin_path = format!("/{key}/PinTextData");
+    let pins = if doc.is_stream(&pin_path) { Some(stream(&mut doc,&pin_path)?) } else { None };
+    altium::sch_preview::SchPreview::from_streams_unit(&header,&data,pins.as_deref(),unit)
+}
+
+pub(crate) fn export_subset(source: &Path, keys: &[String], destination: &Path) -> Result<()> {
+    let mut doc = open_memory(source)?; let index = sch_index(&mut doc)?;
+    let wanted: HashSet<_> = keys.iter().collect();
+    if wanted.iter().any(|key| !index.names.contains(key)) { return Err(invalid("导出器件已不在原库中")); }
+    let mut created=false;
+    let result = (|| -> Result<()> {
+        let mut header = index.header.clone();
+        let indexed_field = |name: &str| {
+            let name = name.trim_start_matches("%UTF8%").to_ascii_uppercase();
+            ["LIBREF","PARTCOUNT","COMPDESCR"].iter().any(|prefix| name.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|c| c.is_ascii_digit())))
+        };
+        header.retain(|(name,_)| !indexed_field(name));
+        let mut names = Vec::new();
+        for (i,key) in index.names.iter().enumerate() {
+            if !wanted.contains(key) { doc.remove_storage_all(format!("/{key}"))?; continue; }
+            let next = names.len(); names.push(key.clone());
+            for prefix in ["LIBREF","PARTCOUNT","COMPDESCR"] {
+                for utf in ["","%UTF8%"] {
+                    let old = format!("{utf}{prefix}{i}");
+                    if let Some((_,text)) = index.header.iter().find(|(name,_)| name.eq_ignore_ascii_case(&old)) { header.push((format!("{utf}{prefix}{next}"),text.clone())); }
+                }
+            }
+        }
+        set(&mut header,"COMPCOUNT",names.len());
+        let mut writer = BinWriter::new(); writer.write_block_raw(0,&parameters::patch(&index.raw_header,&header)?);
+        let bytes = if index.indexed { encode_index(&writer.into_vec(),&names) } else { writer.into_vec() };
+        put(&mut doc,"/FileHeader",&bytes)?;
+        let mut mappings = vec![("KeyCount".into(),"0".into())]; let mut count = 0;
+        for i in 0..number(&index.mappings,"KeyCount")? {
+            let key = value(&index.mappings,&format!("SectionKey{i}")).unwrap();
+            if names.iter().any(|name| name == key) {
+                mappings.push((format!("LibRef{count}"),value(&index.mappings,&format!("LibRef{i}")).unwrap().to_string()));
+                mappings.push((format!("SectionKey{count}"),key.to_string())); count += 1;
+            }
+        }
+        if count > 0 { set(&mut mappings,"KeyCount",count); put(&mut doc,"/SectionKeys",&encode_params(&mappings))?; }
+        else if doc.is_stream("/SectionKeys") { doc.remove_stream("/SectionKeys")?; }
+        doc.flush()?; sch_index(&mut doc)?;
+        // One read and one write keep network-backed libraries responsive.
+        // Validate the in-memory copy before creating a new output file.
+        let bytes=doc.into_inner().into_inner();
+        let mut output=OpenOptions::new().write(true).create_new(true).open(destination)?;
+        created=true;
+        output.write_all(&bytes)?;output.flush()?;output.sync_all()?;Ok(())
+    })();
+    if result.is_err()&&created { let _ = fs::remove_file(destination); }
+    result
+}
+
 fn copy_component(source: &mut Document, dest: &mut Document, key: &str, old_key: Option<&str>) -> Result<()> {
     if let Some(old) = old_key { if dest.is_storage(old) { dest.remove_storage_all(old)?; } }
     if dest.exists(key) { return Err(invalid(format!("组件名称 {key} 与原库其它存储冲突"))); }
@@ -240,7 +356,7 @@ fn copy_component(source: &mut Document, dest: &mut Document, key: &str, old_key
     Ok(())
 }
 fn font_signature(parameters: &Parameters, id: usize) -> Vec<String> {
-    ["FONTNAME", "SIZE", "BOLD", "ITALIC", "UNDERLINE", "STRIKEOUT", "COLOR", "CHARSET"].iter()
+    ["FONTNAME", "SIZE", "BOLD", "ITALIC", "UNDERLINE", "STRIKEOUT", "COLOR", "CHARSET", "ROTATION"].iter()
         .map(|field| value(parameters, &format!("{field}{id}")).unwrap_or(match *field { "BOLD" | "ITALIC" | "UNDERLINE" | "STRIKEOUT" => "F", "COLOR" | "CHARSET" => "0", _ => "" }).to_ascii_lowercase()).collect()
 }
 fn merge_fonts(old: &mut Parameters, fresh: &Parameters) -> Result<HashMap<usize, usize>> {
@@ -252,7 +368,7 @@ fn merge_fonts(old: &mut Parameters, fresh: &Parameters) -> Result<HashMap<usize
         let target = if let Some(found) = found { found } else {
             if old_count >= 4096 { return Err(invalid("合并后的字体表超过 4096 项")); }
             old_count += 1;
-            for prefix in ["FONTNAME", "SIZE", "BOLD", "ITALIC", "UNDERLINE", "STRIKEOUT", "COLOR", "CHARSET"] {
+            for prefix in ["FONTNAME", "SIZE", "BOLD", "ITALIC", "UNDERLINE", "STRIKEOUT", "COLOR", "CHARSET", "ROTATION"] {
                 if let Some(text) = value(fresh, &format!("{prefix}{id}")) { set(old, &format!("{prefix}{old_count}"), text); }
             }
             old_count
@@ -338,15 +454,18 @@ fn merge_sch(original: &Path, fresh_path: &Path, staged: &Path, id: &str) -> Res
         if name.eq_ignore_ascii_case(id) { mapped_key = Some(key); }
         else { pairs.push((name, key)); }
     }
-    let position = index.names.iter().position(|name| name.eq_ignore_ascii_case(id) || mapped_key.as_ref().is_some_and(|key| name.eq_ignore_ascii_case(key)));
+    let position = index.names.iter().enumerate().position(|(i,name)| index.references[i].eq_ignore_ascii_case(id) || name.eq_ignore_ascii_case(id) || mapped_key.as_ref().is_some_and(|key| name.eq_ignore_ascii_case(key)));
     let old_key = position.map(|index_pos| index.names[index_pos].clone());
     copy_component(&mut fresh, &mut dest, id, old_key.as_deref())?;
-    if let Some(position) = position { index.names[position] = id.into(); set(&mut index.header, &format!("PARTCOUNT{position}"), value(&new.header, "PARTCOUNT0").unwrap_or("2")); }
-    else { let position = index.names.len(); index.names.push(id.into()); set(&mut index.header, &format!("PARTCOUNT{position}"), value(&new.header, "PARTCOUNT0").unwrap_or("2")); }
-    for (i, name) in index.names.iter().enumerate() { set(&mut index.header, &format!("LIBREF{i}"), name); }
+    let position = if let Some(position) = position { index.names[position] = id.into(); position }
+        else { let position = index.names.len(); index.names.push(id.into()); position };
+    set(&mut index.header, &format!("PARTCOUNT{position}"), value(&new.header, "PARTCOUNT0").unwrap_or("2"));
+    set(&mut index.header, &format!("LIBREF{position}"), id);
     set(&mut index.header, "COMPCOUNT", index.names.len());
-    set(&mut index.header, "WEIGHT", index.names.len());
-    let header = encode_index(&encode_params(&index.header), &index.names);
+    if index.indexed { set(&mut index.header, "WEIGHT", index.names.len()); }
+    let mut writer = BinWriter::new();
+    writer.write_block_raw(0, &parameters::patch(&index.raw_header, &index.header)?);
+    let header = if index.indexed { encode_index(&writer.into_vec(), &index.names) } else { writer.into_vec() };
     put(&mut dest, "/FileHeader", &header)?;
     if !pairs.is_empty() {
         let mut mappings = vec![("KeyCount".into(), pairs.len().to_string())];
@@ -591,6 +710,38 @@ mod tests {
         }
     }
     fn component_bytes(path: &Path, key: &str) -> Vec<u8> { stream(&mut open(path).unwrap(), &format!("/{key}/Data")).unwrap() }
+
+    #[test]
+    fn native_mixed_encoding_header_without_trailing_index_retains_all_old_fields() {
+        let directory = Directory::new();
+        let sch = directory.0.join("Native.SchLib");
+        let source = directory.0.join("Source.SchLib");
+        altium::write_schlib(&source, entry("C1", "Source").symbol.as_ref().unwrap()).unwrap();
+        let data = component_bytes(&source, "generic");
+        let mut header = b"|HEADER=Protel for Windows - Schematic Library Editor Binary File Version 5.0|Weight=12026|MinorVersion=9|FontIdCount=2|Size1=10|FontName1=Times New Roman|Size2=8|Rotation2=270|%UTF8%FontName2=".to_vec();
+        header.extend_from_slice("楷体".as_bytes());
+        header.extend_from_slice(b"|||FontName2=\xbf\xac\xcc\xe5|UseMBCS=T|CompCount=3|LibRef0=RES|PartCount0=2|LibRef1=USB-C/S|PartCount1=2|%UTF8%LibRef2=");
+        header.extend_from_slice("共模电感".as_bytes());
+        header.extend_from_slice(b"|||LibRef2=\xb9\xb2\xc4\xa3\xb5\xe7\xb8\xd0|PartCount2=2|%UTF8%CompDescr2=");
+        header.extend_from_slice("中文参数".as_bytes()); header.extend_from_slice(b"|||CompDescr2=\xd6\xd0\xce\xc4\xb2\xce\xca\xfd\0");
+        let mut doc = cfb::create(&sch).unwrap();
+        let mut writer = BinWriter::new(); writer.write_block_raw(0, &header);
+        put(&mut doc, "/FileHeader", &writer.into_vec()).unwrap();
+        for key in ["RES", "USB-C_S", "共模电感"] { put(&mut doc, &format!("/{key}/Data"), &data).unwrap(); }
+        put(&mut doc, "/Storage", b"embedded user icons").unwrap(); doc.flush().unwrap(); drop(doc);
+        validate_binding(&sch).unwrap();
+        for _ in 0..2 { update(&sch, entry("C2040", "RP2040"), SchColors::default()).unwrap(); }
+        let mut doc = open(&sch).unwrap(); let index = sch_index(&mut doc).unwrap();
+        assert!(!index.indexed); assert_eq!(index.names, ["RES", "USB-C_S", "共模电感", "C2040"]);
+        assert_eq!(value(&index.header, "FONTNAME2"), Some("楷体"));
+        assert_eq!(value(&index.header, "COMPDESCR2"), Some("中文参数"));
+        assert_eq!(value(&index.header, "WEIGHT"), Some("12026"));
+        for field in header.strip_suffix(&[0]).unwrap().split(|b| *b == b'|').filter(|v| !v.is_empty() && !v.starts_with(b"CompCount=") && !v.starts_with(b"FontIdCount=")) {
+            assert!(index.raw_header.windows(field.len()).any(|bytes| bytes == field), "untouched header field must keep its original bytes");
+        }
+        for key in ["RES", "USB-C_S", "共模电感"] { assert_eq!(stream(&mut doc, &format!("/{key}/Data")).unwrap(), data); }
+        assert_eq!(stream(&mut doc, "/Storage").unwrap(), b"embedded user icons");
+    }
 
     #[test]
     fn adds_and_updates_same_named_parts_without_losing_models_binding_or_comment() {

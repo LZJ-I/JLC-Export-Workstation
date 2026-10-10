@@ -1,4 +1,5 @@
 pub mod binary;
+pub(crate) mod parameters;
 pub mod pcblib;
 pub mod sch_color;
 pub mod schlib;

@@ -4,7 +4,7 @@
 //! pin margins; the preview uses the standard inside-name/above-number layout.
 
 use crate::error::{Error, Result};
-use encoding_rs::{GBK, WINDOWS_1252};
+use encoding_rs::WINDOWS_1252;
 use std::collections::BTreeMap;
 use std::io::Read;
 
@@ -61,9 +61,13 @@ pub struct SchPreview {
 
 impl SchPreview {
     pub fn from_streams(header: &[u8], data: &[u8], pin_text: Option<&[u8]>) -> Result<Self> {
+        Self::from_streams_unit(header,data,pin_text,1)
+    }
+
+    pub fn from_streams_unit(header: &[u8], data: &[u8], pin_text: Option<&[u8]>, unit: usize) -> Result<Self> {
         let mut offset = 0;
         let (_, bytes) = block(header, &mut offset)?;
-        let header = params(bytes);
+        let header = params(bytes)?;
         let mut fonts = BTreeMap::new();
         for id in 1..=number(&header, "FONTIDCOUNT", 1.0).clamp(1.0, 1024.0) as usize {
             fonts.insert(id, SchFont {
@@ -80,11 +84,17 @@ impl SchPreview {
         while offset < data.len() {
             let (flags, bytes) = block(data, &mut offset)?;
             if flags == 1 {
-                scene.add_pin(binary_pin(bytes)?, overrides.get(&pin_index), &fonts)?;
+                let owner = bytes.get(5..7).map(|b| i16::from_le_bytes(b.try_into().unwrap())).unwrap_or(-1);
+                if owner <= 0 || owner as usize == unit { scene.add_pin(binary_pin(bytes)?, overrides.get(&pin_index), &fonts)?; }
                 pin_index += 1;
                 continue;
             }
-            let p = params(bytes);
+            let p = params(bytes)?;
+            let owner = number(&p,"OWNERPARTID",-1.0) as i32;
+            if (owner > 0 && owner as usize != unit) || number(&p,"OWNERPARTDISPLAYMODE",0.0) > 0.0 {
+                if text(&p,"RECORD") == "2" { pin_index += 1; }
+                continue;
+            }
             let color = number(&p, "COLOR", 0.0) as i32;
             let width = match number(&p, "LINEWIDTH", 1.0) as i32 {
                 0 => 0.0254, 2 => 0.762, 3 => 1.27, _ => 0.254,
@@ -105,14 +115,30 @@ impl SchPreview {
                     let (x2, y2) = point(&p, "CORNER");
                     scene.strokes.push(SchStroke { points: vec![(x1,y1), (x2,y1), (x2,y2), (x1,y2), (x1,y1)], color, width });
                 }
-                "6" => {
+                "6" | "7" => {
                     let count = number(&p, "LOCATIONCOUNT", 0.0).clamp(0.0, 100_000.0) as usize;
-                    let points = (1..=count).map(|i| (coord(&p, &format!("X{i}")), coord(&p, &format!("Y{i}")))).collect();
+                    let mut points: Vec<_> = (1..=count).map(|i| (coord(&p, &format!("X{i}")), coord(&p, &format!("Y{i}")))).collect();
+                    if text(&p,"RECORD") == "7" { if let Some(first) = points.first().copied() { points.push(first); } }
                     scene.strokes.push(SchStroke { points, color, width });
+                }
+                "13" => scene.strokes.push(SchStroke { points:vec![point(&p,"LOCATION"),point(&p,"CORNER")], color,width }),
+                "11" | "12" => {
+                    let center = point(&p,"LOCATION"); let rx=coord(&p,"RADIUS");
+                    let ry = if text(&p,"RECORD") == "11" { coord(&p,"SECONDARYRADIUS") } else { rx };
+                    let start=number(&p,"STARTANGLE",0.0).to_radians();
+                    let mut sweep=(number(&p,"ENDANGLE",360.0).to_radians()-start).rem_euclid(std::f64::consts::TAU);
+                    if sweep.abs()<1e-8 { sweep=std::f64::consts::TAU; }
+                    let points=(0..=48).map(|i| { let a=start+sweep*i as f64/48.0; (center.0+rx*a.cos(),center.1+ry*a.sin()) }).collect();
+                    scene.strokes.push(SchStroke {points,color,width});
+                }
+                "10" => {
+                    let center=point(&p,"LOCATION"); let r=coord(&p,"RADIUS");
+                    let points=(0..=4).map(|i| { let a=std::f64::consts::FRAC_PI_2*i as f64; (center.0+r*a.cos(),center.1+r*a.sin()) }).collect();
+                    scene.strokes.push(SchStroke {points,color,width});
                 }
                 "8" => scene.ellipses.push(SchEllipse { center: point(&p, "LOCATION"),
                     radii: (coord(&p, "RADIUS"), coord(&p, "SECONDARYRADIUS")), color, width }),
-                "34" | "41" if text(&p, "ISHIDDEN") != "T" => {
+                "4" | "34" | "41" if text(&p, "ISHIDDEN") != "T" => {
                     let font = font(&fonts, number(&p, "FONTID", 1.0) as usize)?;
                     scene.texts.push(SchText { role: text(&p, "NAME").to_string(), text: text(&p, "TEXT").to_string(),
                         position: point(&p, "LOCATION"), rotation: number(&p, "ORIENTATION", 0.0) * 90.0,
@@ -169,10 +195,12 @@ fn block<'a>(data: &'a [u8], offset: &mut usize) -> Result<(u8, &'a [u8])> {
     *offset = end;
     Ok(((size >> 24) as u8, bytes))
 }
-fn params(bytes: &[u8]) -> Params {
-    let decoded = GBK.decode(bytes.strip_suffix(&[0]).unwrap_or(bytes)).0;
-    decoded.split('|').filter_map(|s| s.split_once('='))
-        .map(|(k,v)| (k.to_ascii_uppercase(), v.to_string())).collect()
+fn params(bytes: &[u8]) -> Result<Params> {
+    let fields=super::parameters::decode(bytes)?;
+    let mut result:Params=fields.iter().filter(|(k,_)| !k.to_ascii_uppercase().starts_with("%UTF8%"))
+        .map(|(k,v)| (k.to_ascii_uppercase(),v.clone())).collect();
+    for (key,value) in fields { if let Some(key)=key.to_ascii_uppercase().strip_prefix("%UTF8%") { result.insert(key.to_string(),value); } }
+    Ok(result)
 }
 fn text<'a>(p: &'a Params, key: &str) -> &'a str { p.get(key).map(String::as_str).unwrap_or("") }
 fn number(p: &Params, key: &str, default: f64) -> f64 {
