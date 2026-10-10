@@ -137,40 +137,50 @@ impl BomDocument {
     fn resolve_using(
         &mut self, library: &Library, cancelled: &AtomicBool,
         mut progress: impl FnMut(usize, usize),
-        mut search: impl FnMut(&str) -> Result<Vec<SearchItem>, String>,
+        search: impl Fn(&str) -> Result<Vec<SearchItem>, String> + Sync,
     ) {
         let total = self.rows.len();
-        let mut lookups: HashMap<String, Result<Vec<SearchItem>, String>> = HashMap::new();
+        let mut jobs: Vec<(String, Vec<(usize, Vec<SearchItem>)>)> = Vec::new();
+        let mut lookups = HashMap::<String, usize>::new();
+        let mut done = 0;
         progress(0, total);
         for (index, row) in self.rows.iter_mut().enumerate() {
             if cancelled.load(Ordering::Relaxed) { break; }
             if row.validation_error || !row.included || row.confirmed {
-                progress(index + 1, total);
+                done += 1; progress(done, total);
                 continue;
             }
             // A retry clears lookup failure only; imported validation errors remain visible.
-            row.error = None;
             let local = if row.lcsc.is_empty() {
                 library.records.values().filter_map(|r| r.snapshot.clone())
                     .filter(|item| item.name().eq_ignore_ascii_case(&row.model)).collect::<Vec<_>>()
             } else { library.cached_item(&row.lcsc).into_iter().collect() };
-            let mut candidates = local;
+            let candidates = local;
             if row.lcsc.is_empty() || candidates.is_empty() {
                 let query = row.query().to_string();
-                let result = lookups.entry(query.clone()).or_insert_with(|| search(&query));
-                match result {
-                    Ok(found) => candidates.extend(found.clone()),
-                    Err(e) if candidates.is_empty() => {
-                        row.error = Some(e.clone());
-                        progress(index + 1, total);
-                        continue;
-                    }
-                    Err(_) => {}
-                }
+                let key = query.to_lowercase();
+                let job = *lookups.entry(key).or_insert_with(|| { jobs.push((query, Vec::new())); jobs.len() - 1 });
+                jobs[job].1.push((index, candidates));
+                continue;
             }
+            row.error = None;
             apply_candidates(row, candidates);
-            progress(index + 1, total);
+            done += 1; progress(done, total);
         }
+        lceda_core::parallel::map_bounded(&jobs, lceda_core::parallel::NETWORK_WORKERS, cancelled,
+            |(query, _)| search(query), |job, result| {
+                for (index, local) in &jobs[job].1 {
+                    let row = &mut self.rows[*index]; let mut candidates = local.clone(); row.error = None;
+                    match result {
+                        Ok(found) => candidates.extend(found.clone()),
+                        Err(error) if candidates.is_empty() => row.error = Some(error.clone()),
+                        Err(_) => {},
+                    }
+                    if row.error.is_none() { apply_candidates(row, candidates); }
+                    done += 1;
+                }
+                progress(done, total);
+            });
     }
 
     /// Confirm remaining exact supplier IDs without overriding explicit user choices.
@@ -401,17 +411,24 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_queries_share_lookup_and_cancellation_keeps_completed_rows() {
+    fn duplicate_queries_share_parallel_lookup_and_keep_row_order() {
         let mut doc = BomDocument::from_table("repeat.csv".into(), parse_delimited("LCSC,Qty\nC2040,1\nC2040,2\nC9999,1\n").unwrap()).unwrap();
         let cancelled = AtomicBool::new(false);
-        let mut calls = 0;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut previous = 0;
         doc.resolve_using(&Library::default(), &cancelled, |done, _| {
-            if done == 2 { cancelled.store(true, Ordering::Relaxed); }
-        }, |_| { calls += 1; Ok(vec![candidate()]) });
-        assert_eq!(calls, 1);
+            assert!(done >= previous); previous = done;
+        }, |query| { calls.fetch_add(1, Ordering::Relaxed); Ok(if query=="C2040"{vec![candidate()]}else{Vec::new()}) });
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(previous, 3);
         assert_eq!(doc.rows[0].candidates.len(), 1);
         assert_eq!(doc.rows[1].candidates.len(), 1);
         assert!(doc.rows[2].candidates.is_empty());
+        assert_eq!(doc.rows.iter().map(|r|r.lcsc.as_str()).collect::<Vec<_>>(), ["C2040", "C2040", "C9999"]);
+        assert!(doc.rows.iter().all(|r|!r.confirmed));
+        let saved = doc.rows[0].candidates.len(); cancelled.store(true, Ordering::Relaxed);
+        doc.resolve_using(&Library::default(), &cancelled, |_, _| {}, |_| panic!("cancelled"));
+        assert_eq!(doc.rows[0].candidates.len(), saved);
     }
 
     #[test]

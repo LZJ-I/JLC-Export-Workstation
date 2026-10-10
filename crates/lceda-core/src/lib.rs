@@ -16,6 +16,7 @@ pub mod mesh;
 pub mod managed_ad;
 pub mod models;
 pub mod native_library;
+pub mod parallel;
 pub mod pads;
 pub mod util;
 
