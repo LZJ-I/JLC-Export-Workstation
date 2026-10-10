@@ -15,6 +15,7 @@ impl RowState {
 #[derive(Clone)]
 struct SyncRow {
     id: String, name: String, targets: String, state: RowState, error: Option<String>,
+    detail: Option<String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage { Validating, Running, Finished }
@@ -87,6 +88,7 @@ fn run_rows(
         match result {
             Ok(Some((item, paths))) => {
                 p.rows[index].state = RowState::Done;
+                p.rows[index].detail = paths.ad_sync.clone();
                 report.message.push_str(&format!("OK {} · {}\n{}\n", id, item.name(), format_paths(&paths, output)));
                 report.exported.push((item, paths));
             }
@@ -104,11 +106,61 @@ fn run_rows(
 }
 
 impl App {
+    pub(super) fn ad_connection_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_ad_connection { return; }
+        let Some(root) = crate::profile_dir().map(|p| p.join("ad-bridge")) else { return; };
+        let lang = self.lang;
+        let connected = lceda_core::ad_bridge::connection(&root).is_ok();
+        let enabled = lceda_core::ad_bridge::enabled(&root);
+        let mut open = true; let mut launch = false; let mut folder = false; let mut offline = false; let mut close = false;
+        fit_window(i18n::t(lang, "ad_connection_title"), "ad_connection", 600.0).open(&mut open).show(ctx, |ui| {
+            ui.set_width(576.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::heading(i18n::t(lang, if connected { "ad_connected" } else { "ad_disconnected" })));
+                if enabled && !connected { ui.add(egui::Spinner::new().size(14.0)); }
+            });
+            ui.add(egui::Label::new(i18n::t(lang, "ad_connection_hint")).wrap());
+            ui.add_space(10.0);
+            egui::Frame::new().fill(theme::well()).corner_radius(7).inner_margin(10).show(ui, |ui| {
+                for key in ["ad_connection_step1", "ad_connection_step2", "ad_connection_step3"] {
+                    ui.add(egui::Label::new(i18n::t(lang, key)).wrap());
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, "ad_preserve_hint")).small().color(theme::secondary())).wrap());
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(egui::RichText::new(root.display().to_string()).small().color(theme::secondary())).truncate()).on_hover_text(root.display().to_string());
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                launch = theme::pill_button(ui, i18n::t(lang, "ad_open_project"), cfg!(windows) && !connected && !self.busy(), true).clicked();
+                folder = theme::pill_button(ui, i18n::t(lang, "ad_open_folder"), root.is_dir(), false).clicked();
+                close = theme::pill_button(ui, i18n::t(lang, "close"), true, false).clicked();
+            });
+            if enabled {
+                ui.add_space(6.0);
+                offline = theme::pill_button(ui, i18n::t(lang, "ad_file_mode"), !self.busy(), false).clicked();
+            }
+        });
+        if launch {
+            match lceda_core::ad_bridge::install(&root) {
+                Ok(project) => { if !open_folder(&project) { self.alert(i18n::t(lang, "ad_open_failed")); } }
+                Err(error) => self.alert(error.to_string()),
+            }
+        }
+        if folder { open_folder(&root); }
+        if offline {
+            if let Err(error) = lceda_core::ad_bridge::disable(&root) { self.alert(error.to_string()); }
+        }
+        if close || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.show_ad_connection = false; }
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
     pub(super) fn begin_binding_validation(&mut self, category: String, format: LibraryFormat, path: PathBuf) {
         let targets = BTreeSet::from([(category.clone(), format)]);
         let rows = self.lib.favs_in(&category).into_iter().filter(|part| self.lib.native(&part.lcsc).is_none())
             .map(|part| SyncRow { id: part.lcsc.to_ascii_uppercase(), name: part.name.clone(),
-                targets: format!("{} · {}", format.name(), path.display()), state: RowState::Waiting, error: None }).collect();
+                targets: format!("{} · {}", format.name(), path.display()), state: RowState::Waiting, error: None, detail: None }).collect();
         let task = LibrarySyncTask::new(rows, targets, Stage::Validating);
         let cancel = task.cancel.clone();
         self.library_sync_task = Some(task); self.show_library_sync = true; self.bind_cat = None;
@@ -142,13 +194,14 @@ impl App {
         }
     }
 
-    pub(super) fn launch_library_sync(&mut self, targets: BTreeSet<(String, LibraryFormat)>, req: ExportRequest, ids: BTreeSet<String>) {
+    #[allow(unused_mut)] // AD editor connection is Windows-only.
+    pub(super) fn launch_library_sync(&mut self, targets: BTreeSet<(String, LibraryFormat)>, mut req: ExportRequest, ids: BTreeSet<String>) {
         let rows = ids.into_iter().map(|id| {
             let name = self.lib.favs.iter().find(|p| p.lcsc.eq_ignore_ascii_case(&id)).map(|p| p.name.clone()).unwrap_or_else(|| id.clone());
             let mut paths = Vec::new();
             if let Some(path) = req.ad_library_files.get(&id) { paths.push(format!("AD · {}", path.display())); }
             if let Some(path) = req.kicad_library_files.get(&id) { paths.push(format!("KiCad · {}", path.display())); }
-            SyncRow { id, name, targets: paths.join("\n"), state: RowState::Waiting, error: None }
+            SyncRow { id, name, targets: paths.join("\n"), state: RowState::Waiting, error: None, detail: None }
         }).collect();
         let task = LibrarySyncTask::new(rows, targets, Stage::Running);
         if task.progress.lock().unwrap().rows.is_empty() {
@@ -158,6 +211,27 @@ impl App {
             task.fail(i18n::t(self.lang, "choose_output").into()); self.library_sync_task = Some(task); self.show_library_sync = true; return;
         }
         let worker = LibrarySyncTask { progress: task.progress.clone(), cancel: task.cancel.clone(), targets: task.targets.clone(), can_retry: true };
+        #[cfg(windows)]
+        if !req.ad_library_files.is_empty() {
+            if let Some(root) = crate::profile_dir().map(|p| p.join("ad-bridge")) {
+                if lceda_core::ad_bridge::enabled(&root) || lceda_core::ad_bridge::connection(&root).is_ok() {
+                    let progress = task.progress.clone();
+                    let lang = self.lang;
+                    req.ad_bridge = Some(lceda_core::ad_bridge::Bridge::new(root).with_progress(move |phase| {
+                        let key = format!("ad_phase_{phase}");
+                        let text = i18n::t(lang, &key).to_string();
+                        if let Some(row) = progress.lock().unwrap().rows.iter_mut().find(|r| r.state == RowState::Syncing) { row.detail = Some(text); }
+                    }));
+                }
+            }
+        }
+        if !req.ad_library_files.is_empty() {
+            let ready = if let Some(bridge) = &req.ad_bridge { lceda_core::ad_bridge::connection(&bridge.directory).map(|_| ()) }
+                else { lceda_core::ad_bridge::require_editor_closed() };
+            if let Err(error) = ready {
+                task.fail(error.to_string()); self.library_sync_task = Some(task); self.show_library_sync = true; return;
+            }
+        }
         self.library_sync_task = Some(task); self.library_sync_job = true;
         let library = self.lib.clone(); let heading = i18n::t(self.lang, "sync_library").to_string(); self.log(&heading);
         self.job = Some(Promise::spawn_thread("sync-bound-library", move || {
@@ -182,6 +256,8 @@ impl App {
         let running = p.stage != Stage::Finished; let stopping = task.cancel.load(Ordering::SeqCst);
         let (done, failed, skipped) = p.counts(); let total = p.rows.len(); let completed = done + failed;
         let mut open = true; let mut close = false; let mut cancel = false; let mut retry = false;
+        #[allow(unused_mut)]
+        let mut connect_ad = false;
         fit_window(i18n::t(lang, "sync_progress"), "library_sync_progress", 660.0).open(&mut open).show(ctx, |ui| {
             ui.set_width(636.0);
             ui.horizontal_wrapped(|ui| {
@@ -214,6 +290,7 @@ impl App {
                         });
                         ui.add(egui::Label::new(egui::RichText::new(row.targets.replace('\n', " · ")).small().color(theme::secondary())).truncate()).on_hover_text(&row.targets);
                         if let Some(error) = &row.error { ui.add(egui::Label::new(error).wrap().selectable(true)); }
+                        if let Some(detail) = &row.detail { ui.add(egui::Label::new(egui::RichText::new(detail).small().color(theme::secondary())).wrap().selectable(true)); }
                     });
                     ui.add_space(4.0);
                 }
@@ -226,9 +303,14 @@ impl App {
                 else if task.can_retry && (failed > 0 || skipped > 0 || p.note.is_some()) {
                     retry = theme::pill_button(ui, i18n::t(lang, "sync_retry"), !self.busy(), false).clicked();
                 }
+                #[cfg(windows)]
+                if !running && task.targets.iter().any(|(_, format)| *format == LibraryFormat::Ad) {
+                    connect_ad = theme::pill_button(ui, i18n::t(lang, "ad_connect"), true, false).clicked();
+                }
             });
         });
         if cancel { task.cancel.store(true, Ordering::SeqCst); }
+        if connect_ad { self.show_library_sync = false; self.show_ad_connection = true; }
         if retry {
             let targets = task.targets.clone();
             for (category, format) in targets { self.queue_library_sync(&category, Some(format)); }
@@ -242,7 +324,7 @@ impl App {
 mod tests {
     use super::*;
     fn task() -> LibrarySyncTask {
-        LibrarySyncTask::new((1001..=1003).map(|n| SyncRow { id: format!("C{n}"), name: String::new(), targets: "AD · test.SchLib".into(), state: RowState::Waiting, error: None }).collect(), BTreeSet::new(), Stage::Running)
+        LibrarySyncTask::new((1001..=1003).map(|n| SyncRow { id: format!("C{n}"), name: String::new(), targets: "AD · test.SchLib".into(), state: RowState::Waiting, error: None, detail: None }).collect(), BTreeSet::new(), Stage::Running)
     }
     fn item(id: &str) -> SearchItem {
         SearchItem { index: 1, display_title: id.into(), title: id.into(), manufacturer: String::new(),

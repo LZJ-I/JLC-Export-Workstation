@@ -99,7 +99,9 @@ Native export offers **Include supplementary resources (retain original links)**
 
 The **Sync library** dropdown updates all bindings in the current library, AD only, KiCad only, or every library. The category context menu provides the same controls. **Bind library file… → AD / KiCad** selects an existing or new target. Each category can bind one target per format; duplicate file bindings are rejected.
 
-- **AD:** choose `.SchLib` with its same-stem `.PcbLib`. Stable C-number names allow updates while Comment retains the MPN. Unrelated components, fonts, models and extra streams are retained.
+On Windows, **Sync library → Connect to AD…** installs a local script project. Run `LCEDA_StartBridge` in AD once per editor session. AD appends, saves, refreshes and reads back components; the workstation also verifies the saved symbols, footprints and embedded STEP. Existing names and links are retained, and unsaved target libraries stop the task. New symbol names use `model_Cnumber`. Connection errors and timeouts never fall back to replacing files. File sync requires AD to be closed and is labelled as not editor-verified. Linux and KiCad keep their file-based workflow. See [connection instructions and validation limits](integrations/altium/README_ZH.md).
+
+- **AD:** choose `.SchLib` with its same-stem `.PcbLib`. File sync uses stable C-number names for updates while Comment retains the MPN; the editor connection appends and preserves existing components as described above. Unrelated components, fonts, models and extra streams are retained.
 - **KiCad:** choose `.kicad_sym` with same-stem `.pretty/` and `.3dshapes/` folders. Stable C-number identifiers connect symbols, footprints and models; Value retains the MPN. Uses **KiCad 9 format** and upgrades older symbol-library versions while preserving untouched symbols and unknown fields.
 
 Adding parts, importing BOMs and changing export settings automatically schedule synchronization. Removing parts or unbinding preserves external components. Ordinary exports check for path collisions with bound files.

@@ -263,6 +263,7 @@ struct App {
     library_sync_task: Option<LibrarySyncTask>,
     library_sync_job: bool,
     show_library_sync: bool,
+    show_ad_connection: bool,
     bind_job: Option<BindPromise>,
     symbol: Option<SymbolIr>,
     symbol_note: Option<String>,
@@ -395,6 +396,7 @@ impl App {
             library_sync_task: None,
             library_sync_job: false,
             show_library_sync: false,
+            show_ad_connection: env::var_os("LCEDA_SHOT").is_some() && env::var_os("LCEDA_AD_CONNECTION").is_some(),
             bind_job: None,
             symbol: None,
             symbol_note: None,
@@ -2251,6 +2253,7 @@ impl eframe::App for App {
         self.show_cat_dialog(ctx);
         self.activity_dialog(ctx);
         self.library_sync_dialog(ctx);
+        self.ad_connection_dialog(ctx);
         self.clear_queue_dialog(ctx);
         self.show_alert(ctx);
         if !self.show_welcome {
@@ -3580,6 +3583,7 @@ impl App {
             || self.update.is_some()
             || self.show_activity
             || self.show_library_sync
+            || self.show_ad_connection
             || self.confirm_clear_queue
             || self.show_bom_import
             || self.bind_cat.is_some()
@@ -4159,6 +4163,7 @@ impl App {
 
     fn handle_library_action(&mut self, action: LibraryAction) {
         match action {
+            LibraryAction::ConnectAd => { self.show_ad_connection = true; }
             LibraryAction::ShowProgress => { self.show_library_sync = true; }
             LibraryAction::Bind(id, format) => {
                 self.bind_path = self.lib.binding_for(&id, format).map(|p| p.display().to_string()).unwrap_or_else(|| {
@@ -4442,7 +4447,9 @@ impl App {
     }
 }
 
+#[allow(dead_code)] // ConnectAd is exposed only on Windows.
 enum LibraryAction {
+    ConnectAd,
     ShowProgress,
     Bind(String, LibraryFormat), Unbind(String, LibraryFormat),
     Sync(String, Option<LibraryFormat>), SyncAll,
@@ -4460,6 +4467,11 @@ fn dropdown_menu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut e
 fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang, busy: bool, has_progress: bool) -> Option<LibraryAction> {
     theme::prepare_menu(ui);
     let mut action = None;
+    #[cfg(windows)]
+    {
+        if ui.button(i18n::t(lang, "ad_connect")).clicked() { action = Some(LibraryAction::ConnectAd); ui.close(); }
+        ui.separator();
+    }
     if has_progress {
         if ui.button(i18n::t(lang, "sync_view_progress")).clicked() { action = Some(LibraryAction::ShowProgress); ui.close(); }
         ui.separator();
@@ -5108,6 +5120,7 @@ fn format_paths(paths: &lceda_core::models::DownloadPaths, out_dir: &Path) -> St
     if let Some(p) = &paths.pcblib {
         lines.push(format!("PcbLib  {}", short_name(p)));
     }
+    if let Some(note) = &paths.ad_sync { lines.push(note.clone()); }
     if let Some(p) = &paths.kicad_sym {
         lines.push(format!("KiCad  {}", short_name(p)));
     }
