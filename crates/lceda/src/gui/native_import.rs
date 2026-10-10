@@ -229,30 +229,32 @@ impl App {
         if close||!open||ctx.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)){self.show_detail=false;}
     }
     pub(super) fn native_export_dialog(&mut self,ctx:&egui::Context){
-        let Some(ids)=self.native_export.clone()else{return;};let lang=self.lang;let mut open=true;let mut start=false;let mut cancel=false;
+        let Some(mut plan)=self.native_export.clone()else{return;};let ids=plan.saved_ids().to_vec();let lang=self.lang;let mut open=true;let mut start=false;let mut cancel=false;
         fit_window(i18n::t(lang,"native_export"),"native_export",520.0).open(&mut open).show(ctx,|ui|{
-            ui.label(theme::heading(format!("{} {}",ids.len(),i18n::t(lang,"components"))));
+            plan.review(ui,&self.lib,lang);
             ui.add(egui::Label::new(i18n::t(lang,"native_export_hint")).wrap());
             if ids.iter().any(|id|self.lib.record(id).is_some_and(|r|!r.supplements.is_empty())){ui.checkbox(&mut self.native_export_resources,i18n::t(lang,"resource_export"));}
             ui.add_space(10.0);ui.horizontal(|ui|{
                 ui.add(egui::TextEdit::singleline(&mut self.out_dir).desired_width((ui.available_width()-82.0).max(120.0)));
                 if ui.button(i18n::t(lang,"browse")).clicked(){if let Some(path)=rfd::FileDialog::new().pick_folder(){self.out_dir=path.display().to_string();self.persist_prefs();}}
             });
+            plan.rebase_native(Path::new(self.out_dir.trim()));
+            let output=plan.output.display().to_string();
+            ui.add(egui::Label::new(egui::RichText::new(&output).small().color(theme::secondary())).truncate()).on_hover_text(output);
             ui.add_space(12.0);ui.horizontal(|ui|{
                 cancel=theme::pill_button(ui,i18n::t(lang,"cancel"),true,false).clicked();
                 start=theme::pill_button(ui,i18n::t(lang,"export_default"),!self.busy()&&!self.out_dir.trim().is_empty(),true).clicked();
             });
         });
         if cancel||!open||ctx.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)){self.native_export=None;return;}
-        if start{self.native_export=None;self.export_native_ids(ids);}
+        if start{self.native_export=None;self.export_native_plan(plan);}
     }
-    fn export_native_ids(&mut self,ids:Vec<String>){
+    fn export_native_plan(&mut self,plan:ExportPlan){
         if self.busy()||!self.validate_export_target(){return;}
-        let library=self.lib.clone();let output=PathBuf::from(self.out_dir.trim());let mut req=self.batch_opts.request(output.clone());self.apply_export_opts(&mut req);
-        req.merge=self.batch_merge;
+        let library=self.lib.clone();let mut req=self.export_request(&plan);let ids=plan.saved_ids().to_vec();let root=plan.output;
         let include_resources=self.native_export_resources;
         self.job=Some(Promise::spawn_thread("export-native",move||{
-            let root=output.join(format!("Library-{}",lceda_core::util::unique_id()));fs::create_dir_all(&output)?;fs::create_dir(&root)?;
+            if let Some(parent)=root.parent(){fs::create_dir_all(parent)?;}fs::create_dir(&root)?;
             let mut groups:BTreeMap<(LibraryFormat,PathBuf),Vec<String>>=BTreeMap::new();let mut online=Vec::new();
             for id in ids{if let Some(record)=library.native(&id){groups.entry((record.format,record.library.clone())).or_default().push(record.part.key.clone());}else{online.push(id);}}
             let mut messages=Vec::new();let mut failed=0;let mut exported=Vec::new();

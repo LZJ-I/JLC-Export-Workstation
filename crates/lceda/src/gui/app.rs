@@ -15,7 +15,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use eframe::egui_glow::glow;
 use lceda_core::client::LcedaClient;
 use lceda_core::altium::{PIN_FONT_SIZE_MAX, PIN_FONT_SIZE_MIN, SchColorScheme, SchColors};
-use lceda_core::export::{ExportRequest, export};
+use lceda_core::export::ExportRequest;
 use lceda_core::mesh::{self, Mesh};
 use lceda_core::models::{SearchItem, DownloadPaths};
 use poll_promise::Promise;
@@ -37,6 +37,9 @@ use resource_assist::ResourceAssist;
 #[path = "library_sync.rs"]
 mod library_sync;
 use library_sync::{LibrarySyncTask, BindPromise};
+#[path = "export_plan.rs"]
+mod export_plan;
+use export_plan::{ExportPlan, ExportSelection};
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
 struct JobReport {
@@ -246,7 +249,7 @@ struct App {
     native_selected: Option<String>,
     native_scene: Option<SchPreview>,
     native_unit: usize,
-    native_export: Option<Vec<String>>,
+    native_export: Option<ExportPlan>,
     native_export_resources: bool,
     library_filter: String,
     lang: Lang,
@@ -272,7 +275,7 @@ struct App {
     bom_job: Option<BomPromise>,
     bom_cancel: Arc<AtomicBool>,
     bom_progress: Arc<Mutex<(usize, usize)>>,
-    export_items_pending: Option<Vec<SearchItem>>,
+    pending_export: Option<ExportPlan>,
     show_activity: bool,
     confirm_clear_queue: bool,
     keyword: String,
@@ -326,7 +329,6 @@ struct App {
     welcome_hide: bool,
     hide_welcome: bool,
     show_batch: bool,
-    export_ids_pending: Option<Vec<String>>,
     parts_width: f32,
     photo_frac: Option<f32>,
     top_frac: Option<f32>,
@@ -405,7 +407,7 @@ impl App {
             bom_job: None,
             bom_cancel: Arc::new(AtomicBool::new(false)),
             bom_progress: Arc::new(Mutex::new((0, 0))),
-            export_items_pending: None,
+            pending_export: None,
             show_activity: false,
             confirm_clear_queue: false,
             keyword: String::new(),
@@ -482,7 +484,6 @@ impl App {
             welcome_hide: true,
             hide_welcome: prefs.hide_welcome,
             show_batch: false,
-            export_ids_pending: None,
             parts_width: prefs.parts_width,
             photo_frac: prefs.photo_frac,
             top_frac: prefs.top_frac,
@@ -792,9 +793,32 @@ impl App {
         if page == NavPage::Favorites {
             self.fav_inside = false;
         }
+        self.refresh_context_selection();
         if page == NavPage::Sponsor {
             self.ensure_sponsor();
         }
+    }
+
+    fn clear_part_selection(&mut self) {
+        self.detail = None; self.resolve = None;
+        self.queue_preview();
+    }
+
+    fn refresh_context_selection(&mut self) {
+        if self.page == NavPage::Search {
+            if let Some(index) = self.selected.filter(|index| *index < self.items.len()) { self.select_search(index); }
+            else { self.clear_part_selection(); }
+            return;
+        }
+        let parts = match self.page {
+            NavPage::Favorites => self.lib.favs_in(&self.fav_cat),
+            NavPage::Queue => self.lib.queue.iter().collect(),
+            _ => return,
+        };
+        let current = self.native_selected.clone().or_else(|| self.detail.as_ref().and_then(SearchItem::lcsc_id));
+        let next = export_plan::saved_selection(parts, current.as_deref());
+        if next.is_some() && next == current { return; }
+        if let Some(id) = next { self.select_saved(&id); } else { self.clear_part_selection(); }
     }
 
     fn ensure_sponsor(&mut self) {
@@ -1786,33 +1810,43 @@ impl App {
     }
 
     fn pending_can_merge(&self) -> bool {
-        let parts: Vec<_> = if let Some(items) = &self.export_items_pending {
+        let Some(plan) = &self.pending_export else { return false; };
+        let parts: Vec<_> = match &plan.selection {
+            ExportSelection::Items(items) => {
             items.iter().map(|item| {
                 let id = item.lcsc_id().unwrap_or_else(|| item.name().to_string());
                 (id.to_ascii_uppercase(), item.has_symbol_or_footprint(), false, false)
             }).collect()
-        } else if let Some(ids) = &self.export_ids_pending {
+            }
+            ExportSelection::Ids(ids) => {
             ids.iter().map(|id| {
                 let cad = self.lib.cached_item(id).map(|item| item.has_symbol_or_footprint()).unwrap_or(true);
                 (id.to_ascii_uppercase(), cad, false, false)
             }).collect()
-        } else { Vec::new() };
+            }
+        };
         can_merge_library_parts(self.batch_opts.ad, self.batch_opts.kicad, parts)
+    }
+
+    fn export_request(&self, plan: &ExportPlan) -> ExportRequest {
+        let mut req = self.batch_opts.request(plan.output.clone());
+        self.apply_export_opts(&mut req); req.merge = self.batch_merge;
+        if let Some(name) = &plan.library_name { req.merge_name = name.clone(); }
+        req
     }
 
     fn show_batch_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_batch {
             return;
         }
+        let Some(plan) = self.pending_export.clone() else { self.show_batch = false; return; };
         let mut close = false;
         let mut start = false;
         let lang = self.lang;
         let width = 400.0;
         fit_window(i18n::t(lang, "batch_title"), "lceda_batch_fit", width).show(ctx, |ui| {
             ui.set_width(width - 8.0);
-            let count = self.export_items_pending.as_ref().map(Vec::len)
-                .or_else(|| self.export_ids_pending.as_ref().map(|ids| ids.len().max(1))).unwrap_or(1);
-            ui.label(theme::heading(format!("{count} {}", i18n::t(lang, "components"))));
+            plan.review(ui, &self.lib, lang);
             ui.label(egui::RichText::new(i18n::t(lang, "batch_hint")).color(theme::secondary()));
             ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, "export_copy_hint")).small().color(theme::secondary())).wrap());
             ui.add_space(8.0);
@@ -1855,7 +1889,8 @@ impl App {
             ui.add_space(10.0);
             ui.separator();
             ui.label(egui::RichText::new(i18n::t(lang, "output")).small().color(theme::secondary()));
-            ui.add(egui::Label::new(egui::RichText::new(&self.out_dir).small()).truncate()).on_hover_text(&self.out_dir);
+            let output = plan.output.display().to_string();
+            ui.add(egui::Label::new(egui::RichText::new(&output).small()).truncate()).on_hover_text(output);
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1876,20 +1911,20 @@ impl App {
                 self.alert(i18n::t(self.lang, "batch_none"));
             } else {
                 self.persist_prefs();
-                if let Some(items) = self.export_items_pending.take() { self.export_exact_items(items); }
-                else { match self.export_ids_pending.take() {
-                    Some(ids) if ids.is_empty() => self.export_selected(),
-                    Some(ids) => self.export_ids(ids),
-                    None => {}
-                } }
+                if let Some(plan) = self.pending_export.take() {
+                    let req = self.export_request(&plan);
+                    match plan.selection {
+                        ExportSelection::Items(items) => self.export_exact_items(items, req),
+                        ExportSelection::Ids(ids) => self.export_ids(ids, req),
+                    }
+                }
                 close = true;
             }
         }
         close |= ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if close {
             self.show_batch = false;
-            self.export_ids_pending = None;
-            self.export_items_pending = None;
+            self.pending_export = None;
         }
     }
 
@@ -2254,17 +2289,17 @@ impl App {
                         self.log(format!("{}: {}", i18n::t(self.lang, "search"), items.len()));
                         self.items = items;
                         self.selected = if self.items.is_empty() { None } else { Some(0) };
-                        self.detail = self.items.first().cloned();
-                        if let Some(item) = &self.detail {
+                        if let Some(item) = self.items.first() {
                             if let Some(id) = item.lcsc_id() {
                                 self.cache.insert(id, item.clone());
-                self.lib.enrich_from_item(item);
+                                self.lib.enrich_from_item(item);
                             }
                         }
                         if self.items.is_empty() {
+                            if self.page == NavPage::Search { self.clear_part_selection(); }
                             self.alert(i18n::t(self.lang, "no_results"));
-                        } else {
-                            self.queue_preview();
+                        } else if self.page == NavPage::Search {
+                            self.select_search(0);
                         }
                     }
                     Err(e) => self.alert(format!("{}: {e}", i18n::t(self.lang, "error"))),
@@ -2790,11 +2825,13 @@ impl App {
         if let Some(ids)=resource_ids{self.open_resource_assist(ids,Default::default());}
         if let Some(id) = select_cat {
             self.fav_cat = id;
+            self.refresh_context_selection();
         }
         if let Some(id) = enter_cat {
             self.fav_cat = id;
             self.library_filter.clear();
             self.fav_inside = true;
+            self.refresh_context_selection();
         }
         if leave {
             self.fav_inside = false;
@@ -2827,15 +2864,14 @@ impl App {
         }
         if persist {
             self.lib.save();
+            self.refresh_context_selection();
         }
         if export_cat {
-            let ids = self
-                .lib
-                .favs_in(&self.fav_cat)
-                .into_iter()
-                .map(|p| p.lcsc.clone())
-                .collect();
-            self.ask_export_ids(ids);
+            let name = if self.fav_cat == UNCAT { i18n::t(lang, "uncategorized").to_string() }
+                else { self.lib.cat(&self.fav_cat).map(|c| c.name.clone()).unwrap_or_default() };
+            let caption = format!("{} · {name}", i18n::t(lang, "export_library_all"));
+            let plan = ExportPlan::library(&self.lib, &self.fav_cat, &name, caption, PathBuf::from(self.out_dir.trim()));
+            self.open_export_plan(plan);
         }
         if let Some(lcsc) = export_part {
             self.ask_export_ids(vec![lcsc]);
@@ -2909,6 +2945,7 @@ impl App {
         if let Some(lcsc) = remove {
             self.lib.remove_queue(&lcsc);
             self.lib.save();
+            self.refresh_context_selection();
         }
         if import {
             self.import_queue_file();
@@ -3164,6 +3201,7 @@ impl App {
     }
 
     fn select_search(&mut self, idx: usize) {
+        self.resolve = None;
         self.selected = Some(idx);
         self.detail = self.items.get(idx).cloned();
         if let Some(item) = &self.detail {
@@ -3177,6 +3215,7 @@ impl App {
     }
 
     fn select_saved(&mut self, lcsc: &str) {
+        self.clear_part_selection();
         if self.lib.native(lcsc).is_some(){
             self.native_selected=Some(lcsc.to_string());self.detail=None;self.resolve=None;self.native_unit=1;self.queue_native_preview();return;
         }
@@ -3185,9 +3224,6 @@ impl App {
         if let Some(item) = self.cache.get(lcsc).cloned().or_else(|| self.lib.cached_item(lcsc)) {
             self.detail = Some(item);
             self.queue_preview();
-            return;
-        }
-        if self.resolve.is_some() {
             return;
         }
         let q = lcsc.to_string();
@@ -3201,58 +3237,30 @@ impl App {
 
     fn ask_export_selected(&mut self) {
         if let Some(id)=self.native_selected.clone(){self.ask_export_ids(vec![id]);return;}
-        if self.selected_item().is_none() {
-            self.alert(i18n::t(self.lang, "select_first"));
-            return;
-        }
-        self.export_ids_pending = Some(Vec::new());
-        self.show_batch = true;
-    }
-
-    fn ask_export_ids(&mut self, ids: Vec<String>) {
-        if ids.is_empty() {
-            self.alert(i18n::t(self.lang, "batch_none"));
-            return;
-        }
-        if ids.iter().any(|id|self.lib.native(id).is_some()){self.native_export=Some(ids);return;}
-        self.export_ids_pending = Some(ids);
-        self.show_batch = true;
-    }
-
-    fn export_selected(&mut self) {
-        let Some(item) = self.selected_item() else {
+        let Some(item) = self.selected_item().cloned() else {
             self.alert(i18n::t(self.lang, "select_first"));
             return;
         };
-        let has3d = item.model_uuid.is_some();
-        let has_ad = item.has_symbol_or_footprint();
-        let has_ds = item.datasheet_url().is_some();
-        let mut opts = self.batch_opts;
-        if !has3d {
-            opts.step = false;
-            opts.obj = false;
-        }
-        if !has_ad {
-            opts.ad = false;
-            opts.kicad = false;
-            opts.pads = false;
-        }
-        if !has_ds {
-            opts.datasheet = false;
-        }
-        if !opts.any() {
+        let plan = ExportPlan::item(item, i18n::t(self.lang, "export_library_part").into(), PathBuf::from(self.out_dir.trim()));
+        self.open_export_plan(plan);
+    }
+
+    fn ask_export_ids(&mut self, ids: Vec<String>) {
+        let caption = i18n::t(self.lang, if self.page == NavPage::Queue { "queue" } else { "export_library_part" }).to_string();
+        self.open_export_plan(ExportPlan::ids(ids, caption, PathBuf::from(self.out_dir.trim())));
+    }
+
+    fn open_export_plan(&mut self, mut plan: ExportPlan) {
+        if plan.len() == 0 {
             self.alert(i18n::t(self.lang, "batch_none"));
             return;
         }
-        self.run_export(|req| {
-            req.step = opts.step;
-            req.obj = opts.obj;
-            req.ad = opts.ad;
-            req.kicad = opts.kicad;
-            req.pads = opts.pads;
-            req.datasheet = opts.datasheet;
-            req.source_json = opts.source || opts.ad || opts.kicad || opts.pads;
-        });
+        self.pending_export = None; self.native_export = None; self.show_batch = false;
+        if plan.saved_ids().iter().any(|id| self.lib.native(id).is_some()) {
+            plan.prepare_native(); self.native_export = Some(plan);
+        } else {
+            self.pending_export = Some(plan); self.show_batch = true;
+        }
     }
 
     fn add_to_queue(&mut self) {
@@ -3299,13 +3307,10 @@ impl App {
         }
     }
 
-    fn export_ids(&mut self, ids: Vec<String>) {
+    fn export_ids(&mut self, ids: Vec<String>, req: ExportRequest) {
         if self.busy() || ids.is_empty() { return; }
         if !self.validate_export_target() { return; }
         let library = self.lib.clone();
-        let mut req = self.batch_opts.request(PathBuf::from(self.out_dir.trim()));
-        self.apply_export_opts(&mut req);
-        req.merge = self.batch_merge;
         self.job = Some(Promise::spawn_thread("export-list", move || {
             let client = LcedaClient::new();
             let mut items = Vec::new();
@@ -3323,6 +3328,7 @@ impl App {
                 }
             }
             let mut report = export_report(&client, &items, &req);
+            report.failed += errors.len();
             if !errors.is_empty() { report.message = format!("{}\nResolution failed: {}\n{}", errors.join("\n"), errors.len(), report.message); }
             Ok(report)
         }));
@@ -3525,6 +3531,7 @@ impl App {
                     self.import_ids_to_fav(&id);
                 }
                 self.lib.save();
+                self.refresh_context_selection();
             }
             self.new_cat_name.clear();
             self.show_new_cat = false;
@@ -3585,7 +3592,7 @@ impl App {
 
     fn queue_preview(&mut self) {
         self.native_selected=None;self.native_scene=None;
-        let Some(item) = self.selected_item().cloned() else { return; };
+        self.preview = None;
         self.image_tex = None;
         self.mesh = None;
         self.mesh_tex = None;
@@ -3599,6 +3606,7 @@ impl App {
         self.yaw = 0.7;
         self.pitch = 0.55;
         self.zoom = 1.0;
+        let Some(item) = self.selected_item().cloned() else { return; };
         let id = item.lcsc_id();
         let record = id.as_ref().and_then(|id| self.lib.record(id)).cloned().unwrap_or_default();
         let desc_fields = self.desc_fields.clone();
@@ -3692,33 +3700,6 @@ impl App {
         }));
     }
 
-
-    fn run_export(&mut self, mutate: impl FnOnce(&mut ExportRequest)) {
-        if self.busy() { return; }
-        let Some(item) = self.selected_item().cloned() else {
-            self.alert(i18n::t(self.lang, "select_first"));
-            return;
-        };
-        let out_dir = PathBuf::from(self.out_dir.trim());
-        let mut req = ExportRequest {
-            force: true,
-            out_dir: out_dir.clone(),
-            ..Default::default()
-        };
-        mutate(&mut req);
-        if !self.validate_export_target() { return; }
-        self.apply_export_opts(&mut req);
-        if let Err(e) = std::fs::create_dir_all(&out_dir) {
-            self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
-            return;
-        }
-        self.log(format!("{}  {}", i18n::t(self.lang, "saving_to"), out_dir.display()));
-        self.job = Some(Promise::spawn_thread("export", move || {
-            let client = LcedaClient::new();
-            let paths = export(&client, &item, &req)?;
-            Ok(JobReport { message: format_paths(&paths, &out_dir), exported: vec![(item, paths)], notify: true, failed: 0 })
-        }));
-    }
 
     fn show_title_bar(&mut self, ctx: &egui::Context) {
         let dark = self.want_dark(ctx);
@@ -3990,7 +3971,7 @@ impl App {
         let want_library_picker = env::var("LCEDA_PICK_LIBRARY").is_ok();
         if jobs_idle && self.selected_item().is_some() {
             if want_batch && !self.show_batch {
-                self.show_batch = true;
+                self.ask_export_selected();
             }
             if want_detail && !self.show_detail {
                 self.show_detail = true;
@@ -4448,16 +4429,13 @@ impl App {
                 clear = theme::pill_button(ui, i18n::t(self.lang, "clear_confirm"), true, true).clicked();
             });
         });
-        if clear { self.lib.clear_queue(); self.lib.save(); }
+        if clear { self.lib.clear_queue(); self.lib.save(); self.refresh_context_selection(); }
         if clear || cancel || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.confirm_clear_queue = false; }
     }
 
-    fn export_exact_items(&mut self, items: Vec<SearchItem>) {
+    fn export_exact_items(&mut self, items: Vec<SearchItem>, req: ExportRequest) {
         if self.busy() || items.is_empty() { return; }
         if !self.validate_export_target() { return; }
-        let mut req = self.batch_opts.request(PathBuf::from(self.out_dir.trim()));
-        self.apply_export_opts(&mut req);
-        req.merge = self.batch_merge;
         self.job = Some(Promise::spawn_thread("export-confirmed", move || {
             Ok(export_report(&LcedaClient::new(), &items, &req))
         }));

@@ -95,7 +95,7 @@ Native export offers **Include supplementary resources (retain original links)**
 
 ### Library exports and binding synchronization
 
-**Library → Export…** offers **Export selected part… / Export current library…** without first using the export queue. Current-library export includes only that category, with optional merging for multiple parts. Exports create independent copies in the output folder.
+**Library → Export…** offers **Export selected part… / Export current library…** without first using the export queue. Switching libraries selects a member of the current category and clears the preview for empty libraries. Export confirmation freezes the selection and shows its identifiers, count and actual destination. Each current-library export contains only that category in its own `Library-name-id` folder, with optional merging for multiple parts, keeping earlier exports separate.
 
 The **Sync library** dropdown updates all bindings in the current library, AD only, KiCad only, or every library. The category context menu provides the same controls. **Bind library file… → AD / KiCad** selects an existing or new target. Each category can bind one target per format; duplicate file bindings are rejected.
 
@@ -106,7 +106,7 @@ Adding parts, importing BOMs and changing export settings automatically schedule
 
 Binding validation runs in the background. **Bind and sync** and manual synchronization immediately open **Library sync progress**, showing the current part, target files, completed count and individual errors. **Run in background** keeps the interface available; reopen progress from the status bar or Sync library menu. **Stop remaining parts** lets the current part finish before stopping, preserving completed writes. Failed or stopped tasks can be retried from the progress window.
 
-Both formats use file locking, recoverable transactions and `.filename.jlc-backup` previous-generation backups. Keep KiCad's `.filename.jlc-meta.json` ownership record with the library. Unowned name conflicts and manually edited managed components are rejected without overwriting them; use a new target after backing up if needed. Failures are shown and can be retried from the menu.
+Both formats use file locking, recoverable transactions and `.filename.jlc-backup` previous-generation backups. Windows local folders and WSL shared paths have been tested for synchronization and retries. Lock contention is reported separately from path or permission errors; failed replacement preserves the original file. Keep KiCad's `.filename.jlc-meta.json` ownership record with the library. Unowned name conflicts and manually edited managed components are rejected without overwriting them; use a new target after backing up if needed. Failures are shown and can be retried from the menu.
 
 Install AD's two libraries once. In KiCad, add the symbol file and `.pretty` library once using the file stem as the nickname; model references use the binding's absolute path. Refresh or reopen libraries after synchronization as needed. The app does not edit KiCad global/project library tables or place parts in an active schematic.
 
