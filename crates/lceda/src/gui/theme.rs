@@ -11,6 +11,7 @@ pub const LABEL: Color32 = Color32::from_rgb(27, 39, 57);
 pub const SECONDARY: Color32 = Color32::from_rgb(99, 114, 134);
 pub const WINDOW_BG: Color32 = Color32::from_rgb(241, 244, 248);
 pub const WELL: Color32 = Color32::from_rgb(232, 238, 245);
+const CONTROL_RADIUS: u8 = 7;
 
 thread_local! {
     static DARK: Cell<bool> = const { Cell::new(false) };
@@ -90,32 +91,55 @@ pub fn apply(ctx: &egui::Context) {
 pub fn apply_visuals(ctx: &egui::Context, dark: bool) {
     set_dark(dark);
     let mut visuals = if dark { Visuals::dark() } else { Visuals::light() };
-    visuals.window_fill = window_bg();
+    visuals.window_fill = fill();
     visuals.panel_fill = window_bg();
     visuals.extreme_bg_color = fill();
     visuals.faint_bg_color = well();
-    visuals.widgets.inactive.bg_fill = fill_strong();
-    visuals.widgets.inactive.weak_bg_fill = fill_strong();
-    visuals.widgets.hovered.bg_fill = if dark {
-        Color32::from_rgb(56, 70, 89)
+    let hover_fill = if dark {
+        Color32::from_rgb(40, 56, 77)
     } else {
-        Color32::from_rgb(240, 240, 245)
+        Color32::from_rgb(235, 242, 253)
     };
-    visuals.widgets.active.bg_fill = ACCENT;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, label());
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, label());
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, label());
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, label());
+    let hover_border = if dark {
+        Color32::from_rgb(75, 103, 142)
+    } else {
+        Color32::from_rgb(157, 184, 222)
+    };
+    let pressed_fill = if dark {
+        Color32::from_rgb(34, 51, 74)
+    } else {
+        Color32::from_rgb(226, 236, 252)
+    };
+    let focus_border = if dark { Color32::from_rgb(111, 162, 234) } else { ACCENT };
+    // Define every state: egui otherwise retains gray fills, black/white focus
+    // borders and a one-pixel expansion that can be clipped by the parent card.
+    let control = |background, border| egui::style::WidgetVisuals {
+        bg_fill: background,
+        weak_bg_fill: background,
+        bg_stroke: Stroke::new(1.0_f32, border),
+        fg_stroke: Stroke::new(1.0_f32, label()),
+        corner_radius: CornerRadius::same(CONTROL_RADIUS),
+        expansion: 0.0,
+    };
+    visuals.widgets = egui::style::Widgets {
+        noninteractive: control(fill(), hairline()),
+        inactive: control(fill_strong(), hairline()),
+        hovered: control(hover_fill, hover_border),
+        active: control(pressed_fill, focus_border),
+        open: control(hover_fill, focus_border),
+    };
     visuals.weak_text_color = Some(secondary());
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(3);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(3);
-    visuals.widgets.active.corner_radius = CornerRadius::same(3);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(9);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, hairline());
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(0, 122, 255, 36);
+    visuals.error_fg_color = if dark { Color32::from_rgb(242, 126, 132) } else { Color32::from_rgb(185, 54, 63) };
+    visuals.warn_fg_color = if dark { Color32::from_rgb(235, 175, 95) } else { Color32::from_rgb(172, 108, 32) };
+    visuals.selection.bg_fill = if dark {
+        Color32::from_rgba_unmultiplied(56, 134, 238, 42)
+    } else {
+        Color32::from_rgba_unmultiplied(29, 101, 210, 25)
+    };
+    visuals.selection.stroke = Stroke::new(1.0_f32, focus_border);
     visuals.hyperlink_color = if dark { Color32::from_rgb(144, 191, 255) } else { ACCENT };
     visuals.window_corner_radius = CornerRadius::same(9);
+    visuals.menu_corner_radius = CornerRadius::same(9);
     visuals.window_stroke = Stroke::new(1.0_f32, hairline());
     visuals.window_shadow = Shadow::NONE;
     visuals.popup_shadow = Shadow::NONE;
@@ -213,12 +237,12 @@ pub fn paint_card(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
-/// `.strong()` 用的是 active 白字，浅色底上会看不见。标题一律走这里。
+/// 标题明确使用主题文字色，避免继承局部按钮样式。
 pub fn heading(text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text.into()).strong().color(label())
 }
 
-/// Markdown 的标题/加粗走 `strong_text_color()`（即 active 白字）。浅色底上必须改回深色。
+/// Markdown 的标题和加粗也明确沿用当前主题文字色。
 pub fn show_markdown(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.scope(|ui| {
         let v = ui.visuals_mut();
@@ -380,17 +404,20 @@ pub fn action_button(
         widgets.inactive.bg_fill = ACCENT;
         widgets.inactive.weak_bg_fill = ACCENT;
         widgets.inactive.bg_stroke = Stroke::new(1.0_f32, ACCENT);
-        let hover = Color32::from_rgb(50, 119, 229);
+        let hover = Color32::from_rgb(34, 110, 222);
         widgets.hovered.bg_fill = hover;
         widgets.hovered.weak_bg_fill = hover;
-        widgets.hovered.bg_stroke = Stroke::new(1.5_f32, if is_dark() { Color32::from_rgb(159, 202, 255) } else { Color32::from_rgb(16, 65, 149) });
+        widgets.hovered.bg_stroke = Stroke::new(1.0_f32, hover);
+        widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
         widgets.active.bg_fill = Color32::from_rgb(22, 77, 164);
         widgets.active.weak_bg_fill = widgets.active.bg_fill;
+        widgets.active.bg_stroke = Stroke::new(1.0_f32, if is_dark() { Color32::from_rgb(111, 162, 234) } else { ACCENT });
+        widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
     }
     let button = egui::Button::new(egui::RichText::new(text).size(13.5).color(text_color))
         .wrap_mode(egui::TextWrapMode::Extend)
         .min_size(egui::vec2(size.x, size.y.max(34.0)))
-        .corner_radius(7);
+        .corner_radius(CONTROL_RADIUS);
     let response = ui.add_enabled(enabled, button);
     ui.set_style(previous_style);
     response
