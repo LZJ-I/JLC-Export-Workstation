@@ -37,7 +37,7 @@ Each part gets a subfolder named `MPN_LCSC_Manufacturer`. Files inside use the M
 The sidebar switches between **Search**, **Library**, **Export list**, **Sponsor**, **Settings**, and **About**. BOM import is inside Library. Drag the title bar to move, or double-click to maximize. Window size, splitters, and theme are remembered.
 
 1. Type an MPN (e.g. `STM32F103C8T6`) or LCSC id (e.g. `C8734`), then press Enter or **Search**. Double-click a row to add it to the export list.
-2. Startup searches for a 10kΩ resistor (C25804). The header shows a larger part photo, resource status and actions. One full-size canvas has a remembered dropdown for **Schematic / 3D / Footprint**. Scroll to zoom, drag, and double-click to reset. The schematic reads actual AD export records, including designator, MPN and visible pin text, with the exported fonts, sizes and colors. The footprint shows actual pads, holes and outlines.
+2. The search field and part preview start empty. Search for an MPN or LCSC code, then select a part. The header shows a larger part photo, resource status and actions. One full-size canvas has a remembered dropdown for **Schematic / 3D / Footprint**. Scroll to zoom, drag, and double-click to reset. The schematic reads actual AD export records, including designator, MPN and visible pin text, with the exported fonts, sizes and colors. The footprint shows actual pads, holes and outlines.
 3. **Export…** opens one checklist for libraries, models and PDF. Confirm your selections to write files:
    - **Download STEP / OBJ**: 3D models
    - **Export Altium**: `.SchLib` / `.PcbLib` (EasyEDA JSON is kept too)

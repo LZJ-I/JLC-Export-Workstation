@@ -35,7 +35,7 @@ Altium 的[文件库机制](https://www.altium.com/documentation/altium-designer
 - 原理图、三维外形、封装使用完整的大画布，通过下拉框切换并记住选择。封装按实际几何绘制焊盘、钻孔、丝印和外形；支持缩放、拖动和双击恢复。
 - 原理图直接读取导出器生成的 SchLib 记录，显示 Designator、Comment、可见管脚名和编号，采用文件内的字体、字号、坐标和颜色。位号与型号避开完整符号及管脚；预览边界包含文字。字体尺寸采用 AD 文档坐标比例，参考 [AltiumSharp 的符号渲染](https://github.com/issus/AltiumSharp/blob/master/src/OriginalCircuit.Altium.Rendering.Core/SchComponentRenderer.cs)。预览使用本程序渲染器，尚未与实际 AD GUI 逐像素比对。
 - 合并库选项仅在有多个可合并器件的批量导出框中显示，单器件导出及全局设置不显示。解析后再次核对器件数量，避免旧勾选状态影响单器件导出。普通导出生成副本，绑定库由自动同步或「同步库」菜单更新。
-- 工作区和 Description 预览默认展示 10kΩ 电阻（C25804）；Description 设置采用左侧字段选择 / 排序、右侧 AD 三栏预览。
+- 工作区启动为空，输入型号或编号后搜索；Description 设置采用左侧字段选择 / 排序、右侧 AD 三栏预览，使用 10kΩ 电阻（C25804）作为设置示例。
 - 每个器件库可各绑定一个 AD 和 KiCad 库文件；AD 选择 SchLib，配套同名 PcbLib；KiCad 选择 kicad_sym，配套同名 pretty 和 3dshapes 目录。加入器件、导入 BOM 或修改导出设置后自动同步。追加和更新保留其他已有器件，使用备份、锁和中断恢复保护写入。已删除原全局固定目录设置。
 
 当前在线搜索仍是立创，未把静态调研中发现的供应商名称当作已接通的搜索源。KiCad 已加入增量绑定同步，详见[实现与验证](KICAD_BINDING_ASSESSMENT_ZH.md)。器件库顶部提供单器件、整库导出，以及按 AD / KiCad 选择的同步下拉菜单。

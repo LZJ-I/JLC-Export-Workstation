@@ -43,7 +43,7 @@ type SponsorPromise = Promise<Result<sponsor::Pack, String>>;
 type SponsorQrPromise = Promise<Result<(String, Vec<u8>), String>>;
 type ResolvePromise = Promise<Result<(String, SearchItem), String>>;
 
-const DEFAULT_PART: &str = "C25804"; // 10kΩ, 0603, 1%
+const DEFAULT_DESC_PREVIEW_PART: &str = "C25804"; // Description example: 10kΩ, 0603, 1%
 const GAP: f32 = 10.0;
 const CARD_PAD: f32 = 12.0;
 const NAV_W: f32 = 156.0;
@@ -478,7 +478,9 @@ impl App {
             update_progress: None,
             md_cache: CommonMarkCache::default(),
             frame: 0,
-            pending_search: Some(env::var("LCEDA_SEARCH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_PART.into())),
+            pending_search: if skip_update {
+                env::var("LCEDA_SEARCH").ok().filter(|s| !s.trim().is_empty())
+            } else { None },
             shot_path: env::var("LCEDA_SHOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
             shot_requested: false,
             shot_settle: 0,
@@ -491,7 +493,7 @@ impl App {
             desc_fields: prefs.desc_fields.clone(),
             show_detail: false,
             detail_query: String::new(),
-            desc_preview_kw: env::var("LCEDA_DESC_PREVIEW").unwrap_or_else(|_| DEFAULT_PART.into()),
+            desc_preview_kw: env::var("LCEDA_DESC_PREVIEW").unwrap_or_else(|_| DEFAULT_DESC_PREVIEW_PART.into()),
             desc_preview_item: None,
             desc_preview_job: None,
             desc_preview_note: None,
