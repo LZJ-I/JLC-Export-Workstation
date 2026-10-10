@@ -34,6 +34,9 @@ use native_import::{NativeImportState,PreparedImport};
 #[path = "resource_assist.rs"]
 mod resource_assist;
 use resource_assist::ResourceAssist;
+#[path = "library_sync.rs"]
+mod library_sync;
+use library_sync::{LibrarySyncTask, BindPromise};
 
 type SearchPromise = Promise<lceda_core::Result<Vec<SearchItem>>>;
 struct JobReport {
@@ -254,6 +257,10 @@ struct App {
     bind_path: String,
     pending_library_sync: BTreeSet<(String, LibraryFormat)>,
     library_sync_after: Option<Instant>,
+    library_sync_task: Option<LibrarySyncTask>,
+    library_sync_job: bool,
+    show_library_sync: bool,
+    bind_job: Option<BindPromise>,
     symbol: Option<SymbolIr>,
     symbol_note: Option<String>,
     symbol_view: SymbolView,
@@ -341,6 +348,9 @@ struct App {
     shot_path: Option<PathBuf>,
     shot_requested: bool,
     shot_settle: u32,
+    shot_input: Option<PathBuf>,
+    shot_input_id: u64,
+    shot_pointer_release: Option<egui::Pos2>,
     ad_embed_3d: bool,
     kicad_attach_3d: bool,
     rename_footprint: bool,
@@ -380,6 +390,10 @@ impl App {
             bind_path: String::new(),
             pending_library_sync: BTreeSet::new(),
             library_sync_after: None,
+            library_sync_task: None,
+            library_sync_job: false,
+            show_library_sync: false,
+            bind_job: None,
             symbol: None,
             symbol_note: None,
             symbol_view: SymbolView::default(),
@@ -504,6 +518,9 @@ impl App {
             shot_path: env::var("LCEDA_SHOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from),
             shot_requested: false,
             shot_settle: 0,
+            shot_input: if skip_update { env::var_os("LCEDA_SHOT_INPUT").map(PathBuf::from) } else { None },
+            shot_input_id: 0,
+            shot_pointer_release: None,
             ad_embed_3d: prefs.ad_embed_3d,
             kicad_attach_3d: prefs.kicad_attach_3d,
             rename_footprint: prefs.rename_footprint,
@@ -2023,7 +2040,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some() || self.native_load.is_some() || self.native_save.is_some() || self.resource_assist.as_ref().is_some_and(ResourceAssist::is_busy)
+        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some() || self.bind_job.is_some() || self.native_load.is_some() || self.native_save.is_some() || self.resource_assist.as_ref().is_some_and(ResourceAssist::is_busy)
     }
 
     fn selected_item(&self) -> Option<&SearchItem> {
@@ -2034,6 +2051,30 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        // Isolated screenshot runs can exercise real widgets without sending
+        // mouse/keyboard input to the user's desktop or requiring OS focus.
+        let Some(path) = &self.shot_input else { return; };
+        input.events.clear(); input.focused = true; input.modifiers = egui::Modifiers::NONE;
+        for viewport in input.viewports.values_mut() { viewport.focused = Some(true); }
+        if let Some(pos) = self.shot_pointer_release.take() {
+            input.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+            return;
+        }
+        let Some(command) = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()) else { return; };
+        let Some(id) = command["id"].as_u64().filter(|id| *id > self.shot_input_id) else { return; };
+        self.shot_input_id = id;
+        if let Some(key) = command["key"].as_str().and_then(|key| match key { "Escape" => Some(egui::Key::Escape), "Tab" => Some(egui::Key::Tab), "Enter" => Some(egui::Key::Enter), _ => None }) {
+            for pressed in [true, false] { input.events.push(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE }); }
+        } else if let (Some(x), Some(y)) = (command["x"].as_f64(), command["y"].as_f64()) {
+            let pos = egui::pos2(x as f32, y as f32); input.events.push(egui::Event::PointerMoved(pos));
+            if command["click"].as_bool() == Some(true) {
+                input.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                self.shot_pointer_release = Some(pos); ctx.request_repaint();
+            }
+        }
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         if self.win_max {
             let c = theme::window_bg();
@@ -2174,6 +2215,7 @@ impl eframe::App for App {
         self.show_fav_pick(ctx);
         self.show_cat_dialog(ctx);
         self.activity_dialog(ctx);
+        self.library_sync_dialog(ctx);
         self.clear_queue_dialog(ctx);
         self.show_alert(ctx);
         if !self.show_welcome {
@@ -2196,6 +2238,7 @@ impl App {
     fn poll_jobs(&mut self, ctx: &egui::Context) {
         self.poll_native_jobs(ctx);
         self.poll_resource_assist(ctx);
+        self.poll_binding_validation();
         if !self.busy() && !self.pending_library_sync.is_empty() && self.library_sync_after.is_none_or(|when| Instant::now() >= when) { self.start_library_sync(); }
         if self.bom_job.as_ref().is_some_and(|p| p.ready().is_some()) {
             match self.bom_job.take().unwrap().block_and_take() {
@@ -2232,17 +2275,28 @@ impl App {
         }
         if let Some(p) = &self.job {
             if p.ready().is_some() {
+                let syncing = std::mem::take(&mut self.library_sync_job);
                 match self.job.take().unwrap().block_and_take() {
                     Ok(msg) => {
                         for (item, paths) in &msg.exported {
                             self.lib.enrich_from_item(item);
                             if let Some(id) = item.lcsc_id() { self.lib.record_export(&id, paths); }
                         }
-                        if let Err(e) = self.lib.try_save() { self.log(format!("本地库保存失败: {e}")); }
-                        if msg.notify || msg.failed > 0 { self.alert(msg.message); } else { self.log(msg.message); }
+                        if let Err(e) = self.lib.try_save() {
+                            self.log(format!("本地库保存失败: {e}"));
+                            if syncing { if let Some(task) = &self.library_sync_task { task.fail(format!("库文件已处理，但本地记录保存失败: {e}")); } self.show_library_sync = true; }
+                        }
+                        if syncing {
+                            self.log(msg.message);
+                            if msg.failed > 0 { self.show_library_sync = true; }
+                        } else if msg.notify || msg.failed > 0 { self.alert(msg.message); } else { self.log(msg.message); }
                     }
                     Err(e) => {
-                        self.alert(format!("{}: {e}", i18n::t(self.lang, "error")));
+                        if syncing {
+                            self.log(e.to_string());
+                            if let Some(task) = &self.library_sync_task { task.fail(e.to_string()); }
+                            self.show_library_sync = true;
+                        } else { self.alert(format!("{}: {e}", i18n::t(self.lang, "error"))); }
                     }
                 }
             } else {
@@ -2600,7 +2654,7 @@ impl App {
                     }
                 });
                 dropdown_menu(ui, i18n::t(lang, "library_sync_menu"), |ui| {
-                    library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy());
+                    library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy(), self.library_sync_task.is_some());
                 });
                 dropdown_menu(ui,i18n::t(lang,"resource_menu"),|ui|{
                     theme::prepare_menu(ui);
@@ -2621,7 +2675,7 @@ impl App {
                     let caption = self.lib.binding_for(&self.fav_cat, format).map(|p| format!("{} · {}", format.name(), p.display()));
                     if let Some(caption) = caption {
                         let response = ui.add(egui::Label::new(egui::RichText::new(&caption).small().color(theme::secondary())).truncate()).on_hover_text(&caption);
-                        response.context_menu(|ui| { library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy()); });
+                        response.context_menu(|ui| { library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy(), self.library_sync_task.is_some()); });
                     }
                 }
                 if LibraryFormat::ALL.into_iter().all(|f| self.lib.binding_for(&self.fav_cat, f).is_none()) {
@@ -2680,7 +2734,7 @@ impl App {
                         }
                         r.context_menu(|ui| {
                             theme::prepare_menu(ui);
-                            if let Some(action) = library_menu(ui, &self.lib, id, lang, self.busy()) { library_action = Some(action); }
+                            if let Some(action) = library_menu(ui, &self.lib, id, lang, self.busy(), self.library_sync_task.is_some()) { library_action = Some(action); }
                             ui.separator();
                             if ui.button(i18n::t(lang, "new_cat")).clicked() {
                                 open_new = true;
@@ -3518,6 +3572,7 @@ impl App {
             || self.show_import_cat
             || self.update.is_some()
             || self.show_activity
+            || self.show_library_sync
             || self.confirm_clear_queue
             || self.show_bom_import
             || self.bind_cat.is_some()
@@ -4082,24 +4137,7 @@ impl App {
         });
         if bind {
             let path = PathBuf::from(self.bind_path.trim());
-            let validated = match format {
-                LibraryFormat::Ad => lceda_core::bound_ad::validate_binding(&path),
-                LibraryFormat::KiCad => lceda_core::bound_kicad::validate_binding(&path),
-            };
-            if let Err(error) = validated {
-                self.alert(error.to_string());
-            } else {
-                let mut next = self.lib.clone();
-                match next.set_binding(&cat_id, format, &path) {
-                    Ok(()) => {
-                        match next.try_save() {
-                            Ok(()) => { self.lib = next; self.queue_library_sync(&cat_id, Some(format)); self.bind_cat = None; }
-                            Err(error) => self.alert(format!("保存库绑定失败: {error}")),
-                        }
-                    }
-                    Err(error) => self.alert(error),
-                }
-            }
+            self.begin_binding_validation(cat_id, format, path);
         }
         if cancel || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.bind_cat = None; }
     }
@@ -4114,9 +4152,9 @@ impl App {
         req.ad_library_files.clear();
         req.kicad_library_files.clear();
         let mut ids = BTreeSet::new();
-        for (category, format) in categories {
-            if let Some(path) = self.lib.binding_for(&category, format) {
-                for part in self.lib.favs_in(&category) {
+        for (category, format) in &categories {
+            if let Some(path) = self.lib.binding_for(category, *format) {
+                for part in self.lib.favs_in(category) {
                     if self.lib.native(&part.lcsc).is_some(){continue;}
                     let id = part.lcsc.to_ascii_uppercase();
                     match format {
@@ -4127,31 +4165,7 @@ impl App {
                 }
             }
         }
-        if ids.is_empty() { return; }
-        if self.out_dir.trim().is_empty() { self.alert(i18n::t(self.lang, "choose_output")); return; }
-        let library = self.lib.clone();
-        let heading = i18n::t(self.lang, "sync_library").to_string();
-        self.log(&heading);
-        self.job = Some(Promise::spawn_thread("sync-bound-library", move || {
-            let client = LcedaClient::new();
-            let mut items = Vec::new();
-            let mut errors = Vec::new();
-            for id in ids {
-                if let Some(item) = library.cached_item(&id) { items.push(item); continue; }
-                match client.search(&id) {
-                    Ok(found) => match found.into_iter().find(|item| item.lcsc_id().as_deref() == Some(id.as_str())) {
-                        Some(item) => items.push(item),
-                        None => errors.push(format!("{id}: 未找到相同编号，请先搜索并确认器件")),
-                    },
-                    Err(error) => errors.push(format!("{id}: {error}")),
-                }
-            }
-            let mut report = export_report(&client, &items, &req);
-            report.failed += errors.len();
-            report.notify = report.failed > 0;
-            report.message = format!("{heading}\n{}\n{}", errors.join("\n"), report.message);
-            Ok(report)
-        }));
+        self.launch_library_sync(categories, req, ids);
     }
 
     fn queue_library_sync(&mut self, category: &str, format: Option<LibraryFormat>) {
@@ -4164,6 +4178,7 @@ impl App {
 
     fn handle_library_action(&mut self, action: LibraryAction) {
         match action {
+            LibraryAction::ShowProgress => { self.show_library_sync = true; }
             LibraryAction::Bind(id, format) => {
                 self.bind_path = self.lib.binding_for(&id, format).map(|p| p.display().to_string()).unwrap_or_else(|| {
                     let name = if id == UNCAT { i18n::t(self.lang, "uncategorized") }
@@ -4183,11 +4198,12 @@ impl App {
                     Err(error) => self.alert(error),
                 }
             }
-            LibraryAction::Sync(id, format) => { self.queue_library_sync(&id, format); self.library_sync_after = None; }
+            LibraryAction::Sync(id, format) => { self.queue_library_sync(&id, format); self.library_sync_after = None; self.show_library_sync = true; }
             LibraryAction::SyncAll => {
                 let ids: Vec<_> = self.lib.bound_categories().iter().map(|(c, _)| c.id.clone()).collect();
                 for id in ids { self.queue_library_sync(&id, None); }
                 self.library_sync_after = None;
+                self.show_library_sync = true;
             }
         }
     }
@@ -4387,9 +4403,16 @@ impl App {
                         .wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(0.0, 24.0)).corner_radius(5)).clicked() {
                         self.show_activity = true;
                     }
+                    if let Some(task) = &self.library_sync_task {
+                        let (done, total) = task.status();
+                        let text = if task.running() { format!("{} {done}/{total}", i18n::t(self.lang, "sync_progress")) }
+                            else { i18n::t(self.lang, "sync_result").to_string() };
+                        if ui.add(egui::Button::new(egui::RichText::new(text).size(11.5))
+                            .wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(0.0, 24.0))).clicked() { self.show_library_sync = true; }
+                    }
                     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         if self.busy() { ui.add(egui::Spinner::new().size(14.0)); }
-                        let state = if self.job.is_some() { "working" } else if self.search.is_some() || self.resolve.is_some() { "searching" } else if self.bom_job.is_some() { "match_bom" } else { "ready" };
+                        let state = if self.bind_job.is_some() { "sync_validating" } else if self.library_sync_job { "sync_running" } else if self.job.is_some() { "working" } else if self.search.is_some() || self.resolve.is_some() { "searching" } else if self.bom_job.is_some() { "match_bom" } else { "ready" };
                         ui.add(egui::Label::new(egui::RichText::new(i18n::t(self.lang, state)).size(11.5).color(theme::secondary())).extend());
                         ui.separator();
                         folder = ui.add(egui::Label::new(egui::RichText::new(&self.out_dir).size(11.5).color(theme::secondary())).truncate().sense(egui::Sense::click()))
@@ -4442,6 +4465,7 @@ impl App {
 }
 
 enum LibraryAction {
+    ShowProgress,
     Bind(String, LibraryFormat), Unbind(String, LibraryFormat),
     Sync(String, Option<LibraryFormat>), SyncAll,
 }
@@ -4455,9 +4479,13 @@ fn dropdown_menu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut e
     menu
 }
 
-fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang, busy: bool) -> Option<LibraryAction> {
+fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang, busy: bool, has_progress: bool) -> Option<LibraryAction> {
     theme::prepare_menu(ui);
     let mut action = None;
+    if has_progress {
+        if ui.button(i18n::t(lang, "sync_view_progress")).clicked() { action = Some(LibraryAction::ShowProgress); ui.close(); }
+        ui.separator();
+    }
     let bound = LibraryFormat::ALL.into_iter().any(|f| library.binding_for(category, f).is_some());
     if ui.add_enabled(!busy && bound, egui::Button::new(i18n::t(lang, "sync_current_library"))).clicked() {
         action = Some(LibraryAction::Sync(category.into(), None)); ui.close();

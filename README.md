@@ -48,7 +48,7 @@ The sidebar switches between **Search**, **Library**, **Export list**, **Sponsor
 
 Unavailable assets are disabled or explained. Download asset has been folded into **Export…**; selecting only STEP, OBJ or PDF downloads those resources. **Details** and **Open LCSC** are separate buttons. Actions wrap in narrower windows.
 
-The centered **Activity** button reserves its space in the status bar, so long output paths cannot obscure it. Open it to review search, export and sync activity for this session.
+The **Activity** button reserves its space in the status bar, so long output paths cannot obscure it. Open it to review search, export and sync activity for this session.
 
 **Add to library** always asks for the destination, including when only one library exists. **Library** retains favorite categories (right-click to create / rename / import / export / delete). **Export list** is a queue you can import, export, or clear.
 
@@ -103,6 +103,8 @@ The **Sync library** dropdown updates all bindings in the current library, AD on
 - **KiCad:** choose `.kicad_sym` with same-stem `.pretty/` and `.3dshapes/` folders. Stable C-number identifiers connect symbols, footprints and models; Value retains the MPN. Uses **KiCad 9 format** and upgrades older symbol-library versions while preserving untouched symbols and unknown fields.
 
 Adding parts, importing BOMs and changing export settings automatically schedule synchronization. Removing parts or unbinding preserves external components. Ordinary exports check for path collisions with bound files.
+
+Binding validation runs in the background. **Bind and sync** and manual synchronization immediately open **Library sync progress**, showing the current part, target files, completed count and individual errors. **Run in background** keeps the interface available; reopen progress from the status bar or Sync library menu. **Stop remaining parts** lets the current part finish before stopping, preserving completed writes. Failed or stopped tasks can be retried from the progress window.
 
 Both formats use file locking, recoverable transactions and `.filename.jlc-backup` previous-generation backups. Keep KiCad's `.filename.jlc-meta.json` ownership record with the library. Unowned name conflicts and manually edited managed components are rejected without overwriting them; use a new target after backing up if needed. Failures are shown and can be retried from the menu.
 
