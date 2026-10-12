@@ -177,6 +177,41 @@ impl App {
             self.log(&note); self.ad_plugin_note = Some(note);
         }
     }
+    fn start_ad_plugin_uninstall(&mut self, root: PathBuf) {
+        if self.busy() { return; }
+        self.ad_plugin_note = None;
+        self.ad_plugin_job = Some(Promise::spawn_thread("uninstall-ad-native-plugin", move || lceda_core::ad_plugin::uninstall(&root)));
+    }
+    pub(super) fn settings_ad_plugin(&mut self, ui: &mut egui::Ui) {
+        let Some(root) = crate::profile_dir().map(|p| p.join("ad-bridge")) else { return; };
+        let lang = self.lang;
+        let installed = lceda_core::ad_plugin::installed(&root);
+        let connected = lceda_core::ad_bridge::connection(&root).is_ok();
+        let working = self.ad_plugin_job.is_some();
+        let mut uninstall = false;
+        theme::show_card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::heading(i18n::t(lang, "settings_ad_plugin")));
+                if working { ui.add(egui::Spinner::new().size(14.0)); }
+                ui.label(egui::RichText::new(i18n::t(lang, if working { "working" } else if installed { "ad_plugin_present" } else { "ad_plugin_not_installed" })).small().color(theme::secondary()));
+            });
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(i18n::t(lang, "ad_plugin_uninstall_hint")).wrap());
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                uninstall = theme::pill_button(ui, i18n::t(lang, "ad_plugin_uninstall_ad"), installed && !connected && !self.busy(), false)
+                    .on_disabled_hover_text(i18n::t(lang, if !installed { "ad_plugin_not_installed" } else if connected { "ad_plugin_close_ad" } else { "working" })).clicked();
+                if theme::pill_button(ui, i18n::t(lang, "ad_plugin_manage"), true, false).clicked() {
+                    self.show_ad_connection = true;
+                }
+            });
+            if let Some(note) = &self.ad_plugin_note {
+                ui.add_space(6.0);
+                ui.add(egui::Label::new(note).wrap().selectable(true));
+            }
+        });
+        if uninstall { self.start_ad_plugin_uninstall(root); }
+    }
     pub(super) fn show_queued_ad(&mut self) {
         let targets: BTreeSet<_> = self.pending_library_sync.iter().filter(|(_, format)| *format == LibraryFormat::Ad).cloned().collect();
         if targets.is_empty() || self.library_sync_task.as_ref().is_some_and(|task|
@@ -220,7 +255,7 @@ impl App {
                 ui.add(egui::Label::new(i18n::t(lang, "ad_plugin_hint")).wrap());
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
-                    install = theme::pill_button(ui, i18n::t(lang, if installing { "ad_plugin_installing" } else if installed { "ad_plugin_update" } else { "ad_plugin_install" }), cfg!(windows) && !connected && !installing && !self.busy(), true).clicked();
+                    install = theme::pill_button(ui, i18n::t(lang, if installing { "working" } else if installed { "ad_plugin_update" } else { "ad_plugin_install" }), cfg!(windows) && !connected && !installing && !self.busy(), true).clicked();
                     if installed && !enabled { enable = theme::pill_button(ui, i18n::t(lang, "ad_plugin_enable"), !installing && !self.busy(), false).clicked(); }
                     if installed { ui.label(egui::RichText::new(i18n::t(lang, "ad_plugin_installed")).small().color(theme::secondary())); }
                 });
@@ -275,8 +310,7 @@ impl App {
         }
         if enable { if let Err(error) = lceda_core::ad_bridge::enable(&root) { self.alert(error.to_string()); } }
         if uninstall {
-            let root = root.clone(); self.ad_plugin_note = None;
-            self.ad_plugin_job = Some(Promise::spawn_thread("uninstall-ad-native-plugin", move || lceda_core::ad_plugin::uninstall(&root)));
+            self.start_ad_plugin_uninstall(root.clone());
         }
         if launch {
             match lceda_core::ad_bridge::install(&root) {

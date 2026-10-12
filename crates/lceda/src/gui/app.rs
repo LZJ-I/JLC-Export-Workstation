@@ -1131,6 +1131,10 @@ impl App {
         if open_dir {
             self.open_out_dir();
         }
+        if cfg!(windows) {
+            ui.add_space(12.0);
+            self.settings_ad_plugin(ui);
+        }
         persist
     }
 
