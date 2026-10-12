@@ -1,5 +1,41 @@
 use super::*;
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QueuedScope { category: String, format: LibraryFormat, binding: PathBuf }
+
+fn queue_scopes(library: &Library, targets: &BTreeSet<(String, LibraryFormat)>) -> Vec<QueuedScope> {
+    targets.iter().filter_map(|(category, format)| library.binding_for(category, *format)
+        .map(|path| QueuedScope { category: category.clone(), format: *format, binding: path.to_path_buf() })).collect()
+}
+fn restore_scopes(library: &Library, scopes: Vec<QueuedScope>) -> BTreeSet<(String, LibraryFormat)> {
+    scopes.into_iter().filter(|scope| library.binding_for(&scope.category, scope.format).is_some_and(|bound| crate::library::binding_matches(bound, &scope.binding)))
+        .map(|scope| (scope.category, scope.format)).collect()
+}
+fn write_queue(path: &Path, scopes: &[QueuedScope]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().ok_or_else(|| std::io::Error::other("队列路径缺少目录"))?;
+    std::fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".ad-queue-{}.tmp", lceda_core::util::unique_id()));
+    let result = (|| {
+        let bytes = serde_json::to_vec(&serde_json::json!({ "version": 1, "scopes": scopes }))?;
+        let mut file = std::fs::File::create(&temp)?; file.write_all(&bytes)?; file.sync_all()?; drop(file);
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            #[link(name = "kernel32")]
+            extern "system" { fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32; }
+            let from: Vec<_> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 1 | 8) } == 0 { return Err(std::io::Error::last_os_error()); }
+        }
+        #[cfg(not(windows))]
+        std::fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(temp); }
+    result
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RowState { Waiting, Resolving, Syncing, Done, Failed, Skipped }
 impl RowState {
@@ -18,7 +54,7 @@ struct SyncRow {
     detail: Option<String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Stage { Validating, Running, Finished }
+enum Stage { Validating, AwaitingAd, Running, Finished }
 #[derive(Clone)]
 struct Progress {
     rows: Vec<SyncRow>, stage: Stage, started: Instant, finished: Option<Instant>, note: Option<String>,
@@ -106,35 +142,123 @@ fn run_rows(
 }
 
 impl App {
+    pub(super) fn restore_sync_queue(&mut self) {
+        let Some(root) = crate::profile_dir() else { return; };
+        let path = root.join("pending-library-sync.json");
+        if !path.exists() { return; }
+        let scopes = (|| -> Result<Vec<QueuedScope>, String> {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            if bytes.len() > 512 * 1024 { return Err("同步队列过大，未自动恢复".into()); }
+            let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            if value["version"].as_u64() != Some(1) { return Err("同步队列版本不支持，未自动恢复".into()); }
+            serde_json::from_value(value["scopes"].clone()).map_err(|e| e.to_string())
+        })();
+        match scopes {
+            Ok(scopes) => { self.pending_library_sync = restore_scopes(&self.lib, scopes); }
+            Err(error) => self.log(error),
+        }
+    }
+    pub(super) fn persist_sync_queue(&mut self) -> bool {
+        let Some(root) = crate::profile_dir() else { return false; };
+        let scopes = queue_scopes(&self.lib, &self.pending_library_sync);
+        match write_queue(&root.join("pending-library-sync.json"), &scopes) {
+            Ok(()) => true,
+            Err(error) => { self.log(format!("同步队列保存失败，未开始新任务：{error}")); false }
+        }
+    }
+    pub(super) fn native_ad_waiting(&self) -> bool {
+        cfg!(windows) && crate::profile_dir().map(|p| p.join("ad-bridge")).is_some_and(|root|
+            lceda_core::ad_plugin::installed(&root) && lceda_core::ad_bridge::enabled(&root) && lceda_core::ad_bridge::connection(&root).is_err())
+    }
+    pub(super) fn poll_ad_plugin(&mut self) {
+        if self.ad_plugin_job.as_ref().is_some_and(|job| job.ready().is_some()) {
+            let result = self.ad_plugin_job.take().unwrap().block_and_take();
+            let note = match result { Ok(note) => note, Err(error) => error.to_string() };
+            self.log(&note); self.ad_plugin_note = Some(note);
+        }
+    }
+    pub(super) fn show_queued_ad(&mut self) {
+        let targets: BTreeSet<_> = self.pending_library_sync.iter().filter(|(_, format)| *format == LibraryFormat::Ad).cloned().collect();
+        if targets.is_empty() || self.library_sync_task.as_ref().is_some_and(|task|
+            task.targets == targets && task.progress.lock().unwrap().stage == Stage::AwaitingAd) { return; }
+        let mut rows = Vec::new();
+        for (category, format) in &targets {
+            if let Some(path) = self.lib.binding_for(category, *format) {
+                for part in self.lib.favs_in(category) {
+                    if self.lib.native(&part.lcsc).is_none() {
+                        rows.push(SyncRow { id: part.lcsc.to_ascii_uppercase(), name: part.name.clone(),
+                            targets: format!("AD · {}", path.display()), state: RowState::Waiting, error: None, detail: None });
+                    }
+                }
+            }
+        }
+        self.library_sync_task = Some(LibrarySyncTask::new(rows, targets, Stage::AwaitingAd));
+    }
     pub(super) fn ad_connection_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_ad_connection { return; }
         let Some(root) = crate::profile_dir().map(|p| p.join("ad-bridge")) else { return; };
         let lang = self.lang;
-        let connected = lceda_core::ad_bridge::connection(&root).is_ok();
+        let connection = lceda_core::ad_bridge::connection(&root).ok();
+        let connected = connection.is_some();
+        let native = connection.is_some_and(|connection| connection.native);
+        let installed = lceda_core::ad_plugin::installed(&root);
         let enabled = lceda_core::ad_bridge::enabled(&root);
+        let installing = self.ad_plugin_job.is_some();
         let mut open = true; let mut launch = false; let mut folder = false; let mut offline = false; let mut close = false;
+        let mut install = false; let mut enable = false; let mut uninstall = false;
         fit_window(i18n::t(lang, "ad_connection_title"), "ad_connection", 600.0).open(&mut open).show(ctx, |ui| {
             ui.set_width(576.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::heading(i18n::t(lang, if connected { "ad_connected" } else { "ad_disconnected" })));
-                if enabled && !connected { ui.add(egui::Spinner::new().size(14.0)); }
+                ui.label(theme::heading(i18n::t(lang, if native { "ad_native_connected" } else if connected { "ad_connected" } else { "ad_disconnected" })));
+                if installing || enabled && !connected { ui.add(egui::Spinner::new().size(14.0)); }
             });
             ui.add(egui::Label::new(i18n::t(lang, "ad_connection_hint")).wrap());
             ui.add_space(10.0);
+            egui::ScrollArea::vertical().min_scrolled_height(220.0).max_height((ctx.screen_rect().height() - 290.0).clamp(220.0, 400.0)).auto_shrink([false, true]).show(ui, |ui| {
             egui::Frame::new().fill(theme::well()).corner_radius(7).inner_margin(10).show(ui, |ui| {
-                for key in ["ad_connection_step1", "ad_connection_step2", "ad_connection_step3"] {
-                    ui.add(egui::Label::new(i18n::t(lang, key)).wrap());
-                    ui.add_space(4.0);
+                ui.label(theme::heading(i18n::t(lang, "ad_plugin_title")));
+                ui.add(egui::Label::new(i18n::t(lang, "ad_plugin_hint")).wrap());
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    install = theme::pill_button(ui, i18n::t(lang, if installing { "ad_plugin_installing" } else if installed { "ad_plugin_update" } else { "ad_plugin_install" }), cfg!(windows) && !connected && !installing && !self.busy(), true).clicked();
+                    if installed && !enabled { enable = theme::pill_button(ui, i18n::t(lang, "ad_plugin_enable"), !installing && !self.busy(), false).clicked(); }
+                    if installed { ui.label(egui::RichText::new(i18n::t(lang, "ad_plugin_installed")).small().color(theme::secondary())); }
+                });
+            });
+            if let Some(note) = &self.ad_plugin_note {
+                ui.add_space(6.0); ui.add(egui::Label::new(note).wrap().selectable(true));
+            }
+            if root.join("native-error.txt").is_file() {
+                egui::CollapsingHeader::new(i18n::t(lang, "ad_plugin_diagnostics")).show(ui, |ui| {
+                    if let Ok(text) = std::fs::read_to_string(root.join("native-error.txt")) { ui.add(egui::Label::new(text.chars().take(4000).collect::<String>()).wrap().selectable(true)); }
+                });
+            }
+            egui::CollapsingHeader::new(i18n::t(lang, "ad_plugin_paths")).show(ui, |ui| {
+                ui.add(egui::Label::new(i18n::t(lang, "ad_plugin_paths_hint")).wrap());
+                for (key, value) in [("ad_plugin_ad_dir", &mut self.ad_install_dir), ("ad_plugin_ext_dir", &mut self.ad_extensions_dir)] {
+                    ui.label(i18n::t(lang, key));
+                    ui.horizontal(|ui| {
+                        ui.add_sized([ui.available_width() - 64.0, 28.0], egui::TextEdit::singleline(value));
+                        if ui.add_enabled(!installing, egui::Button::new(i18n::t(lang, "browse"))).clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() { *value = path.display().to_string(); }
+                        }
+                    });
                 }
+            });
+            egui::CollapsingHeader::new(i18n::t(lang, "ad_script_compat")).show(ui, |ui| {
+                for key in ["ad_connection_step1", "ad_connection_step2", "ad_connection_step3"] { ui.add(egui::Label::new(i18n::t(lang, key)).wrap()); }
+                launch = theme::pill_button(ui, i18n::t(lang, "ad_open_project"), cfg!(windows) && !installed && !connected && !installing && !self.busy(), false).clicked();
+                if installed { ui.add(egui::Label::new(i18n::t(lang, "ad_script_uninstall_hint")).wrap()); }
             });
             ui.add_space(8.0);
             ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, "ad_preserve_hint")).small().color(theme::secondary())).wrap());
             ui.add_space(6.0);
             ui.add(egui::Label::new(egui::RichText::new(root.display().to_string()).small().color(theme::secondary())).truncate()).on_hover_text(root.display().to_string());
+            });
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
-                launch = theme::pill_button(ui, i18n::t(lang, "ad_open_project"), cfg!(windows) && !connected && !self.busy(), true).clicked();
                 folder = theme::pill_button(ui, i18n::t(lang, "ad_open_folder"), root.is_dir(), false).clicked();
+                if installed { uninstall = theme::pill_button(ui, i18n::t(lang, "ad_plugin_uninstall"), !connected && !self.busy(), false).clicked(); }
                 close = theme::pill_button(ui, i18n::t(lang, "close"), true, false).clicked();
             });
             if enabled {
@@ -142,6 +266,18 @@ impl App {
                 offline = theme::pill_button(ui, i18n::t(lang, "ad_file_mode"), !self.busy(), false).clicked();
             }
         });
+        if install {
+            let root = root.clone();
+            let ad = (!self.ad_install_dir.trim().is_empty()).then(|| PathBuf::from(self.ad_install_dir.trim()));
+            let extensions = (!self.ad_extensions_dir.trim().is_empty()).then(|| PathBuf::from(self.ad_extensions_dir.trim()));
+            self.ad_plugin_note = None;
+            self.ad_plugin_job = Some(Promise::spawn_thread("install-ad-native-plugin", move || lceda_core::ad_plugin::install(&root, ad.as_deref(), extensions.as_deref())));
+        }
+        if enable { if let Err(error) = lceda_core::ad_bridge::enable(&root) { self.alert(error.to_string()); } }
+        if uninstall {
+            let root = root.clone(); self.ad_plugin_note = None;
+            self.ad_plugin_job = Some(Promise::spawn_thread("uninstall-ad-native-plugin", move || lceda_core::ad_plugin::uninstall(&root)));
+        }
         if launch {
             match lceda_core::ad_bridge::install(&root) {
                 Ok(project) => { if !open_folder(&project) { self.alert(i18n::t(lang, "ad_open_failed")); } }
@@ -262,7 +398,7 @@ impl App {
             ui.set_width(636.0);
             ui.horizontal_wrapped(|ui| {
                 if running { ui.add(egui::Spinner::new().size(16.0)); }
-                let key = if stopping && running { "sync_stopping" } else if p.stage == Stage::Validating { "sync_validating" }
+                let key = if stopping && running { "sync_stopping" } else if p.stage == Stage::AwaitingAd { "ad_queue_waiting" } else if p.stage == Stage::Validating { "sync_validating" }
                     else if running { "sync_running" } else if stopping { "sync_stopped" }
                     else if failed > 0 || p.note.is_some() { "sync_finished_errors" } else { "sync_finished" };
                 ui.label(theme::heading(i18n::t(lang, key)));
@@ -296,7 +432,7 @@ impl App {
                 }
             });
             ui.add_space(8.0);
-            if running { ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, "sync_cancel_hint")).small().color(theme::secondary())).wrap()); }
+            if running { ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, if p.stage == Stage::AwaitingAd { "ad_queue_hint" } else { "sync_cancel_hint" })).small().color(theme::secondary())).wrap()); }
             ui.horizontal_wrapped(|ui| {
                 close = theme::pill_button(ui, i18n::t(lang, if running { "sync_background" } else { "close" }), true, !running).clicked();
                 if running { cancel = theme::pill_button(ui, i18n::t(lang, if stopping { "sync_stopping" } else { "sync_cancel" }), !stopping, false).clicked(); }
@@ -304,18 +440,25 @@ impl App {
                     retry = theme::pill_button(ui, i18n::t(lang, "sync_retry"), !self.busy(), false).clicked();
                 }
                 #[cfg(windows)]
-                if !running && task.targets.iter().any(|(_, format)| *format == LibraryFormat::Ad) {
+                if (!running || p.stage == Stage::AwaitingAd) && task.targets.iter().any(|(_, format)| *format == LibraryFormat::Ad) {
                     connect_ad = theme::pill_button(ui, i18n::t(lang, "ad_connect"), true, false).clicked();
                 }
             });
         });
-        if cancel { task.cancel.store(true, Ordering::SeqCst); }
+        if cancel {
+            task.cancel.store(true, Ordering::SeqCst);
+            if p.stage == Stage::AwaitingAd {
+                let targets = task.targets.clone(); task.progress.lock().unwrap().finish();
+                for target in targets { self.pending_library_sync.remove(&target); }
+            }
+        }
         if connect_ad { self.show_library_sync = false; self.show_ad_connection = true; }
         if retry {
             let targets = task.targets.clone();
             for (category, format) in targets { self.queue_library_sync(&category, Some(format)); }
             self.library_sync_after = None;
         }
+        if cancel && p.stage == Stage::AwaitingAd { self.persist_sync_queue(); }
         if close || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.show_library_sync = false; }
     }
 }
@@ -329,6 +472,33 @@ mod tests {
     fn item(id: &str) -> SearchItem {
         SearchItem { index: 1, display_title: id.into(), title: id.into(), manufacturer: String::new(),
             model_uuid: None, raw: serde_json::json!({"product_code": id}) }
+    }
+    #[test]
+    fn queued_scopes_drop_removed_or_rebound_libraries_and_keep_formats_separate() {
+        let mut library = Library::default();
+        let root = std::env::temp_dir().join(format!("lceda-queue-{}", lceda_core::util::unique_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        library.set_binding(UNCAT, LibraryFormat::Ad, &root.join("User.SchLib")).unwrap();
+        library.set_binding(UNCAT, LibraryFormat::KiCad, &root.join("User.kicad_sym")).unwrap();
+        let targets = BTreeSet::from([(UNCAT.into(), LibraryFormat::Ad), (UNCAT.into(), LibraryFormat::KiCad)]);
+        let scopes = queue_scopes(&library, &targets);
+        let path = root.join("pending.json"); write_queue(&path, &scopes).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let restored = restore_scopes(&library, serde_json::from_value(json["scopes"].clone()).unwrap());
+        assert_eq!(restored, targets);
+        #[cfg(windows)]
+        {
+            let regular = library.binding_for(UNCAT, LibraryFormat::Ad).unwrap().to_string_lossy().trim_start_matches("\\\\?\\").to_string();
+            let restored = restore_scopes(&library, vec![QueuedScope { category: UNCAT.into(), format: LibraryFormat::Ad, binding: PathBuf::from(regular) }]);
+            assert_eq!(restored, BTreeSet::from([(UNCAT.into(), LibraryFormat::Ad)]));
+        }
+        library.set_binding(UNCAT, LibraryFormat::Ad, &root.join("Different.SchLib")).unwrap();
+        let restored = restore_scopes(&library, scopes);
+        assert_eq!(restored, BTreeSet::from([(UNCAT.into(), LibraryFormat::KiCad)]));
+        write_queue(&path, &[]).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(json["scopes"].as_array().unwrap().len(), 0);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn reports_each_failure_without_stopping_other_parts() {

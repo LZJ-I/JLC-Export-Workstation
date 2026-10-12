@@ -264,6 +264,10 @@ struct App {
     library_sync_job: bool,
     show_library_sync: bool,
     show_ad_connection: bool,
+    ad_plugin_job: Option<Promise<lceda_core::Result<String>>>,
+    ad_plugin_note: Option<String>,
+    ad_install_dir: String,
+    ad_extensions_dir: String,
     bind_job: Option<BindPromise>,
     symbol: Option<SymbolIr>,
     symbol_note: Option<String>,
@@ -397,6 +401,10 @@ impl App {
             library_sync_job: false,
             show_library_sync: false,
             show_ad_connection: env::var_os("LCEDA_SHOT").is_some() && env::var_os("LCEDA_AD_CONNECTION").is_some(),
+            ad_plugin_job: None,
+            ad_plugin_note: None,
+            ad_install_dir: String::new(),
+            ad_extensions_dir: String::new(),
             bind_job: None,
             symbol: None,
             symbol_note: None,
@@ -538,6 +546,7 @@ impl App {
             desc_preview_job: None,
             desc_preview_note: None,
         };
+        app.restore_sync_queue();
         if skip_update {
             if let Ok(path)=env::var("LCEDA_NATIVE_FILE"){
                 let path=PathBuf::from(path);
@@ -2077,7 +2086,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some() || self.bind_job.is_some() || self.native_load.is_some() || self.native_save.is_some() || self.resource_assist.as_ref().is_some_and(ResourceAssist::is_busy)
+        self.search.is_some() || self.job.is_some() || self.resolve.is_some() || self.bom_job.is_some() || self.bind_job.is_some() || self.ad_plugin_job.is_some() || self.native_load.is_some() || self.native_save.is_some() || self.resource_assist.as_ref().is_some_and(ResourceAssist::is_busy)
     }
 
     fn selected_item(&self) -> Option<&SearchItem> {
@@ -2266,6 +2275,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
         self.persist_prefs();
+        self.persist_sync_queue();
         if let (Some(gl), Some(gpu)) = (gl, self.gpu.take()) {
             gpu.lock().destroy(gl);
         }
@@ -2277,6 +2287,8 @@ impl App {
         self.poll_native_jobs(ctx);
         self.poll_resource_assist(ctx);
         self.poll_binding_validation();
+        self.poll_ad_plugin();
+        if self.ad_plugin_job.is_some() || !self.pending_library_sync.is_empty() { ctx.request_repaint_after(Duration::from_secs(1)); }
         if !self.busy() && !self.pending_library_sync.is_empty() && self.library_sync_after.is_none_or(|when| Instant::now() >= when) { self.start_library_sync(); }
         if self.bom_job.as_ref().is_some_and(|p| p.ready().is_some()) {
             match self.bom_job.take().unwrap().block_and_take() {
@@ -4129,7 +4141,23 @@ impl App {
 
     fn start_library_sync(&mut self) {
         self.library_sync_after = None;
-        let categories = std::mem::take(&mut self.pending_library_sync);
+        let mut categories = std::mem::take(&mut self.pending_library_sync);
+        // Native mode waits for AD without holding the application's job slot.
+        // KiCad targets can continue while AD is closed.
+        if self.native_ad_waiting() {
+            let waiting: Vec<_> = categories.iter().filter(|(category, format)| *format == LibraryFormat::Ad
+                && self.lib.favs_in(category).iter().any(|part| self.lib.native(&part.lcsc).is_none())).cloned().collect();
+            for target in waiting { categories.remove(&target); self.pending_library_sync.insert(target); }
+            self.library_sync_after = Some(Instant::now() + Duration::from_secs(1));
+        }
+        if categories.is_empty() { self.show_queued_ad(); return; }
+        // Remove started scopes before launching: an uncertain/failed AD write
+        // must require manual review, never automatic replay after restart.
+        if !self.persist_sync_queue() {
+            self.pending_library_sync.extend(categories);
+            self.library_sync_after = Some(Instant::now() + Duration::from_secs(5));
+            return;
+        }
         let mut req = ExportRequest { ad: true, kicad: true, bound_only: true, source_json: true, out_dir: PathBuf::from(self.out_dir.trim()), ..Default::default() };
         self.apply_export_opts(&mut req);
         req.sync_bindings = true;
@@ -4159,6 +4187,7 @@ impl App {
                 self.pending_library_sync.insert((category.to_string(), candidate));
             }
         }
+        self.persist_sync_queue();
     }
 
     fn handle_library_action(&mut self, action: LibraryAction) {
@@ -4178,7 +4207,7 @@ impl App {
                 let mut next = self.lib.clone();
                 match next.clear_binding(&id, format) {
                     Ok(()) => match next.try_save() {
-                        Ok(()) => { self.lib = next; self.pending_library_sync.remove(&(id, format)); }
+                        Ok(()) => { self.lib = next; self.pending_library_sync.remove(&(id, format)); self.persist_sync_queue(); }
                         Err(error) => self.alert(format!("保存库绑定失败: {error}")),
                     },
                     Err(error) => self.alert(error),
@@ -4395,6 +4424,11 @@ impl App {
                             else { i18n::t(self.lang, "sync_result").to_string() };
                         if ui.add(egui::Button::new(egui::RichText::new(text).size(11.5))
                             .wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(0.0, 24.0))).clicked() { self.show_library_sync = true; }
+                    }
+                    #[cfg(windows)]
+                    if self.pending_library_sync.iter().any(|(_, format)| *format == LibraryFormat::Ad) && self.native_ad_waiting() {
+                        if ui.add(egui::Button::new(egui::RichText::new(i18n::t(self.lang, "ad_queue_waiting")).size(11.5))
+                            .wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(0.0, 24.0))).clicked() { self.show_ad_connection = true; }
                     }
                     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         if self.busy() { ui.add(egui::Spinner::new().size(14.0)); }

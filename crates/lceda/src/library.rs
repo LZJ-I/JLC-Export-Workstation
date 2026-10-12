@@ -630,6 +630,10 @@ fn normalize_binding(path: &Path) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
+pub(crate) fn binding_matches(bound: &Path, candidate: &Path) -> bool {
+    normalize_binding(candidate).is_ok_and(|candidate| binding_identity(bound, cfg!(windows)) == binding_identity(&candidate, cfg!(windows)))
+}
+
 fn binding_identity(path: &Path, windows: bool) -> String {
     let value = path.to_string_lossy();
     if windows { value.replace('/', "\\").trim_start_matches("\\\\?\\").to_lowercase() }
