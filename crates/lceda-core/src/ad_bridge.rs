@@ -1,4 +1,4 @@
-//! Local, opt-in IPC with a DelphiScript running inside Altium Designer.
+//! Local, opt-in IPC with a native plugin or compatibility script inside AD.
 //!
 //! The workstation writes only disposable source libraries. AD owns every edit
 //! to the bound libraries. A reply is accepted only for the current session and
@@ -33,7 +33,7 @@ impl Bridge {
 }
 
 #[derive(Debug, Clone)]
-pub struct Connection { pub session: String }
+pub struct Connection { pub session: String, pub native: bool }
 
 #[derive(Debug)]
 pub struct Synced {
@@ -43,6 +43,14 @@ pub struct Synced {
 }
 
 pub fn enabled(directory: &Path) -> bool { directory.join("enabled").is_file() }
+
+pub fn enable(directory: &Path) -> Result<()> {
+    fs::create_dir_all(directory)?;
+    fs::write(directory.join("enabled"), PROTOCOL)?;
+    let stop = directory.join("stop");
+    if stop.exists() { fs::remove_file(stop)?; }
+    Ok(())
+}
 
 pub fn disable(directory: &Path) -> Result<()> {
     fs::write(directory.join("stop"), b"stop")?;
@@ -85,11 +93,11 @@ pub fn connection(directory: &Path) -> Result<Connection> {
     let session = fields.get("session").filter(|s| valid_token(s)).ok_or_else(disconnected)?;
     let max_age = if state == Some("busy") { BUSY_MAX_AGE } else { HEARTBEAT_MAX_AGE };
     if age > max_age { return Err(disconnected()); }
-    Ok(Connection { session: session.clone() })
+    Ok(Connection { session: session.clone(), native: fields.get("backend").map(String::as_str) == Some("native") })
 }
 
 fn disconnected() -> Error {
-    Error::msg("AD 尚未连接。请在“同步库 → 连接 AD…”中打开脚本项目，并在 AD 运行 LCEDA_StartBridge；不会改写绑定库文件。")
+    Error::msg("AD 尚未连接。请在“同步库 → 连接 AD…”安装原生插件并启动 AD，或运行兼容脚本的 LCEDA_StartBridge；不会改写绑定库文件。")
 }
 
 /// Names are searchable by both model and supplier ID; footprint IDs remain
@@ -137,7 +145,11 @@ impl Bridge {
         let seed_pcb = job.join("empty.PcbLib");
         if let Some(symbol) = &mut entry.symbol {
             symbol.name = name.clone();
-            if entry.footprint.is_some() { symbol.meta.footprint_lib = entry.id.clone(); }
+            if entry.footprint.is_some() {
+                // The native module adds the implementation only to a NEW
+                // symbol. The compatibility script edits its source link.
+                symbol.meta.footprint_lib = if connection.native { String::new() } else { entry.id.clone() };
+            }
             altium::write_schlib_with_colors(&source_sch, symbol, colors)?;
             altium::schlib::write_empty(&seed_sch, colors)?;
         }
@@ -164,6 +176,14 @@ impl Bridge {
             ("legacy_symbol".into(), hex(&entry.id)),
             ("footprint".into(), hex(if entry.footprint.is_some() { &entry.id } else { "" })),
         ]);
+        if connection.native && entry.symbol.is_some() && target.is_file() {
+            let parts = crate::bound_ad::inspect_library(&target)?;
+            let suffix = format!("_{}", entry.id);
+            let matches: Vec<_> = parts.iter().filter(|part| part.name.eq_ignore_ascii_case(&name)
+                || part.name.eq_ignore_ascii_case(&entry.id) || part.name.to_ascii_uppercase().ends_with(&suffix)).collect();
+            if matches.len() > 1 { return Err(Error::msg("AD 库中有多个器件使用相同 C 编号，请先确认，未提交同步")); }
+            fields.insert("existing_symbol".into(), hex(matches.first().map(|part| part.name.as_str()).unwrap_or("")));
+        }
         for (key, path) in [("source_sch", &source_sch), ("source_pcb", &source_pcb),
             ("seed_sch", &seed_sch), ("seed_pcb", &seed_pcb), ("target_sch", &target),
             ("target_pcb", &pcb_target), ("job", &job), ("step", &step)] {

@@ -1,0 +1,19 @@
+PL Lceda.Altium:Connect
+    Command='Lceda.Altium:Connect'
+    Caption='JLC Workstation - Connect'
+    Description='Enable the background connection to JLC Export Workstation'
+End
+PL Lceda.Altium:Status
+    Command='Lceda.Altium:Status'
+    Caption='JLC Workstation - Status'
+    Description='Show native plugin status'
+End
+Insertion Lceda_NoDoc TargetID='MNNoDocument_File' RefID0='NoDoc'
+    Link Lceda_NoDoc_Link PLID='Lceda.Altium:Status' End
+End
+Insertion Lceda_SchLib TargetID='MNSchematic_SchLibMenuTools10' RefID0='SchLib_Tools'
+    Link Lceda_SchLib_Link PLID='Lceda.Altium:Connect' End
+End
+Insertion Lceda_PcbLib TargetID='MNPCBLib_Tools10' RefID0='PcbLib_Tools'
+    Link Lceda_PcbLib_Link PLID='Lceda.Altium:Connect' End
+End

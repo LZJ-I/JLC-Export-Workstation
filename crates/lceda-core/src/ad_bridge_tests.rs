@@ -153,6 +153,26 @@ fn installation_generates_local_project_and_does_not_replace_live_scripts() {
 }
 
 #[test]
+fn native_connection_preserves_existing_model_name_and_supplies_it_to_ad() {
+    let dir = Directory::new(); heartbeat(&dir.0);
+    let mut fields = read_fields(&dir.0.join("heartbeat.ini")).unwrap(); fields.insert("backend".into(), "native".into());
+    write_fields(&dir.0.join("heartbeat.ini"), &fields).unwrap();
+    assert!(connection(&dir.0).unwrap().native);
+    let target = dir.0.join("User.SchLib");
+    let mut old = entry().symbol.unwrap(); old.name = "OLD_MODEL_C52717".into();
+    altium::write_schlib_with_colors(&target, &old, SchColors::default()).unwrap();
+    let before = fs::read(&target).unwrap();
+    let worker = peer(dir.0.clone(), |request, job| {
+        assert_eq!(unhex(&request["existing_symbol"]).unwrap(), "OLD_MODEL_C52717");
+        reply(&request, &job, &[("ok", "1".into()), ("verified", "1".into()),
+            ("component", hex("OLD_MODEL_C52717")), ("existing", "1".into())]);
+    });
+    let result = Bridge::new(dir.0.clone()).update(&target, entry(), SchColors::default()).unwrap();
+    worker.join().unwrap();
+    assert_eq!(result.component, "OLD_MODEL_C52717"); assert_eq!(fs::read(target).unwrap(), before);
+}
+
+#[test]
 fn busy_editor_remains_connected_without_replacing_its_script() {
     let dir = Directory::new(); install(&dir.0).unwrap();
     fs::write(dir.0.join("LcedaBridge.pas"), b"busy script must stay").unwrap();
