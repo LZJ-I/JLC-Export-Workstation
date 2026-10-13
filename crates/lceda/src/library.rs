@@ -634,6 +634,18 @@ pub(crate) fn binding_matches(bound: &Path, candidate: &Path) -> bool {
     normalize_binding(candidate).is_ok_and(|candidate| binding_identity(bound, cfg!(windows)) == binding_identity(&candidate, cfg!(windows)))
 }
 
+/// Canonical Windows paths use verbatim prefixes that shell dialogs and people
+/// do not need. Keep the stored identity unchanged and format only for display.
+pub(crate) fn display_binding(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(unc) = value.strip_prefix("\\\\?\\UNC\\") { return format!("\\\\{unc}"); }
+        if let Some(drive) = value.strip_prefix("\\\\?\\").filter(|rest| rest.as_bytes().get(1) == Some(&b':')) { return drive.to_string(); }
+    }
+    value.into_owned()
+}
+
 fn binding_identity(path: &Path, windows: bool) -> String {
     let value = path.to_string_lossy();
     if windows { value.replace('/', "\\").trim_start_matches("\\\\?\\").to_lowercase() }

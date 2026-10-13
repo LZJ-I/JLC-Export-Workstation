@@ -1,5 +1,37 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AdAccess { Files, Connected, Install, Enable, Connect }
+impl AdAccess {
+    fn from_facts(windows: bool, files: bool, connected: bool, installed: bool, script: bool, enabled: bool) -> Self {
+        if !windows || files { Self::Files }
+        else if connected { Self::Connected }
+        else if !installed && !script { Self::Install }
+        else if !enabled { Self::Enable }
+        else { Self::Connect }
+    }
+    pub(super) fn waits(self) -> bool { !matches!(self, Self::Files | Self::Connected) }
+    pub(super) fn action_key(self) -> &'static str {
+        match self { Self::Files => "ad_editor_mode", Self::Connected => "ad_manage_connection",
+            Self::Install => "ad_need_install", Self::Enable => "ad_need_enable", Self::Connect => "ad_need_connect" }
+    }
+    pub(super) fn waiting_key(self) -> &'static str {
+        match self { Self::Install => "ad_wait_install", Self::Enable => "ad_wait_enable", _ => "ad_queue_waiting" }
+    }
+    pub(super) fn hint_key(self) -> &'static str {
+        match self { Self::Files => "ad_file_mode_hint", Self::Connected => "ad_ready_hint",
+            Self::Install => "ad_install_first_hint", Self::Enable => "ad_enable_first_hint", Self::Connect => "ad_connect_first_hint" }
+    }
+}
+
+fn hold_disconnected_ad(library: &Library, targets: &mut BTreeSet<(String, LibraryFormat)>, access: AdAccess) -> BTreeSet<(String, LibraryFormat)> {
+    let waiting: BTreeSet<_> = targets.iter().filter(|(category, format)| access.waits() && *format == LibraryFormat::Ad
+        && library.binding_for(category, LibraryFormat::Ad).is_some()
+        && library.favs_in(category).iter().any(|part| library.native(&part.lcsc).is_none())).cloned().collect();
+    targets.retain(|target| !waiting.contains(target));
+    waiting
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct QueuedScope { category: String, format: LibraryFormat, binding: PathBuf }
 
@@ -91,6 +123,7 @@ impl LibrarySyncTask {
     pub(super) fn status(&self) -> (usize, usize) {
         let p = self.progress.lock().unwrap(); let (done, failed, _) = p.counts(); (done + failed, p.rows.len())
     }
+    pub(super) fn includes_category(&self, category: &str) -> bool { self.targets.iter().any(|(id, _)| id == category) }
     pub(super) fn fail(&self, error: String) {
         let mut p = self.progress.lock().unwrap(); p.note = Some(error); p.finish();
     }
@@ -166,9 +199,22 @@ impl App {
             Err(error) => { self.log(format!("同步队列保存失败，未开始新任务：{error}")); false }
         }
     }
-    pub(super) fn native_ad_waiting(&self) -> bool {
-        cfg!(windows) && crate::profile_dir().map(|p| p.join("ad-bridge")).is_some_and(|root|
-            lceda_core::ad_plugin::installed(&root) && lceda_core::ad_bridge::enabled(&root) && lceda_core::ad_bridge::connection(&root).is_err())
+    pub(super) fn ad_access(&self) -> AdAccess {
+        let Some(root) = crate::profile_dir().map(|p| p.join("ad-bridge")) else {
+            return if cfg!(windows) { AdAccess::Install } else { AdAccess::Files };
+        };
+        AdAccess::from_facts(cfg!(windows), lceda_core::ad_bridge::file_mode(&root), lceda_core::ad_bridge::connection(&root).is_ok(),
+            lceda_core::ad_plugin::installed(&root), root.join("LcedaBridge.PrjScr").is_file(), lceda_core::ad_bridge::enabled(&root))
+    }
+    pub(super) fn ad_sync_waiting(&self) -> bool { self.ad_access().waits() }
+    pub(super) fn poll_ad_binding(&mut self) {
+        if self.binding_waits_for_ad && !self.busy() && !self.ad_sync_waiting() {
+            self.binding_waits_for_ad = false; self.show_ad_connection = false;
+            if self.bind_cat.as_ref().is_some_and(|id| self.lib.cat(id).is_none()) { self.bind_cat = None; }
+        }
+    }
+    pub(super) fn hold_ad_targets(&self, targets: &mut BTreeSet<(String, LibraryFormat)>) -> BTreeSet<(String, LibraryFormat)> {
+        hold_disconnected_ad(&self.lib, targets, self.ad_access())
     }
     pub(super) fn poll_ad_plugin(&mut self) {
         if self.ad_plugin_job.as_ref().is_some_and(|job| job.ready().is_some()) {
@@ -214,8 +260,11 @@ impl App {
     }
     pub(super) fn show_queued_ad(&mut self) {
         let targets: BTreeSet<_> = self.pending_library_sync.iter().filter(|(_, format)| *format == LibraryFormat::Ad).cloned().collect();
-        if targets.is_empty() || self.library_sync_task.as_ref().is_some_and(|task|
-            task.targets == targets && task.progress.lock().unwrap().stage == Stage::AwaitingAd) { return; }
+        if targets.is_empty() { return; }
+        // Keep an open failure report visible while an independent AD scope waits.
+        if self.show_library_sync && self.library_sync_task.as_ref().is_some_and(|task| {
+            let p = task.progress.lock().unwrap(); p.stage == Stage::Finished && (p.note.is_some() || p.counts().1 > 0)
+        }) { return; }
         let mut rows = Vec::new();
         for (category, format) in &targets {
             if let Some(path) = self.lib.binding_for(category, *format) {
@@ -227,7 +276,17 @@ impl App {
                 }
             }
         }
+        if self.library_sync_task.as_ref().is_some_and(|task| {
+            let p = task.progress.lock().unwrap(); task.targets == targets && p.stage == Stage::AwaitingAd
+                && p.rows.len() == rows.len() && p.rows.iter().zip(&rows).all(|(old, new)| old.id == new.id && old.name == new.name && old.targets == new.targets)
+        }) { return; }
         self.library_sync_task = Some(LibrarySyncTask::new(rows, targets, Stage::AwaitingAd));
+    }
+    pub(super) fn reconcile_ad_waiting(&mut self) {
+        let waiting = self.library_sync_task.as_ref().is_some_and(|task| task.progress.lock().unwrap().stage == Stage::AwaitingAd);
+        if !waiting { return; }
+        if self.pending_library_sync.iter().any(|(_, format)| *format == LibraryFormat::Ad) { self.show_queued_ad(); }
+        else if let Some(task) = &self.library_sync_task { task.cancel.store(true, Ordering::SeqCst); task.progress.lock().unwrap().finish(); }
     }
     pub(super) fn ad_connection_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_ad_connection { return; }
@@ -238,26 +297,41 @@ impl App {
         let native = connection.is_some_and(|connection| connection.native);
         let installed = lceda_core::ad_plugin::installed(&root);
         let enabled = lceda_core::ad_bridge::enabled(&root);
+        let access = self.ad_access();
         let installing = self.ad_plugin_job.is_some();
         let mut open = true; let mut launch = false; let mut folder = false; let mut offline = false; let mut close = false;
         let mut install = false; let mut enable = false; let mut uninstall = false;
         fit_window(i18n::t(lang, "ad_connection_title"), "ad_connection", 600.0).open(&mut open).show(ctx, |ui| {
             ui.set_width(576.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::heading(i18n::t(lang, if native { "ad_native_connected" } else if connected { "ad_connected" } else { "ad_disconnected" })));
+                ui.label(theme::heading(i18n::t(lang, if access == AdAccess::Files { "ad_file_mode_active" } else if native { "ad_native_connected" } else if connected { "ad_connected" } else { "ad_disconnected" })));
                 if installing || enabled && !connected { ui.add(egui::Spinner::new().size(14.0)); }
             });
-            ui.add(egui::Label::new(i18n::t(lang, "ad_connection_hint")).wrap());
+            ui.add(egui::Label::new(i18n::t(lang, if access == AdAccess::Files { "ad_file_mode_hint" } else { "ad_connection_hint" })).wrap());
+            if self.binding_waits_for_ad {
+                if let Some(category) = self.bind_cat.as_ref().and_then(|id| self.lib.cat(id)) {
+                    ui.add_space(6.0);
+                    let caption = format!("{} {}", i18n::t(lang, "ad_binding_pending"), category.name);
+                    ui.add(egui::Label::new(&caption).truncate()).on_hover_text(caption);
+                }
+            }
+            if access.waits() { ui.add(egui::Label::new(i18n::t(lang, access.hint_key())).wrap()); }
             ui.add_space(10.0);
-            egui::ScrollArea::vertical().min_scrolled_height(220.0).max_height((ctx.screen_rect().height() - 290.0).clamp(220.0, 400.0)).auto_shrink([false, true]).show(ui, |ui| {
+            // Reserve the window frame and fixed footer after measuring the
+            // prerequisite text, which varies by language and connection state.
+            let reserve = if access == AdAccess::Files { 160.0 } else { 200.0 };
+            let scroll_height = (ctx.screen_rect().height() - ui.min_rect().height() - reserve).clamp(160.0, 400.0);
+            egui::ScrollArea::vertical().min_scrolled_height(160.0).max_height(scroll_height).auto_shrink([false, true]).show(ui, |ui| {
             egui::Frame::new().fill(theme::well()).corner_radius(7).inner_margin(10).show(ui, |ui| {
                 ui.label(theme::heading(i18n::t(lang, "ad_plugin_title")));
                 ui.add(egui::Label::new(i18n::t(lang, "ad_plugin_hint")).wrap());
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     install = theme::pill_button(ui, i18n::t(lang, if installing { "working" } else if installed { "ad_plugin_update" } else { "ad_plugin_install" }), cfg!(windows) && !connected && !installing && !self.busy(), true).clicked();
-                    if installed && !enabled { enable = theme::pill_button(ui, i18n::t(lang, "ad_plugin_enable"), !installing && !self.busy(), false).clicked(); }
-                    if installed { ui.label(egui::RichText::new(i18n::t(lang, "ad_plugin_installed")).small().color(theme::secondary())); }
+                    if matches!(access, AdAccess::Files | AdAccess::Enable) {
+                        enable = theme::pill_button(ui, i18n::t(lang, if access == AdAccess::Files { "ad_editor_mode" } else { "ad_plugin_enable" }), !installing && !self.busy(), false).clicked();
+                    }
+                    if installed { ui.label(egui::RichText::new(i18n::t(lang, if access == AdAccess::Files { "ad_plugin_present" } else { "ad_plugin_installed" })).small().color(theme::secondary())); }
                 });
             });
             if let Some(note) = &self.ad_plugin_note {
@@ -296,7 +370,7 @@ impl App {
                 if installed { uninstall = theme::pill_button(ui, i18n::t(lang, "ad_plugin_uninstall"), !connected && !self.busy(), false).clicked(); }
                 close = theme::pill_button(ui, i18n::t(lang, "close"), true, false).clicked();
             });
-            if enabled {
+            if access != AdAccess::Files {
                 ui.add_space(6.0);
                 offline = theme::pill_button(ui, i18n::t(lang, "ad_file_mode"), !self.busy(), false).clicked();
             }
@@ -322,11 +396,19 @@ impl App {
         if offline {
             if let Err(error) = lceda_core::ad_bridge::disable(&root) { self.alert(error.to_string()); }
         }
-        if close || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.show_ad_connection = false; }
+        if close || !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.show_ad_connection = false;
+            if self.binding_waits_for_ad { self.binding_waits_for_ad = false; self.bind_cat = None; }
+        }
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
     pub(super) fn begin_binding_validation(&mut self, category: String, format: LibraryFormat, path: PathBuf) {
+        if self.busy() { return; }
+        if format == LibraryFormat::Ad && self.ad_sync_waiting() {
+            self.binding_waits_for_ad = true; self.show_ad_connection = true; return;
+        }
+        let file_mode = self.ad_access() == AdAccess::Files;
         let targets = BTreeSet::from([(category.clone(), format)]);
         let rows = self.lib.favs_in(&category).into_iter().filter(|part| self.lib.native(&part.lcsc).is_none())
             .map(|part| SyncRow { id: part.lcsc.to_ascii_uppercase(), name: part.name.clone(),
@@ -336,7 +418,10 @@ impl App {
         self.library_sync_task = Some(task); self.show_library_sync = true; self.bind_cat = None;
         self.bind_job = Some(Promise::spawn_thread("validate-library-binding", move || {
             match format {
-                LibraryFormat::Ad => lceda_core::bound_ad::validate_binding(&path)?,
+                LibraryFormat::Ad => {
+                    if file_mode { lceda_core::ad_bridge::require_editor_closed()?; }
+                    lceda_core::bound_ad::validate_binding(&path)?;
+                }
                 LibraryFormat::KiCad => lceda_core::bound_kicad::validate_binding(&path)?,
             }
             if cancel.load(Ordering::SeqCst) { return Err(lceda_core::Error::msg("绑定已取消，原绑定保持不变")); }
@@ -383,8 +468,8 @@ impl App {
         let worker = LibrarySyncTask { progress: task.progress.clone(), cancel: task.cancel.clone(), targets: task.targets.clone(), can_retry: true };
         #[cfg(windows)]
         if !req.ad_library_files.is_empty() {
-            if let Some(root) = crate::profile_dir().map(|p| p.join("ad-bridge")) {
-                if lceda_core::ad_bridge::enabled(&root) || lceda_core::ad_bridge::connection(&root).is_ok() {
+            if self.ad_access() != AdAccess::Files {
+                if let Some(root) = crate::profile_dir().map(|p| p.join("ad-bridge")) {
                     let progress = task.progress.clone();
                     let lang = self.lang;
                     req.ad_bridge = Some(lceda_core::ad_bridge::Bridge::new(root).with_progress(move |phase| {
@@ -397,6 +482,7 @@ impl App {
         }
         if !req.ad_library_files.is_empty() {
             let ready = if let Some(bridge) = &req.ad_bridge { lceda_core::ad_bridge::connection(&bridge.directory).map(|_| ()) }
+                else if self.ad_sync_waiting() { Err(lceda_core::Error::msg(i18n::t(self.lang, self.ad_access().hint_key()))) }
                 else { lceda_core::ad_bridge::require_editor_closed() };
             if let Err(error) = ready {
                 task.fail(error.to_string()); self.library_sync_task = Some(task); self.show_library_sync = true; return;
@@ -432,7 +518,7 @@ impl App {
             ui.set_width(636.0);
             ui.horizontal_wrapped(|ui| {
                 if running { ui.add(egui::Spinner::new().size(16.0)); }
-                let key = if stopping && running { "sync_stopping" } else if p.stage == Stage::AwaitingAd { "ad_queue_waiting" } else if p.stage == Stage::Validating { "sync_validating" }
+                let key = if stopping && running { "sync_stopping" } else if p.stage == Stage::AwaitingAd { self.ad_access().waiting_key() } else if p.stage == Stage::Validating { "sync_validating" }
                     else if running { "sync_running" } else if stopping { "sync_stopped" }
                     else if failed > 0 || p.note.is_some() { "sync_finished_errors" } else { "sync_finished" };
                 ui.label(theme::heading(i18n::t(lang, key)));
@@ -444,7 +530,8 @@ impl App {
             ui.label(summary);
             ui.add(egui::ProgressBar::new(if total > 0 { completed as f32 / total as f32 } else { 0.0 }).desired_height(8.0).fill(color));
             ui.add_space(8.0);
-            egui::ScrollArea::vertical().id_salt("library_sync_rows").max_height((ctx.screen_rect().height() - 320.0).clamp(150.0, 340.0)).show(ui, |ui| {
+            let reserve = if p.stage == Stage::AwaitingAd { 400.0 } else { 320.0 };
+            egui::ScrollArea::vertical().id_salt("library_sync_rows").max_height((ctx.screen_rect().height() - reserve).clamp(120.0, 340.0)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if let Some(note) = &p.note { ui.add(egui::Label::new(egui::RichText::new(note).color(ui.visuals().error_fg_color)).wrap().selectable(true)); }
                 if total == 0 && p.stage == Stage::Finished && p.note.is_none() { ui.add(egui::Label::new(i18n::t(lang, "sync_empty")).wrap()); }
@@ -466,7 +553,10 @@ impl App {
                 }
             });
             ui.add_space(8.0);
-            if running { ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, if p.stage == Stage::AwaitingAd { "ad_queue_hint" } else { "sync_cancel_hint" })).small().color(theme::secondary())).wrap()); }
+            if running {
+                if p.stage == Stage::AwaitingAd { ui.add(egui::Label::new(i18n::t(lang, self.ad_access().hint_key())).wrap()); }
+                ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, if p.stage == Stage::AwaitingAd { "ad_queue_hint" } else { "sync_cancel_hint" })).small().color(theme::secondary())).wrap());
+            }
             ui.horizontal_wrapped(|ui| {
                 close = theme::pill_button(ui, i18n::t(lang, if running { "sync_background" } else { "close" }), true, !running).clicked();
                 if running { cancel = theme::pill_button(ui, i18n::t(lang, if stopping { "sync_stopping" } else { "sync_cancel" }), !stopping, false).clicked(); }
@@ -475,7 +565,7 @@ impl App {
                 }
                 #[cfg(windows)]
                 if (!running || p.stage == Stage::AwaitingAd) && task.targets.iter().any(|(_, format)| *format == LibraryFormat::Ad) {
-                    connect_ad = theme::pill_button(ui, i18n::t(lang, "ad_connect"), true, false).clicked();
+                    connect_ad = theme::pill_button(ui, i18n::t(lang, self.ad_access().action_key()), true, false).clicked();
                 }
             });
         });
@@ -500,6 +590,39 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_requires_an_editor_unless_file_mode_is_explicit() {
+        assert_eq!(AdAccess::from_facts(true, false, false, false, false, false), AdAccess::Install);
+        assert_eq!(AdAccess::from_facts(true, false, false, true, false, false), AdAccess::Enable);
+        assert_eq!(AdAccess::from_facts(true, false, false, true, false, true), AdAccess::Connect);
+        assert_eq!(AdAccess::from_facts(true, false, false, false, true, true), AdAccess::Connect);
+        // A live compatible script is sufficient even without a native plugin.
+        assert_eq!(AdAccess::from_facts(true, false, true, false, true, true), AdAccess::Connected);
+        assert_eq!(AdAccess::from_facts(true, true, false, false, false, false), AdAccess::Files);
+        assert_eq!(AdAccess::from_facts(false, false, false, false, false, false), AdAccess::Files);
+    }
+    #[test]
+    fn waiting_for_ad_never_holds_kicad_or_replays_unbound_scopes() {
+        let mut library = Library::default();
+        let root = std::env::temp_dir().join(format!("lceda-deps-{}", lceda_core::util::unique_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        library.set_binding(UNCAT, LibraryFormat::Ad, &root.join("User.SchLib")).unwrap();
+        library.set_binding(UNCAT, LibraryFormat::KiCad, &root.join("User.kicad_sym")).unwrap();
+        library.add_fav(part_from_item(&item("C1001"), UNCAT).unwrap());
+        let all = BTreeSet::from([(UNCAT.into(), LibraryFormat::Ad), (UNCAT.into(), LibraryFormat::KiCad)]);
+        for access in [AdAccess::Install, AdAccess::Enable, AdAccess::Connect] {
+            let mut ready = all.clone();
+            let waiting = hold_disconnected_ad(&library, &mut ready, access);
+            assert_eq!(waiting, BTreeSet::from([(UNCAT.into(), LibraryFormat::Ad)]));
+            assert_eq!(ready, BTreeSet::from([(UNCAT.into(), LibraryFormat::KiCad)]));
+        }
+        for access in [AdAccess::Connected, AdAccess::Files] {
+            let mut ready = all.clone(); assert!(hold_disconnected_ad(&library, &mut ready, access).is_empty()); assert_eq!(ready, all);
+        }
+        library.clear_binding(UNCAT, LibraryFormat::Ad).unwrap();
+        let mut ready = all; assert!(hold_disconnected_ad(&library, &mut ready, AdAccess::Install).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn task() -> LibrarySyncTask {
         LibrarySyncTask::new((1001..=1003).map(|n| SyncRow { id: format!("C{n}"), name: String::new(), targets: "AD · test.SchLib".into(), state: RowState::Waiting, error: None, detail: None }).collect(), BTreeSet::new(), Stage::Running)
     }

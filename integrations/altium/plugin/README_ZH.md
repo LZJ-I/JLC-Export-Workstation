@@ -1,6 +1,6 @@
 # 嘉立创导出工作站 · AD 原生插件（0.9.0）
 
-在工作站“器件库 → 同步库 → 连接 AD”点击安装原生插件，安装前关闭 AD，安装后启动 AD。插件随 AD 加载，后台连接当前 Windows 用户的工作站，不需要运行 `LcedaBridge.PrjScr`，没有常驻连接窗口。
+在工作站“器件库 → 同步库”选择“安装插件并连接 AD…”，进入连接窗口后点击“安装原生插件”；也可在“设置 → 常规 → AD 原生插件 → 管理插件…”打开该窗口。安装前关闭 AD，安装后启动 AD。插件随 AD 加载，后台连接当前 Windows 用户的工作站，不需要运行 `LcedaBridge.PrjScr`，没有常驻连接窗口。
 
 安装器使用该电脑上 AD 配套的 `Altium.SDK.dll`、`Altium.SDK.Interfaces.dll` 编译原生 C# 模块。**安装 AD 不一定同时安装 SDK**；缺少时需在对应 AD 版本安装 Altium Developer SDK。没有这些接口文件时安装会停止，工作站不会将脚本伪装成已安装的插件。本发布包不分发 Altium 商业接口文件。目标为带旧版托管扩展接口的 64 位 AD；新版本接口不同会明确报错，未经实际 AD 验证的版本不宣称兼容。
 
@@ -18,7 +18,9 @@
 
 工作站关闭或 AD 退出不会凭旧 IPC 请求再次写入。工作站排队记录只保存待同步的器件库范围，重新连接时按当前绑定和器件列表生成新任务；执行失败的任务需要用户查看结果后手动重试。
 
-可在工作站连接窗口切换回文件模式或使用脚本兼容方式。文件模式要求关闭 AD；Linux 继续使用本地文件同步。
+Windows 默认顺序为“连接 AD → 绑定库文件 → 同步器件”。未连接时绑定会先引导连接，连接成功后继续选库，仍需确认绑定。已有绑定的同步范围持久化等待；缺少、停用或断开插件都不会自动切换到磁盘写入，KiCad 可独立继续。
+
+可在工作站连接窗口明确选择“改用文件同步（需关闭 AD）”，关闭 AD 后离线绑定和同步；选择保存在本机。重新启用连接或安装插件会退出文件模式，安装失败保留原模式。Linux 继续使用本地文件同步，普通导出副本不依赖 AD 连接。解除绑定会取消对应等待范围，保留外部库和器件。
 
 架构参考：[EasyEDALoader](https://github.com/expired6978/EasyEDALoader) 的 `CSharpPlugin.PluginFactory`、`ServerModule` 和 INS/RCS 加载流程；此处实现是独立的任务协议与保留旧库的同步逻辑，没有引入其下载、界面和器件生成代码。启动加载依据 [Altium SDK FAQ](https://www.altium.com/documentation/altium-dxp-developer/delphi-sdk-how-to-faq?version=18) 的 `SystemExtension=True`。机器人消息值依据官方 [原理图常量](https://www.altium.com/documentation/altium-dxp-developer/schematic-api-constants-reference) 与 [PCB 常量](https://www.altium.com/documentation/altium-dxp-developer/pcb-api-constants-reference)。
 

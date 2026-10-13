@@ -36,7 +36,7 @@ mod resource_assist;
 use resource_assist::ResourceAssist;
 #[path = "library_sync.rs"]
 mod library_sync;
-use library_sync::{LibrarySyncTask, BindPromise};
+use library_sync::{LibrarySyncTask, BindPromise, AdAccess};
 #[path = "export_plan.rs"]
 mod export_plan;
 use export_plan::{ExportPlan, ExportSelection};
@@ -256,6 +256,7 @@ struct App {
     lang_pinned: bool,
     show_bom_import: bool,
     bind_cat: Option<String>,
+    binding_waits_for_ad: bool,
     bind_format: LibraryFormat,
     bind_path: String,
     pending_library_sync: BTreeSet<(String, LibraryFormat)>,
@@ -357,7 +358,7 @@ struct App {
     shot_settle: u32,
     shot_input: Option<PathBuf>,
     shot_input_id: u64,
-    shot_pointer_release: Option<egui::Pos2>,
+    shot_pointer_release: Option<(egui::Pos2, egui::PointerButton)>,
     ad_embed_3d: bool,
     kicad_attach_3d: bool,
     rename_footprint: bool,
@@ -393,6 +394,7 @@ impl App {
             lang_pinned: prefs.lang.is_some(),
             show_bom_import: false,
             bind_cat: None,
+            binding_waits_for_ad: false,
             bind_format: LibraryFormat::Ad,
             bind_path: String::new(),
             pending_library_sync: BTreeSet::new(),
@@ -2107,8 +2109,8 @@ impl eframe::App for App {
         let Some(path) = &self.shot_input else { return; };
         input.events.clear(); input.focused = true; input.modifiers = egui::Modifiers::NONE;
         for viewport in input.viewports.values_mut() { viewport.focused = Some(true); }
-        if let Some(pos) = self.shot_pointer_release.take() {
-            input.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        if let Some((pos, button)) = self.shot_pointer_release.take() {
+            input.events.push(egui::Event::PointerButton { pos, button, pressed: false, modifiers: egui::Modifiers::NONE });
             return;
         }
         let Some(command) = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()) else { return; };
@@ -2119,8 +2121,9 @@ impl eframe::App for App {
         } else if let (Some(x), Some(y)) = (command["x"].as_f64(), command["y"].as_f64()) {
             let pos = egui::pos2(x as f32, y as f32); input.events.push(egui::Event::PointerMoved(pos));
             if command["click"].as_bool() == Some(true) {
-                input.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
-                self.shot_pointer_release = Some(pos); ctx.request_repaint();
+                let button = if command["button"].as_str() == Some("secondary") { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
+                input.events.push(egui::Event::PointerButton { pos, button, pressed: true, modifiers: egui::Modifiers::NONE });
+                self.shot_pointer_release = Some((pos, button)); ctx.request_repaint();
             }
         }
     }
@@ -2292,6 +2295,7 @@ impl App {
         self.poll_resource_assist(ctx);
         self.poll_binding_validation();
         self.poll_ad_plugin();
+        self.poll_ad_binding();
         if self.ad_plugin_job.is_some() || !self.pending_library_sync.is_empty() { ctx.request_repaint_after(Duration::from_secs(1)); }
         if !self.busy() && !self.pending_library_sync.is_empty() && self.library_sync_after.is_none_or(|when| Instant::now() >= when) { self.start_library_sync(); }
         if self.bom_job.as_ref().is_some_and(|p| p.ready().is_some()) {
@@ -2640,6 +2644,7 @@ impl App {
 
     fn left_favorites(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
+        let ad_access = self.ad_access();
         let mut persist = false;
         let mut export_cat = false;
         let mut export_part: Option<String> = None;
@@ -2708,7 +2713,7 @@ impl App {
                     }
                 });
                 dropdown_menu(ui, i18n::t(lang, "library_sync_menu"), |ui| {
-                    library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy(), self.library_sync_task.is_some());
+                    library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy(), self.library_sync_task.is_some(), ad_access, true);
                 });
                 dropdown_menu(ui,i18n::t(lang,"resource_menu"),|ui|{
                     theme::prepare_menu(ui);
@@ -2729,7 +2734,10 @@ impl App {
                     let caption = self.lib.binding_for(&self.fav_cat, format).map(|p| format!("{} · {}", format.name(), p.display()));
                     if let Some(caption) = caption {
                         let response = ui.add(egui::Label::new(egui::RichText::new(&caption).small().color(theme::secondary())).truncate()).on_hover_text(&caption);
-                        response.context_menu(|ui| { library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy(), self.library_sync_task.is_some()); });
+                        response.context_menu(|ui| {
+                            let progress = self.library_sync_task.as_ref().is_some_and(|task| task.includes_category(&self.fav_cat));
+                            library_action = library_menu(ui, &self.lib, &self.fav_cat, lang, self.busy(), progress, ad_access, false);
+                        });
                     }
                 }
                 if LibraryFormat::ALL.into_iter().all(|f| self.lib.binding_for(&self.fav_cat, f).is_none()) {
@@ -2756,15 +2764,19 @@ impl App {
                         }
                         resp.context_menu(|ui| {
                             theme::prepare_menu(ui);
+                            ui.add(egui::Label::new(theme::heading(name)).truncate());
+                            ui.separator();
                             if self.lib.native(lcsc).is_some()&&ui.add_enabled(!self.busy(),egui::Button::new(i18n::t(lang,"resource_current"))).clicked(){resource_ids=Some(vec![lcsc.clone()]);ui.close();}
                             if ui
-                                .add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "export_default")))
+                                .add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "export_this_part")))
                                 .clicked()
                             {
                                 export_part = Some(lcsc.clone());
                                 ui.close();
                             }
-                            if ui.button(i18n::t(lang, "remove_item")).clicked() {
+                            ui.separator();
+                            if ui.add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "remove_library_part")))
+                                .on_hover_text(i18n::t(lang, "remove_library_part_hint")).clicked() {
                                 remove = Some(lcsc.clone());
                                 ui.close();
                             }
@@ -2788,31 +2800,30 @@ impl App {
                         }
                         r.context_menu(|ui| {
                             theme::prepare_menu(ui);
-                            if let Some(action) = library_menu(ui, &self.lib, id, lang, self.busy(), self.library_sync_task.is_some()) { library_action = Some(action); }
+                            ui.add(egui::Label::new(theme::heading(name)).truncate());
+                            ui.label(egui::RichText::new(format!("{n} {unit}")).small().color(theme::secondary()));
                             ui.separator();
-                            if ui.button(i18n::t(lang, "new_cat")).clicked() {
-                                open_new = true;
-                                ui.close();
-                            }
-                            if ui.button(i18n::t(lang, "import_cat")).clicked() {
-                                open_import = true;
-                                ui.close();
-                            }
+                            if ui.button(i18n::t(lang, "open_this_library")).clicked() { enter_cat = Some(id.clone()); ui.close(); }
                             if ui
-                                .add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "export_cat")))
+                                .add_enabled(!self.busy() && *n > 0, egui::Button::new(i18n::t(lang, "export_this_library")))
                                 .clicked()
                             {
                                 select_cat = Some(id.clone());
                                 export_cat = true;
                                 ui.close();
                             }
+                            ui.separator();
+                            let progress = self.library_sync_task.as_ref().is_some_and(|task| task.includes_category(id));
+                            if let Some(action) = library_menu(ui, &self.lib, id, lang, self.busy(), progress, ad_access, false) { library_action = Some(action); }
                             if id != UNCAT {
-                                if ui.button(i18n::t(lang, "rename_cat")).clicked() {
+                                ui.separator();
+                                if ui.add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "rename_cat"))).clicked() {
                                     select_cat = Some(id.clone());
                                     open_rename = true;
                                     ui.close();
                                 }
-                                if ui.button(i18n::t(lang, "del_cat")).clicked() {
+                                if ui.add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "del_cat")))
+                                    .on_hover_text(i18n::t(lang, "delete_library_hint")).clicked() {
                                     select_cat = Some(id.clone());
                                     delete = true;
                                     ui.close();
@@ -2826,11 +2837,11 @@ impl App {
                     );
                     leftover.context_menu(|ui| {
                         theme::prepare_menu(ui);
-                        if ui.button(i18n::t(lang, "new_cat")).clicked() {
+                        if ui.add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "new_cat"))).clicked() {
                             open_new = true;
                             ui.close();
                         }
-                        if ui.button(i18n::t(lang, "import_cat")).clicked() {
+                        if ui.add_enabled(!self.busy(), egui::Button::new(i18n::t(lang, "import_cat"))).clicked() {
                             open_import = true;
                             ui.close();
                         }
@@ -2883,6 +2894,8 @@ impl App {
         }
         if persist {
             self.lib.save();
+            self.pending_library_sync.retain(|(id, format)| self.lib.binding_for(id, *format).is_some());
+            self.persist_sync_queue(); self.reconcile_ad_waiting();
             self.refresh_context_selection();
         }
         if export_cat {
@@ -4096,6 +4109,7 @@ impl App {
     }
 
     fn bind_library_dialog(&mut self, ctx: &egui::Context) {
+        if self.binding_waits_for_ad { return; }
         let Some(cat_id) = self.bind_cat.clone() else { return; };
         let lang = self.lang;
         let mut open = true;
@@ -4103,11 +4117,17 @@ impl App {
         let mut cancel = false;
         let format = self.bind_format;
         let extension = format.extension();
+        let ad_access = self.ad_access();
         let name = if cat_id == UNCAT { i18n::t(lang, "uncategorized").to_string() }
             else { self.lib.cat(&cat_id).map(|c| c.name.clone()).unwrap_or_default() };
         let title = format!("{} · {}", i18n::t(lang, "bind_library"), format.name());
         fit_window(&title, "bind_library_dialog", 600.0).open(&mut open).show(ctx, |ui| {
-            ui.label(theme::heading(name));
+            ui.add(egui::Label::new(theme::heading(&name)).truncate()).on_hover_text(&name);
+            if format == LibraryFormat::Ad && cfg!(windows) {
+                ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, if ad_access == AdAccess::Files { "ad_file_binding_order" } else { "ad_binding_order" })).small().color(theme::secondary())).wrap());
+                ui.add(egui::Label::new(i18n::t(lang, ad_access.hint_key())).wrap());
+                ui.add_space(6.0);
+            }
             ui.add(egui::Label::new(i18n::t(lang, if format == LibraryFormat::Ad { "bind_library_hint" } else { "bind_kicad_hint" })).wrap());
             ui.add_space(10.0);
             ui.add_sized([ui.available_width(), 34.0], theme::edit_single(&mut self.bind_path, &format!("Library.{extension}")));
@@ -4133,7 +4153,8 @@ impl App {
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 cancel = theme::pill_button(ui, i18n::t(lang, "cancel"), true, false).clicked();
-                bind = theme::pill_button(ui, i18n::t(lang, "bind_and_sync"), !self.busy() && !self.bind_path.trim().is_empty(), true).clicked();
+                let label = if format == LibraryFormat::Ad && ad_access.waits() { "ad_connect_continue" } else { "bind_and_sync" };
+                bind = theme::pill_button(ui, i18n::t(lang, label), !self.busy() && !self.bind_path.trim().is_empty(), true).clicked();
             });
         });
         if bind {
@@ -4146,12 +4167,12 @@ impl App {
     fn start_library_sync(&mut self) {
         self.library_sync_after = None;
         let mut categories = std::mem::take(&mut self.pending_library_sync);
-        // Native mode waits for AD without holding the application's job slot.
-        // KiCad targets can continue while AD is closed.
-        if self.native_ad_waiting() {
-            let waiting: Vec<_> = categories.iter().filter(|(category, format)| *format == LibraryFormat::Ad
-                && self.lib.favs_in(category).iter().any(|part| self.lib.native(&part.lcsc).is_none())).cloned().collect();
-            for target in waiting { categories.remove(&target); self.pending_library_sync.insert(target); }
+        // AD editor synchronization always waits for its prerequisite, including
+        // a missing/disabled plugin. KiCad and explicit file mode stay independent.
+        let waiting = self.hold_ad_targets(&mut categories);
+        if !waiting.is_empty() {
+            self.pending_library_sync.extend(waiting);
+            self.persist_sync_queue();
             self.library_sync_after = Some(Instant::now() + Duration::from_secs(1));
         }
         if categories.is_empty() { self.show_queued_ad(); return; }
@@ -4195,34 +4216,53 @@ impl App {
     }
 
     fn handle_library_action(&mut self, action: LibraryAction) {
+        if self.busy() && matches!(&action, LibraryAction::Bind(..) | LibraryAction::Unbind(..) | LibraryAction::Sync(..) | LibraryAction::SyncAll) { return; }
         match action {
             LibraryAction::ConnectAd => { self.show_ad_connection = true; }
             LibraryAction::ShowProgress => { self.show_library_sync = true; }
             LibraryAction::Bind(id, format) => {
-                self.bind_path = self.lib.binding_for(&id, format).map(|p| p.display().to_string()).unwrap_or_else(|| {
+                if self.lib.cat(&id).is_none() { return; }
+                self.bind_path = self.lib.binding_for(&id, format).map(crate::library::display_binding).unwrap_or_else(|| {
                     let name = if id == UNCAT { i18n::t(self.lang, "uncategorized") }
                         else { self.lib.cat(&id).map(|c| c.name.as_str()).unwrap_or("Library") };
                     PathBuf::from(&self.out_dir).join(format!("{}.{}", lceda_core::util::sanitize_filename(name), format.extension())).display().to_string()
                 });
                 self.bind_format = format;
                 self.bind_cat = Some(id);
+                self.binding_waits_for_ad = format == LibraryFormat::Ad && self.ad_sync_waiting();
+                if self.binding_waits_for_ad { self.show_ad_connection = true; }
             }
             LibraryAction::Unbind(id, format) => {
                 let mut next = self.lib.clone();
                 match next.clear_binding(&id, format) {
                     Ok(()) => match next.try_save() {
-                        Ok(()) => { self.lib = next; self.pending_library_sync.remove(&(id, format)); self.persist_sync_queue(); }
+                        Ok(()) => {
+                            self.lib = next; self.pending_library_sync.remove(&(id, format)); self.persist_sync_queue(); self.reconcile_ad_waiting();
+                        }
                         Err(error) => self.alert(format!("保存库绑定失败: {error}")),
                     },
                     Err(error) => self.alert(error),
                 }
             }
-            LibraryAction::Sync(id, format) => { self.queue_library_sync(&id, format); self.library_sync_after = None; self.show_library_sync = true; }
+            LibraryAction::Sync(id, format) => {
+                let connect = format != Some(LibraryFormat::KiCad) && self.lib.binding_for(&id, LibraryFormat::Ad).is_some()
+                    && self.lib.favs_in(&id).iter().any(|p| self.lib.native(&p.lcsc).is_none()) && self.ad_sync_waiting();
+                self.queue_library_sync(&id, format); self.library_sync_after = None; self.show_library_sync = !connect;
+                if connect { self.show_ad_connection = true; }
+            }
             LibraryAction::SyncAll => {
                 let ids: Vec<_> = self.lib.bound_categories().iter().map(|(c, _)| c.id.clone()).collect();
                 for id in ids { self.queue_library_sync(&id, None); }
                 self.library_sync_after = None;
-                self.show_library_sync = true;
+                let connect = self.ad_sync_waiting() && self.pending_library_sync.iter().any(|(id, format)| *format == LibraryFormat::Ad
+                    && self.lib.favs_in(id).iter().any(|part| self.lib.native(&part.lcsc).is_none()));
+                self.show_library_sync = !connect;
+                if connect { self.show_ad_connection = true; }
+            }
+            LibraryAction::OpenBoundFolder(id, format) => {
+                if let Some(path) = self.lib.binding_for(&id, format).and_then(|path| path.parent()) {
+                    if !open_folder(Path::new(&crate::library::display_binding(path))) { self.alert(i18n::t(self.lang, "binding_open_failed")); }
+                }
             }
         }
     }
@@ -4430,8 +4470,8 @@ impl App {
                             .wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(0.0, 24.0))).clicked() { self.show_library_sync = true; }
                     }
                     #[cfg(windows)]
-                    if self.pending_library_sync.iter().any(|(_, format)| *format == LibraryFormat::Ad) && self.native_ad_waiting() {
-                        if ui.add(egui::Button::new(egui::RichText::new(i18n::t(self.lang, "ad_queue_waiting")).size(11.5))
+                    if self.pending_library_sync.iter().any(|(_, format)| *format == LibraryFormat::Ad) && self.ad_sync_waiting() {
+                        if ui.add(egui::Button::new(egui::RichText::new(i18n::t(self.lang, self.ad_access().waiting_key())).size(11.5))
                             .wrap_mode(egui::TextWrapMode::Extend).min_size(egui::vec2(0.0, 24.0))).clicked() { self.show_ad_connection = true; }
                     }
                     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -4490,6 +4530,7 @@ enum LibraryAction {
     ConnectAd,
     ShowProgress,
     Bind(String, LibraryFormat), Unbind(String, LibraryFormat),
+    OpenBoundFolder(String, LibraryFormat),
     Sync(String, Option<LibraryFormat>), SyncAll,
 }
 
@@ -4502,50 +4543,78 @@ fn dropdown_menu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut e
     menu
 }
 
-fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang, busy: bool, has_progress: bool) -> Option<LibraryAction> {
+fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang, busy: bool, has_progress: bool, ad_access: AdAccess, global: bool) -> Option<LibraryAction> {
     theme::prepare_menu(ui);
+    ui.set_max_width(320.0);
     let mut action = None;
     #[cfg(windows)]
-    {
-        if ui.button(i18n::t(lang, "ad_connect")).clicked() { action = Some(LibraryAction::ConnectAd); ui.close(); }
+    if global {
+        if ui.button(i18n::t(lang, ad_access.action_key())).clicked() { action = Some(LibraryAction::ConnectAd); ui.close(); }
         ui.separator();
     }
     if has_progress {
         if ui.button(i18n::t(lang, "sync_view_progress")).clicked() { action = Some(LibraryAction::ShowProgress); ui.close(); }
         ui.separator();
     }
-    let bound = LibraryFormat::ALL.into_iter().any(|f| library.binding_for(category, f).is_some());
-    if ui.add_enabled(!busy && bound, egui::Button::new(i18n::t(lang, "sync_current_library"))).clicked() {
-        action = Some(LibraryAction::Sync(category.into(), None)); ui.close();
+    let parts = library.favs_in(category);
+    let can_sync = parts.iter().any(|part| library.native(&part.lcsc).is_none());
+    let bound: Vec<_> = LibraryFormat::ALL.into_iter().filter(|f| library.binding_for(category, *f).is_some()).collect();
+    if !bound.is_empty() {
+        let label = if bound.len() > 1 { i18n::t(lang, if ad_access.waits() { "sync_both_ad_waits" } else { "sync_both_bindings" }).to_string() }
+            else if bound[0] == LibraryFormat::Ad && ad_access.waits() { i18n::t(lang, "ad_connect_then_sync").to_string() }
+            else { format!("{} {}", i18n::t(lang, "sync_format_prefix"), bound[0].name()) };
+        if ui.add_enabled(!busy && can_sync, egui::Button::new(label))
+            .on_disabled_hover_text(i18n::t(lang, if busy { "working" } else { "sync_no_online_parts" })).clicked() {
+            action = Some(LibraryAction::Sync(category.into(), if bound.len() == 1 { Some(bound[0]) } else { None })); ui.close();
+        }
     }
     for format in LibraryFormat::ALL {
-        if library.binding_for(category, format).is_some() {
-            let label = format!("{} {}", i18n::t(lang, "sync_format_prefix"), format.name());
-            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                action = Some(LibraryAction::Sync(category.into(), Some(format))); ui.close();
+        let path = library.binding_for(category, format);
+        let title = format!("{} · {}", format.name(), i18n::t(lang, if path.is_some() { "binding_set" } else { "binding_none" }));
+        ui.menu_button(title, |ui| {
+            theme::prepare_menu(ui);
+            ui.set_max_width(320.0);
+            let waits = format == LibraryFormat::Ad && ad_access.waits();
+            if format == LibraryFormat::Ad && cfg!(windows) {
+                ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, ad_access.hint_key())).small().color(theme::secondary())).wrap());
+                if ui.button(i18n::t(lang, ad_access.action_key())).clicked() { action = Some(LibraryAction::ConnectAd); ui.close(); }
+                ui.separator();
             }
-        }
-    }
-    ui.separator();
-    ui.menu_button(i18n::t(lang, "bind_library"), |ui| {
-        for format in LibraryFormat::ALL {
-            if ui.add_enabled(!busy, egui::Button::new(format!("{} (.{})", format.name(), format.extension()))).clicked() {
+            if let Some(path) = path {
+                let filename = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+                ui.add(egui::Label::new(egui::RichText::new(filename).strong()).truncate()).on_hover_text(crate::library::display_binding(path));
+                if bound.len() > 1 {
+                    let label = if waits { i18n::t(lang, "ad_connect_then_sync").into() }
+                        else { format!("{} {}", i18n::t(lang, "sync_format_prefix"), format.name()) };
+                    if ui.add_enabled(!busy && can_sync, egui::Button::new(label))
+                        .on_disabled_hover_text(i18n::t(lang, if busy { "working" } else { "sync_no_online_parts" })).clicked() {
+                        action = Some(LibraryAction::Sync(category.into(), Some(format))); ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.add_enabled(path.parent().is_some_and(Path::is_dir), egui::Button::new(i18n::t(lang, "binding_open_folder")))
+                    .on_hover_text(crate::library::display_binding(path)).clicked() {
+                    action = Some(LibraryAction::OpenBoundFolder(category.into(), format)); ui.close();
+                }
+                if ui.button(i18n::t(lang, "binding_copy_path")).clicked() { ui.ctx().copy_text(crate::library::display_binding(path)); ui.close(); }
+            }
+            let key = if path.is_some() { "binding_change" } else if waits { "ad_connect_then_bind" } else { "bind_library" };
+            if ui.add_enabled(!busy, egui::Button::new(i18n::t(lang, key))).on_disabled_hover_text(i18n::t(lang, "working")).clicked() {
                 action = Some(LibraryAction::Bind(category.into(), format)); ui.close();
             }
-        }
-    });
-    if bound {
-        ui.menu_button(i18n::t(lang, "unbind_library"), |ui| {
-            for format in LibraryFormat::ALL {
-                if library.binding_for(category, format).is_some() && ui.add_enabled(!busy, egui::Button::new(format.name())).clicked() {
+            if path.is_some() {
+                if ui.add_enabled(!busy, egui::Button::new(i18n::t(lang, "unbind_library")))
+                    .on_hover_text(i18n::t(lang, "binding_unbind_hint")).clicked() {
                     action = Some(LibraryAction::Unbind(category.into(), format)); ui.close();
                 }
             }
         });
     }
-    ui.separator();
-    if ui.add_enabled(!busy && !library.bound_categories().is_empty(), egui::Button::new(i18n::t(lang, "sync_all_libraries"))).clicked() {
-        action = Some(LibraryAction::SyncAll); ui.close();
+    if global && !library.bound_categories().is_empty() {
+        ui.separator();
+        if ui.add_enabled(!busy, egui::Button::new(i18n::t(lang, "sync_all_libraries"))).on_disabled_hover_text(i18n::t(lang, "working")).clicked() {
+            action = Some(LibraryAction::SyncAll); ui.close();
+        }
     }
     action
 }
