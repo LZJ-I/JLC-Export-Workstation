@@ -113,7 +113,7 @@ function Invoke-LcedaInstall([string]$Action, [string]$AdDirectory, [string]$Ext
     $stage = Join-Path $ExtensionsDirectory "Lceda.Altium-stage-$stamp"
     $movedOld = $false; $movedNew = $false; $replaced = $false
     $profileBefore = @{}
-    foreach ($name in @('native-install.json', 'enabled', 'stop')) {
+    foreach ($name in @('native-install.json', 'enabled', 'stop', 'file-mode')) {
         $path = Join-Path $BridgeDirectory $name
         $profileBefore[$name] = @{ file = (Test-Path -LiteralPath $path -PathType Leaf); directory = (Test-Path -LiteralPath $path -PathType Container); bytes = $null }
         if ($profileBefore[$name].file) { $profileBefore[$name].bytes = [IO.File]::ReadAllBytes($path) }
@@ -134,6 +134,7 @@ function Invoke-LcedaInstall([string]$Action, [string]$AdDirectory, [string]$Ext
         if ($Action -eq 'Install') {
             [IO.File]::WriteAllText((Join-Path $BridgeDirectory 'enabled'), '1')
             if (Test-Path -LiteralPath (Join-Path $BridgeDirectory 'stop')) { Remove-Item -LiteralPath (Join-Path $BridgeDirectory 'stop') }
+            if (Test-Path -LiteralPath (Join-Path $BridgeDirectory 'file-mode')) { Remove-Item -LiteralPath (Join-Path $BridgeDirectory 'file-mode') }
         }
         return $state
     } catch {

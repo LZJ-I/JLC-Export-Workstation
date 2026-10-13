@@ -27,8 +27,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Unsupported editor contract test failed' }
 $registry = Join-Path $ext 'ExtensionsRegistry.xml'
 [IO.File]::WriteAllText($registry, '<Extensions><Item HRID="Existing.Plugin" Guid="keep-me"><Path>unchanged</Path><Status>0</Status><Custom>preserve</Custom></Item></Extensions>')
 $original = [IO.File]::ReadAllBytes($registry)
+[IO.File]::WriteAllText((Join-Path $bridge 'file-mode'), 'explicit file mode before installation')
 $result = Invoke-LcedaInstall 'Install' $ad $ext $bridge $source
 Assert ($result.ok -and (Test-Path (Join-Path $ext 'Lceda.Altium\Lceda.Altium.dll'))) 'factory and editor code compile using test host contract; isolated install succeeds'
+Assert (-not (Test-Path (Join-Path $bridge 'file-mode'))) 'native installation selects editor mode explicitly'
 [xml]$xml = Get-Content -LiteralPath $registry
 Assert ($xml.SelectSingleNode('/Extensions/Item[@HRID="Existing.Plugin"]/Custom').InnerText -eq 'preserve') 'other AD extension configuration retained'
 Assert ($xml.SelectNodes('/Extensions/Item[@HRID="Lceda.Altium"]').Count -eq 1) 'own extension registered exactly once'
@@ -47,12 +49,15 @@ $failed = $false; try { Invoke-LcedaInstall 'Install' $ad $ext $bridge $source }
 Assert ($failed -and (Get-FileHash (Join-Path $ext 'Lceda.Altium\Lceda.Altium.dll')).Hash -eq $dllHash -and [Convert]::ToBase64String($before) -eq [Convert]::ToBase64String([IO.File]::ReadAllBytes($registry))) 'failed final installation step restores registry and plugin'
 Remove-Item -LiteralPath $statePath; [IO.File]::WriteAllBytes($statePath, $state)
 $enabledPath = Join-Path $bridge 'enabled'; Remove-Item -LiteralPath $enabledPath; New-Item -ItemType Directory -Path $enabledPath | Out-Null
+[IO.File]::WriteAllText((Join-Path $bridge 'file-mode'), 'retain-file-mode-on-failure')
 $failed = $false; try { Invoke-LcedaInstall 'Install' $ad $ext $bridge $source } catch { $failed = $true }
 Assert ($failed -and [Convert]::ToBase64String($state) -eq [Convert]::ToBase64String([IO.File]::ReadAllBytes($statePath))) 'failed enable step also restores per-user installation state'
+Assert ((Get-Content -LiteralPath (Join-Path $bridge 'file-mode') -Raw) -eq 'retain-file-mode-on-failure') 'failed installation retains explicit file mode'
 Remove-Item -LiteralPath $enabledPath
 $result = Invoke-LcedaInstall 'Uninstall' '' '' $bridge $source
 [xml]$xml = Get-Content -LiteralPath $registry
 Assert (-not $result.installed -and $xml.SelectNodes('/Extensions/Item[@HRID="Lceda.Altium"]').Count -eq 0 -and $xml.SelectNodes('/Extensions/Item[@HRID="Existing.Plugin"]').Count -eq 1) 'uninstall removes only own entry and retains old plugin backup'
+Assert (Test-Path (Join-Path $bridge 'file-mode')) 'uninstall preserves an explicit file mode choice'
 $missingSdk = Join-Path $ad 'no-sdk'; New-Item -ItemType Directory -Path $missingSdk | Out-Null
 $failed = $false; try { Find-LcedaSdk $missingSdk $ext } catch { $failed = $true }
 Assert $failed 'missing real SDK fails clearly'

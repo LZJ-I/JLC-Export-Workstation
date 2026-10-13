@@ -44,18 +44,27 @@ pub struct Synced {
 
 pub fn enabled(directory: &Path) -> bool { directory.join("enabled").is_file() }
 
+/// File synchronization is an explicit choice. A missing plugin or heartbeat
+/// must never silently select out-of-process writes on Windows.
+pub fn file_mode(directory: &Path) -> bool { directory.join("file-mode").is_file() }
+
 pub fn enable(directory: &Path) -> Result<()> {
     fs::create_dir_all(directory)?;
     fs::write(directory.join("enabled"), PROTOCOL)?;
     let stop = directory.join("stop");
     if stop.exists() { fs::remove_file(stop)?; }
+    let offline = directory.join("file-mode");
+    if offline.exists() { fs::remove_file(offline)?; }
     Ok(())
 }
 
 pub fn disable(directory: &Path) -> Result<()> {
+    require_editor_closed()?;
+    fs::create_dir_all(directory)?;
     fs::write(directory.join("stop"), b"stop")?;
     let path = directory.join("enabled");
     if path.exists() { fs::remove_file(path)?; }
+    fs::write(directory.join("file-mode"), PROTOCOL)?;
     Ok(())
 }
 
@@ -66,8 +75,7 @@ pub fn install(directory: &Path) -> Result<PathBuf> {
     let project = directory.join("LcedaBridge.PrjScr");
     let stop = directory.join("stop");
     if connection(directory).is_ok() {
-        if stop.exists() { fs::remove_file(stop)?; }
-        fs::write(directory.join("enabled"), PROTOCOL)?;
+        enable(directory)?;
         return Ok(project);
     }
     if stop.exists() { fs::remove_file(stop)?; }
@@ -77,7 +85,7 @@ pub fn install(directory: &Path) -> Result<PathBuf> {
         ("LcedaBridge.PrjScr", PROJECT), ("使用说明.md", GUIDE)] {
         fs::write(directory.join(name), text.replace('\n', "\r\n"))?;
     }
-    fs::write(directory.join("enabled"), PROTOCOL)?;
+    enable(directory)?;
     Ok(project)
 }
 
@@ -344,7 +352,7 @@ fn write_fields(path: &Path, fields: &BTreeMap<String, String>) -> Result<()> {
 /// A running editor must never receive out-of-process replacements behind its
 /// cached documents. This also protects CLI callers without a bridge configured.
 pub fn require_editor_closed() -> Result<()> {
-    if altium_running()? { return Err(disconnected()); }
+    if altium_running()? { return Err(Error::msg("文件同步需要先关闭 AD。若要在 AD 打开时同步，请切换到 AD 编辑器同步并先连接 AD；原库文件保持不变。")); }
     Ok(())
 }
 

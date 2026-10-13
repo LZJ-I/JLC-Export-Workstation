@@ -10,6 +10,18 @@ impl Directory {
     }
 }
 impl Drop for Directory { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+#[test]
+fn file_mode_is_explicit_persistent_and_cleared_by_editor_setup() {
+    let dir = Directory::new();
+    assert!(!file_mode(&dir.0)); assert!(!enabled(&dir.0));
+    disable(&dir.0).unwrap();
+    assert!(file_mode(&dir.0)); assert!(!enabled(&dir.0)); assert!(dir.0.join("stop").exists());
+    enable(&dir.0).unwrap();
+    assert!(!file_mode(&dir.0)); assert!(enabled(&dir.0)); assert!(!dir.0.join("stop").exists());
+    disable(&dir.0).unwrap();
+    assert!(install(&dir.0).unwrap().is_file());
+    assert!(!file_mode(&dir.0)); assert!(enabled(&dir.0)); assert!(!dir.0.join("stop").exists());
+}
 fn entry() -> Entry {
     Entry { id: "C52717".into(), symbol: Some(SymbolIr {
         name: "generic".into(), description: "STM8 controller".into(), designator: "U?".into(),
@@ -211,5 +223,5 @@ fn running_editor_disables_out_of_process_library_replacement() {
     thread::sleep(Duration::from_millis(100));
     let result = require_editor_closed();
     let _ = child.kill(); let _ = child.wait();
-    assert!(result.unwrap_err().to_string().contains("尚未连接"));
+    assert!(result.unwrap_err().to_string().contains("关闭 AD"));
 }
