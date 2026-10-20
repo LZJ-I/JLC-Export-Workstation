@@ -11,7 +11,10 @@ use std::io::Write;
 use std::path::Path;
 
 const DEFAULT_SOLDER_MASK_MIL: f64 = 1.969;
-const DEFAULT_CORNER_RADIUS: u8 = 25;
+// EasyEDA OVAL / ELLIPSE use semicircular ends, not a 25% rounded rectangle.
+// EasyEDALoader sets StackCRPctOnLayer=100; AltiumSharp stores this per layer
+// in pad subrecord 6 (offsets 564..596), alongside the shape-9 overrides.
+const OVAL_CORNER_RADIUS: u8 = 100;
 const DEFAULT_BODY_HEIGHT_MM: f64 = 1.0;
 
 pub struct PcbLibPart<'a> {
@@ -365,8 +368,27 @@ fn footprint_data(fp: &FootprintIr, name: &str, body: Option<&BodyInfo>) -> (Vec
         names.push("Arc");
     }
 
-    // EasyEDA FILL（标记/院子）先不写成 Region。手写 Region 仍容易让 AD 整库失败；
-    // 异形焊盘的铜皮/阻焊 Region 仍走下面 pad.is_custom_poly。
+    for region in &fp.regions {
+        if skip_altium_graphic(region.layer) || region.points.len() < 3 { continue; }
+        let layer = pcb_layer(region.layer, 0.0);
+        let outline = closed_outline(&region.points);
+        w.write_u8(11);
+        // Native filled graphics, including pin-1 triangles/dots. Follow
+        // AltiumSharp PcbLibWriter.WriteRegion / BuildRegionParamText; never
+        // reinterpret an overlay marking as a board cutout or keepout.
+        write_region(&mut w, layer, &outline, &[
+            ("V7_LAYER", v7_layer_name(layer).into()),
+            ("NAME", String::new()),
+            ("ISBOARDCUTOUT", "FALSE".into()),
+            ("KIND", "0".into()),
+            ("SUBPOLYINDEX", "0".into()),
+            ("UNIONINDEX", "0".into()),
+            ("ARCRESOLUTION", "0.5mil".into()),
+            ("ISSHAPEBASED", "FALSE".into()),
+            ("CAVITYHEIGHT", "0mil".into()),
+        ]);
+        names.push("Region");
+    }
 
     if let Some(body) = body {
         w.write_u8(12);
@@ -567,7 +589,7 @@ fn write_pad(w: &mut BinWriter, pad: &IrPad) {
         }
         w.write_u8(shape);
         for _ in 0..32 {
-            w.write_u8(if rounded { DEFAULT_CORNER_RADIUS } else { 50 });
+            w.write_u8(if rounded { OVAL_CORNER_RADIUS } else { 50 });
         }
     });
 }

@@ -311,9 +311,9 @@ fn write_custom_pad(out: &mut String, pad: &IrPad, pts: &[(f64, f64)]) {
 
 fn pad_shape(shape: &str, w: f64, h: f64) -> &'static str {
     let s = shape.to_ascii_uppercase();
-    if s.contains("CIRC") || ((w - h).abs() < 1e-4 && !s.contains("RECT") && !s.contains("POLY")) {
+    if (w - h).abs() < 1e-4 && !s.contains("RECT") && !s.contains("POLY") {
         "circle"
-    } else if s.contains("OVAL") {
+    } else if s.contains("OVAL") || s.contains("ELLIPSE") || s.contains("CIRC") || s == "ROUND" {
         "oval"
     } else if s.contains("ROUND") || s.contains("RECT") {
         "roundrect"

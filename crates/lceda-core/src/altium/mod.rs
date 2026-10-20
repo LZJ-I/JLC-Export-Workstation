@@ -321,8 +321,8 @@ mod tests {
         cfb.open_stream("IND/Header").unwrap().read_to_end(&mut hdr).unwrap();
         assert_eq!(hdr.len(), 4);
         let count = i32::from_le_bytes(hdr.try_into().unwrap());
-        // 2 pads + 4 courtyard track segments; overlay FILLs are not written as Region
-        assert_eq!(count, 6, "Header primitive count must match written Data records");
+        // 2 pads + 4 track segments + 1 filled region.
+        assert_eq!(count, 7, "Header primitive count must match written Data records");
         let mut uid = Vec::new();
         cfb.open_stream("IND/UniqueIdPrimitiveInformation/Data")
             .unwrap()
@@ -331,6 +331,7 @@ mod tests {
         let uid_text = String::from_utf8_lossy(&uid);
         assert!(uid_text.contains("Pad"));
         assert!(uid_text.contains("Track"));
+        assert!(uid_text.contains("Region"));
         assert!(uid_text.contains("UNIQUEID="));
         assert!(uid_text.contains("PRIMITIVEINDEX=0"));
         assert!(cfb.exists("IND/UniqueIdPrimitiveInformation/Data"));

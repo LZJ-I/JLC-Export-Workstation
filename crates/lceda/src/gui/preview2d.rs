@@ -274,7 +274,7 @@ fn rounded_outline(width: f64, height: f64, radius: f64) -> Vec<(f64, f64)> {
 fn pad_outline(pad: &IrPad) -> Vec<(f64, f64)> {
     if pad.is_custom_poly() { return pad.polygon.clone().unwrap_or_default(); }
     let radius = match pad.shape.to_ascii_uppercase().as_str() {
-        "ROUND" | "OVAL" => pad.width.min(pad.height) * 0.5,
+        "ROUND" | "OVAL" | "ELLIPSE" | "CIRCLE" => pad.width.min(pad.height) * 0.5,
         _ => 0.0,
     };
     rounded_outline(pad.width, pad.height, radius).into_iter()
@@ -444,6 +444,25 @@ mod tests {
             assert_eq!(polygon_triangles(&points).len(), points.len() - 2);
         }
     }
+
+    #[test]
+    fn oval_shape_aliases_preview_with_round_ends_without_square_corners() {
+        let mut pad = footprint_fixture().pads.remove(0);
+        pad.x = 0.0; pad.y = 0.0; pad.rotation = 0.0;
+        pad.width = 1.0; pad.height = 2.0; pad.polygon = None;
+        for shape in ["OVAL", "ELLIPSE", "ROUND", "CIRCLE"] {
+            pad.shape = shape.into();
+            let points: Vec<_> = pad_outline(&pad).into_iter()
+                .map(|(x, y)| Pos2::new(x as f32, y as f32)).collect();
+            let bounds = Rect::from_points(&points);
+            assert!((bounds.width() - 1.0).abs() < 0.001, "{shape}");
+            assert!((bounds.height() - 2.0).abs() < 0.001, "{shape}");
+            assert!(points.len() > 4, "{shape} must have curved ends");
+            assert!(points.iter().all(|p| p.x.abs() < 0.49 || p.y.abs() < 0.99),
+                "{shape} must not include the rectangle's corners");
+        }
+    }
+
     #[test]
     fn wheel_steps_are_reversible_and_do_not_drift_without_new_input() {
         let next = scroll_zoom(1.0, 120.0, 0.75, 8.0);
