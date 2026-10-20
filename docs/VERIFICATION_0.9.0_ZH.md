@@ -1,6 +1,19 @@
 # 0.9.0 验证记录
 
-验证截至 2026-10-13。以下区分自动测试、Windows 程序实际操作和 EDA 本体验证。
+验证截至 2026-10-20。以下区分自动测试、Windows 程序实际操作和 EDA 本体验证。
+
+## 2026-10-20 封装定位标记与椭圆焊盘
+
+修复 AD 封装导出丢弃 EasyEDA FILL 的问题：顶层、底层丝印和元件标记保留原图层与坐标，写为原生填充 Region；不设为挖空或禁布区域。椭圆焊盘使用完整半圆端部，修复此前固定 25% 圆角导致近似矩形的问题，宽度、高度、旋转和孔参数不变。KiCad 和封装预览同时识别 OVAL / ELLIPSE / ROUND / CIRCLE 的长圆形别名。原矩形焊盘、元件外形参考层的过滤规则、主题和主界面布局保持原行为。
+
+- 形状映射参考 [EasyEDALoader 的 EeFootprintPad](https://github.com/expired6978/EasyEDALoader/blob/1ade34da9c59ce53d27199452c4f7df9184d4789/EasyEDA-Loader/FootprintShapes/EeFootprintPad.cs)：OVAL / ELLIPSE 使用 rounded 形状，并将各层 `StackCRPctOnLayer` 设为 100。Region 头、参数顺序、双精度轮廓及焊盘分层圆角字段对照 [AltiumSharp 的 PcbLibWriter](https://github.com/issus/AltiumSharp/blob/master/src/OriginalCircuit.Altium/Serialization/Writers/PcbLibWriter.cs)，复用现有原生 Region 编码器。
+- Linux 工作区 **196 项通过，0 失败**：GUI 55、核心 119、DS90 2、FNR 4、封装保真 3、工作站集成 13。Windows x64 MSVC release 构建及原生测试 **196 项通过，0 失败**：GUI 55、核心 120、DS90 2、FNR 4、封装保真 3、工作站集成 12。Windows 测试在本地临时目录串行执行。
+- 新增回归使用仓库已有真实 **C205463 / TSSOP-16** 原始数据：核对 16 个焊盘所有 32 层的圆角、宽高与旋转，以及原有填充圆点。另用明确标识的合成 EasyEDA Pro 数据核对三个填充三角形的坐标、图层、闭合轮廓与矩形焊盘；不把合成样本当成用户截图器件的复现。
+- 使用独立 `olefile` CFB 读取器和 [AltiumMonkey 原生图元读取、渲染器](https://github.com/wavenumber-eng/altium_monkey/tree/2a7c094139d7f11d0b75e5ff80e0e5686f80c281/src/py/altium_monkey)完成 **75 项检查**，读回原生 Region、层号、顶点及所有焊盘圆角，并从生成文件渲染修复前后对比图。实际半径为短边的一半；Header 图元数与独立解析结果一致。读取器对旧、新文件的既有 45 字节 Arc 记录均提示相同的长度警告，本次未改动 Arc。
+- 官方 **KiCad 9.0.9 CLI** 实际读取并生成真实 TSSOP、三角标记及四种椭圆别名的 **6 份封装 SVG**，退出码为 0。临时解包环境仍提示缺少系统 API schema；实际封装读取及 SVG 输出成功。
+- 版本保持 **0.9.0**。本次不迁移或覆盖已导出的旧库；需要用修复版重新导出受影响封装。新增导出、补全资源及绑定同步共用修复后的封装编码器，已有用户库的保留及冲突检查规则不变。
+
+**验证边界：未获得截图器件的 C 编号；真实样本与合成三角形分别验证。测试机没有 AD 或真实 SDK，独立文件解析和渲染不代表已经在 AD 编辑器完成加载、工程放置或 3D 验收。**
 
 ## 2026-10-13 连接、绑定、同步依赖与右键菜单
 

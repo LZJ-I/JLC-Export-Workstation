@@ -48,6 +48,8 @@ The sidebar switches between **Search**, **Library**, **Export list**, **Sponsor
 
 Unavailable assets are disabled or explained. Download asset has been folded into **Export…**; selecting only STEP, OBJ or PDF downloads those resources. **Details** and **Open LCSC** are separate buttons. Actions wrap in narrower windows.
 
+Footprint exports preserve filled orientation triangles/dots and semicircular ends on oblong pads. Re-export affected files created by earlier builds; [verification notes](docs/VERIFICATION_0.9.0_ZH.md) distinguish fixtures, independent readers and actual EDA editor checks.
+
 The **Activity** button reserves its space in the status bar, so long output paths cannot obscure it. Open it to review search, export and sync activity for this session.
 
 **Add to library** always asks for the destination, including when only one library exists. **Library** retains favorite categories (right-click to create / rename / import / export / delete). **Export list** is a queue you can import, export, or clear.
