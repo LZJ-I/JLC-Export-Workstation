@@ -2,7 +2,7 @@
 
 # JLC Export Workstation
 
-Release version: **0.9.0**.
+Release version: **0.9.1**.
 
 | 中文 | English |
 | --- | --- |

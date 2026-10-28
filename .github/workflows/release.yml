@@ -50,6 +50,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: ./integrations/altium/plugin/tests/RunTests.ps1 -OutputDirectory "$env:RUNNER_TEMP\lceda-plugin-tests"
+      - name: Repeat Windows concurrent bridge checks
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          1..3 | ForEach-Object {
+            cargo test --locked -p lceda-core --target x86_64-pc-windows-msvc ad_bridge::tests -- --test-threads=8
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Build
         run: cargo build --release --locked -p lceda --target ${{ matrix.target }}
       - name: Package zip

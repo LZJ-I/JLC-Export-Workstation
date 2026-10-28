@@ -108,25 +108,42 @@ pub fn looks_like_step(bytes: &[u8]) -> bool {
 }
 
 pub fn unique_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(1);
-    let mut x = nanos as u64 ^ 0x9E37_79B9_7F4A_7C15;
-    let mut out = String::with_capacity(8);
-    for _ in 0..8 {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        let c = b'A' + (x % 26) as u8;
-        out.push(c as char);
+    use std::sync::{atomic::{AtomicU64, Ordering}, OnceLock};
+    // Native AD IDs are eight uppercase letters. A clock-only seed can repeat
+    // across Windows threads, sharing temporary directories and CAD IDs.
+    // Permute a process-wide counter over all 26^8 IDs instead (not a secret).
+    const SPACE: u64 = 26_u64.pow(8);
+    static SEED: OnceLock<u64> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seed = *SEED.get_or_init(|| {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64).unwrap_or(1);
+        (nanos ^ u64::from(std::process::id()).rotate_left(32)) % SPACE
+    });
+    // 104729 is coprime to 26: distinct indices have distinct eight-letter IDs
+    // until the complete 208-billion-ID space is exhausted in one process.
+    let mut value = (seed + (NEXT.fetch_add(1, Ordering::Relaxed) % SPACE) * 104729) % SPACE;
+    let mut out = [b'A'; 8];
+    for c in out.iter_mut().rev() {
+        *c += (value % 26) as u8;
+        value /= 26;
     }
-    out
+    String::from_utf8(out.to_vec()).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_ids_remain_distinct_under_concurrent_generation() {
+        let ids = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8).map(|_| scope.spawn(|| (0..10000).map(|_| unique_id()).collect::<Vec<_>>())).collect();
+            workers.into_iter().flat_map(|worker| worker.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(ids.iter().all(|id| id.len() == 8 && id.bytes().all(|b| b.is_ascii_uppercase())));
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 80000);
+    }
 
     #[test]
     fn sanitize_strips_bad_chars() {

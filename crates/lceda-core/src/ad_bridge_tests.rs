@@ -2,6 +2,10 @@ use super::*;
 use crate::ir::{FootprintIr, PartMeta, SymbolIr};
 use std::sync::Mutex;
 
+// The fake X2 process is visible system-wide, including to the file-mode test.
+#[cfg(windows)]
+static EDITOR_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
@@ -12,6 +16,8 @@ impl Directory {
 impl Drop for Directory { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
 #[test]
 fn file_mode_is_explicit_persistent_and_cleared_by_editor_setup() {
+    #[cfg(windows)]
+    let _process_guard = EDITOR_PROCESS_TEST_LOCK.lock().unwrap();
     let dir = Directory::new();
     assert!(!file_mode(&dir.0)); assert!(!enabled(&dir.0));
     disable(&dir.0).unwrap();
@@ -211,6 +217,7 @@ fn saved_footprint_must_link_to_the_exact_embedded_step() {
 #[cfg(windows)]
 #[test]
 fn running_editor_disables_out_of_process_library_replacement() {
+    let _process_guard = EDITOR_PROCESS_TEST_LOCK.lock().unwrap();
     use std::process::{Command, Stdio};
     let dir = Directory::new();
     let system = PathBuf::from(std::env::var_os("WINDIR").unwrap()).join("System32").join("cmd.exe");

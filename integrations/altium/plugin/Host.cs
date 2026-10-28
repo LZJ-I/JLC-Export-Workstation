@@ -5,8 +5,8 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-[assembly: AssemblyVersion("0.9.0.0")]
-[assembly: AssemblyFileVersion("0.9.0.0")]
+[assembly: AssemblyVersion("0.9.1.0")]
+[assembly: AssemblyFileVersion("0.9.1.0")]
 [assembly: AssemblyTitle("JLC Export Workstation - AD")]
 [assembly: AssemblyCompany("LZJ-I")]
 [assembly: ComVisible(false)]
@@ -61,7 +61,7 @@ namespace Lceda.Altium
         void Status(IServerDocumentView view, ref string parameters)
         {
             MessageBox.Show(runtime == null ? "Connection unavailable. See native-error.txt in the workstation connection folder." :
-                "Native plugin loaded (0.9.0). Synchronization status is shown in JLC Export Workstation.\n" + root, "JLC Export Workstation");
+                "Native plugin loaded (0.9.1). Synchronization status is shown in JLC Export Workstation.\n" + root, "JLC Export Workstation");
         }
         void Shutdown()
         {
