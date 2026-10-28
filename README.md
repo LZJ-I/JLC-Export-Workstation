@@ -97,6 +97,10 @@ Native export offers **Include supplementary resources (retain original links)**
 
 ### Library exports and binding synchronization
 
+**AD synchronization is experimental**, including editor integration and offline file synchronization. Try a library copy first. The user has verified ordinary PADS exports in VX2.7; stacked-pin handling has local regression coverage but has not been verified in the PADS editor.
+
+AD recovery validates the complete file set and backups before rollback. External edits, deletions or damaged backups stop recovery and preserve the files. Older journals have no content digests; differing current files require manual review and recovery.
+
 **Library → Export…** offers **Export selected part… / Export current library…** without first using the export queue. Switching libraries selects a member of the current category and clears the preview for empty libraries. Export confirmation freezes the selection and shows its identifiers, count and actual destination. Each current-library export contains only that category in its own `Library-name-id` folder, with optional merging for multiple parts, keeping earlier exports separate.
 
 The **Sync library** dropdown provides current-library synchronization, AD / KiCad binding management and synchronization of every library. Right-click controls apply to the clicked library, show binding status by format and offer change, open folder, copy path and unbind actions. Each category can bind one target per format; duplicate file bindings are rejected.

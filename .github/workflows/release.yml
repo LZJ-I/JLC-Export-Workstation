@@ -33,8 +33,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-3-dev libxkbcommon-dev libxcb-render0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+      - name: Test native target
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --workspace --locked --target ${{ matrix.target }}
+      - name: Test Windows plugin protocol and installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./integrations/altium/plugin/tests/RunTests.ps1 -OutputDirectory "$env:RUNNER_TEMP\lceda-plugin-tests"
       - name: Build
-        run: cargo build --release -p lceda --target ${{ matrix.target }}
+        run: cargo build --release --locked -p lceda --target ${{ matrix.target }}
       - name: Package zip
         shell: bash
         env:
@@ -48,6 +55,13 @@ jobs:
 
           target = os.environ["TARGET"]
           tag = os.environ["TAG"]
+          import tomllib
+          version = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          if tag != f"v{version}":
+              raise SystemExit(f"tag {tag} does not match package {version}")
+          notes = Path("docs/releases") / f"{tag}.md"
+          if not notes.is_file():
+              raise SystemExit(f"missing release notes: {notes}")
           exe = "lceda.exe" if "windows" in target else "lceda"
           src = Path("target") / target / "release" / exe
           if not src.is_file():
@@ -64,6 +78,8 @@ jobs:
               lic.compress_type = ZIP_DEFLATED
               lic.external_attr = 0o644 << 16
               z.writestr(lic, Path("LICENSE").read_bytes())
+              for document in [Path("README.md"), Path("README_ZH.md"), notes]:
+                  z.write(document, document.name)
           print(zpath, zpath.stat().st_size)
           PY
       - uses: actions/upload-artifact@v4
@@ -86,20 +102,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ls -lh dist
-          gh release create "${GITHUB_REF_NAME}" dist/*.zip \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "$(cat <<'EOF'
-          ## 修复
-
-          - AD 原理图库补上图纸背景色（默认 #FFFCF8），设置里可改。原先缺 FileHeader AREACOLOR，AD 会显示黑底。
-          - 窗口每次在主屏居中；Windows 更新覆盖原文件，桌面图标不再移位。无边框窗口可拖边缩放。
-
-          Fixes #1
-          Fixes #2
-
-          ## 下载
-          解压后运行：
-          - Windows：`lceda.exe`
-          - Linux / macOS：`lceda`
-          EOF
-          )"
+          (cd dist && sha256sum *.zip > SHA256SUMS.txt)
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/SHA256SUMS.txt \
+            --verify-tag --title "${GITHUB_REF_NAME}" \
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md"

@@ -4120,7 +4120,7 @@ impl App {
         let ad_access = self.ad_access();
         let name = if cat_id == UNCAT { i18n::t(lang, "uncategorized").to_string() }
             else { self.lib.cat(&cat_id).map(|c| c.name.clone()).unwrap_or_default() };
-        let title = format!("{} · {}", i18n::t(lang, "bind_library"), format.name());
+        let title = format!("{} · {}", i18n::t(lang, "bind_library"), sync_format_name(format, lang));
         fit_window(&title, "bind_library_dialog", 600.0).open(&mut open).show(ctx, |ui| {
             ui.add(egui::Label::new(theme::heading(&name)).truncate()).on_hover_text(&name);
             if format == LibraryFormat::Ad && cfg!(windows) {
@@ -4534,6 +4534,10 @@ enum LibraryAction {
     Sync(String, Option<LibraryFormat>), SyncAll,
 }
 
+fn sync_format_name(format: LibraryFormat, lang: Lang) -> &'static str {
+    if format == LibraryFormat::Ad { i18n::t(lang, "ad_sync_experimental") } else { format.name() }
+}
+
 fn dropdown_menu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<Option<R>> {
     // Paint the disclosure icon so it works with every Windows/CJK font fallback.
     let menu = ui.menu_button(format!("{label}    "), contents);
@@ -4562,7 +4566,7 @@ fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang
     if !bound.is_empty() {
         let label = if bound.len() > 1 { i18n::t(lang, if ad_access.waits() { "sync_both_ad_waits" } else { "sync_both_bindings" }).to_string() }
             else if bound[0] == LibraryFormat::Ad && ad_access.waits() { i18n::t(lang, "ad_connect_then_sync").to_string() }
-            else { format!("{} {}", i18n::t(lang, "sync_format_prefix"), bound[0].name()) };
+            else { format!("{} {}", i18n::t(lang, "sync_format_prefix"), sync_format_name(bound[0], lang)) };
         if ui.add_enabled(!busy && can_sync, egui::Button::new(label))
             .on_disabled_hover_text(i18n::t(lang, if busy { "working" } else { "sync_no_online_parts" })).clicked() {
             action = Some(LibraryAction::Sync(category.into(), if bound.len() == 1 { Some(bound[0]) } else { None })); ui.close();
@@ -4570,7 +4574,7 @@ fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang
     }
     for format in LibraryFormat::ALL {
         let path = library.binding_for(category, format);
-        let title = format!("{} · {}", format.name(), i18n::t(lang, if path.is_some() { "binding_set" } else { "binding_none" }));
+        let title = format!("{} · {}", sync_format_name(format, lang), i18n::t(lang, if path.is_some() { "binding_set" } else { "binding_none" }));
         ui.menu_button(title, |ui| {
             theme::prepare_menu(ui);
             ui.set_max_width(320.0);
@@ -4585,7 +4589,7 @@ fn library_menu(ui: &mut egui::Ui, library: &Library, category: &str, lang: Lang
                 ui.add(egui::Label::new(egui::RichText::new(filename).strong()).truncate()).on_hover_text(crate::library::display_binding(path));
                 if bound.len() > 1 {
                     let label = if waits { i18n::t(lang, "ad_connect_then_sync").into() }
-                        else { format!("{} {}", i18n::t(lang, "sync_format_prefix"), format.name()) };
+                        else { format!("{} {}", i18n::t(lang, "sync_format_prefix"), sync_format_name(format, lang)) };
                     if ui.add_enabled(!busy && can_sync, egui::Button::new(label))
                         .on_disabled_hover_text(i18n::t(lang, if busy { "working" } else { "sync_no_online_parts" })).clicked() {
                         action = Some(LibraryAction::Sync(category.into(), Some(format))); ui.close();
