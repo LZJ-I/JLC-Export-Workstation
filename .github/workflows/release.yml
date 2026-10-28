@@ -3,8 +3,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build"
+        required: true
+        type: string
 permissions:
   contents: write
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 jobs:
   build:
     strategy:
@@ -23,6 +31,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -46,17 +56,21 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           python3 - <<'PY'
           import os
+          import json
+          import subprocess
           from pathlib import Path
           from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
           target = os.environ["TARGET"]
           tag = os.environ["TAG"]
-          import tomllib
-          version = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          metadata = json.loads(subprocess.check_output([
+              "cargo", "metadata", "--no-deps", "--format-version", "1", "--locked", "--offline"
+          ], text=True))
+          version = next(p["version"] for p in metadata["packages"] if p["name"] == "lceda")
           if tag != f"v{version}":
               raise SystemExit(f"tag {tag} does not match package {version}")
           notes = Path("docs/releases") / f"{tag}.md"
@@ -93,6 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -103,6 +119,6 @@ jobs:
         run: |
           ls -lh dist
           (cd dist && sha256sum *.zip > SHA256SUMS.txt)
-          gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/SHA256SUMS.txt \
-            --verify-tag --title "${GITHUB_REF_NAME}" \
-            --notes-file "docs/releases/${GITHUB_REF_NAME}.md"
+          gh release create "${RELEASE_TAG}" dist/*.zip dist/SHA256SUMS.txt \
+            --verify-tag --title "${RELEASE_TAG}" \
+            --notes-file "docs/releases/${RELEASE_TAG}.md"
