@@ -77,7 +77,7 @@ jobs:
           tag = os.environ["TAG"]
           metadata = json.loads(subprocess.check_output([
               "cargo", "metadata", "--no-deps", "--format-version", "1", "--locked", "--offline"
-          ], text=True))
+          ], text=True, encoding="utf-8"))
           version = next(p["version"] for p in metadata["packages"] if p["name"] == "lceda")
           if tag != f"v{version}":
               raise SystemExit(f"tag {tag} does not match package {version}")
