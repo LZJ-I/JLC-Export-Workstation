@@ -714,7 +714,10 @@ fn export_pads(
     symbol_ir: Option<&SymbolIr>,
     footprint_ir: Option<&FootprintIr>,
 ) -> Result<()> {
-    let (c, d, p) = pads::write_part_files(out_dir, base, symbol_ir, footprint_ir)?;
+    let source = out.symbol_json.as_ref().map(|path| -> Result<Value> {
+        Ok(serde_json::from_slice(&fs::read(path)?)?)
+    }).transpose()?;
+    let (c, d, p) = pads::write_part_files_with_source(out_dir, base, symbol_ir, footprint_ir, source.as_ref())?;
     out.pads_c = c;
     out.pads_d = d;
     out.pads_p = p;

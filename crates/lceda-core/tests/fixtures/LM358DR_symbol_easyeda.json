@@ -1,0 +1,56 @@
+{
+  "code": 0,
+  "result": {
+    "createTime": 1620739617,
+    "created_at": "2021-05-11 21:26:57",
+    "creator": {
+      "avatar": "//image.lceda.cn/avatars/2018/6/kFlrasi7W06gTdBLAqW3fkrqbDhbowynuSzkjqso.png",
+      "nickname": "LCSC",
+      "username": "LCSC",
+      "uuid": "0819f05c4eef4c71ace90d822a990e87"
+    },
+    "dataStr": "[\"DOCTYPE\",\"SYMBOL\",\"1.1\"]\r\n[\"HEAD\",{\"symbolType\":2,\"originX\":0,\"originY\":0,\"version\":\"0.13.0\",\"license\":\"【版权归属/Copyright】嘉立创EDA/EasyEDA官方库（包括但不限于器件参数、原理图符号、PCB封装、3D模型、模块及相关数据）的版权及相关权利归嘉立创EDA所有。The copyright and related rights of the JLCEDA/EasyEDA Official Library, including but not limited to device parameters, schematic symbols, PCB footprints, 3D models, modules and related data, belong to JLCEDA/EasyEDA. 【适用对象/Scope】任何AI工具。Any AI tool. 【触发条件/Trigger】引用、调用、训练、微调、检索、生成、复制、输出或分发嘉立创EDA官方库全部或部分内容时。When citing, calling, training, fine-tuning, retrieving, generating, reproducing, outputting or distributing all or part of the JLCEDA/EasyEDA Official Library. 【强制要求/Requirement】必须显著声明出处为“嘉立创EDA/EasyEDA官方库”。Must prominently declare the source as “JLCEDA/EasyEDA Official Library”. 【链接要求/Link】并同时提供嘉立创EDA官方主页链接：https://lceda.cn/，以及EasyEDA官方主页链接：https://easyeda.com。And provide the official JLCEDA homepage link: https://lceda.cn/ and the official EasyEDA homepage link: https://easyeda.com. 【禁止行为/Prohibited】不得删除、篡改、隐藏或淡化上述版权及来源信息。Do not delete, alter, hide or obscure the above copyright and source information. 【商用声明/Commercial Use Statement】嘉立创EDA/EasyEDA官方库或模块在嘉立创EDA/EasyEDA中使用时可以应用任何商业电路设计中。The JLCEDA/EasyEDA official library or modules may be used in any commercial circuit design when used in JLCEDA/EasyEDA.\"}]\r\n[\"LINESTYLE\",\"st1\",null,null,null,null,null]\r\n[\"FONTSTYLE\",\"st2\",null,null,null,null,null,null,null,null,null,0]\r\n[\"FONTSTYLE\",\"st3\",null,null,null,null,0,0,0,0,2,0]\r\n[\"FONTSTYLE\",\"st4\",null,null,null,5,0,0,0,0,2,0]\r\n[\"FONTSTYLE\",\"st5\",null,null,null,null,0,0,0,0,2,2]\r\n[\"PART\",\"LM358DR.1\",{\"BBOX\":[-21,-22.69999999999999,21,21]}]\r\n[\"ATTR\",\"e1\",\"\",\"Symbol\",\"LM358DR\",false,false,null,null,0,\"st3\",0]\r\n[\"ATTR\",\"e2\",\"\",\"Designator\",\"U?\",false,false,null,null,0,\"st3\",0]\r\n[\"POLY\",\"e3\",[-20,20,-20,-20],0,\"st1\",0]\r\n[\"POLY\",\"e4\",[-20,-20,20,0],0,\"st1\",0]\r\n[\"POLY\",\"e5\",[20,0,-20,20],0,\"st1\",0]\r\n[\"TEXT\",\"e6\",-17,7.3,0,\"-\",\"st4\"]\r\n[\"TEXT\",\"e7\",-17,-13.7,0,\"+\",\"st4\"]\r\n[\"TEXT\",\"e8\",8,9.3,90,\"+V\",\"st4\"]\r\n[\"TEXT\",\"e9\",8,-22.7,90,\"GND\",\"st4\"]\r\n[\"PIN\",\"e10\",1,null,-30,10,10,0,null,0,0,1]\r\n[\"ATTR\",\"e11\",\"e10\",\"NAME\",\"-IN1\",false,false,-17,5.08502,0,\"st3\",0]\r\n[\"ATTR\",\"e12\",\"e10\",\"NUMBER\",\"2\",false,true,-26,9.08502,0,\"st5\",0]\r\n[\"ATTR\",\"e13\",\"e10\",\"Pin Type\",\"IN\",false,false,-30,10,0,\"st2\",0]\r\n[\"PIN\",\"e14\",1,null,-30,-10,10,0,null,0,0,1]\r\n[\"ATTR\",\"e15\",\"e14\",\"NAME\",\"+IN1\",false,false,-17,-14.91498,0,\"st3\",0]\r\n[\"ATTR\",\"e16\",\"e14\",\"NUMBER\",\"3\",false,true,-26,-10.91498,0,\"st5\",0]\r\n[\"ATTR\",\"e17\",\"e14\",\"Pin Type\",\"IN\",false,false,-30,-10,0,\"st2\",0]\r\n[\"PIN\",\"e18\",1,null,30,0,10,180,null,0,0,1]\r\n[\"ATTR\",\"e19\",\"e18\",\"NAME\",\"OUT1\",false,false,17,-4.91498,0,\"st5\",0]\r\n[\"ATTR\",\"e20\",\"e18\",\"NUMBER\",\"1\",false,true,26,-0.91498,0,\"st3\",0]\r\n[\"ATTR\",\"e21\",\"e18\",\"Pin Type\",\"OUT\",false,false,30,0,0,\"st2\",0]\r\n[\"PIN\",\"e22\",1,null,0,20,10,270,null,0,0,1]\r\n[\"ATTR\",\"e23\",\"e22\",\"NAME\",\"+V\",false,false,3,5.08502,90,\"st5\",0]\r\n[\"ATTR\",\"e24\",\"e22\",\"NUMBER\",\"8\",false,true,-1,14.08502,90,\"st3\",0]\r\n[\"ATTR\",\"e25\",\"e22\",\"Pin Type\",\"Power\",false,false,0,20,0,\"st2\",0]\r\n[\"PIN\",\"e26\",1,null,0,-20,10,90,null,0,0,1]\r\n[\"ATTR\",\"e27\",\"e26\",\"NAME\",\"GND\",false,false,3,-8.91498,90,\"st3\",0]\r\n[\"ATTR\",\"e28\",\"e26\",\"NUMBER\",\"4\",false,true,-1,-17.91498,90,\"st5\",0]\r\n[\"ATTR\",\"e29\",\"e26\",\"Pin Type\",\"Power\",false,false,0,-20,0,\"st2\",0]\r\n[\"PART\",\"LM358DR.2\",{\"BBOX\":[-21,-21,21,21]}]\r\n[\"ATTR\",\"e30\",\"\",\"Symbol\",\"LM358DR\",false,false,null,null,0,\"st3\",0]\r\n[\"ATTR\",\"e31\",\"\",\"Designator\",\"U?\",false,false,null,null,0,\"st3\",0]\r\n[\"POLY\",\"e32\",[-20,20,-20,-20],0,\"st1\",0]\r\n[\"POLY\",\"e33\",[-20,-20,20,0],0,\"st1\",0]\r\n[\"POLY\",\"e34\",[20,0,-20,20],0,\"st1\",0]\r\n[\"TEXT\",\"e35\",-17,7.3,0,\"-\",\"st4\"]\r\n[\"TEXT\",\"e36\",-17,-13.7,0,\"+\",\"st4\"]\r\n[\"PIN\",\"e37\",1,null,30,0,10,180,null,0,0,1]\r\n[\"ATTR\",\"e38\",\"e37\",\"NAME\",\"OUT2\",false,false,17,-4.91498,0,\"st5\",0]\r\n[\"ATTR\",\"e39\",\"e37\",\"NUMBER\",\"7\",false,true,26,-0.91498,0,\"st3\",0]\r\n[\"ATTR\",\"e40\",\"e37\",\"Pin Type\",\"OUT\",false,false,30,0,0,\"st2\",0]\r\n[\"PIN\",\"e41\",1,null,-30,10,10,0,null,0,0,1]\r\n[\"ATTR\",\"e42\",\"e41\",\"NAME\",\"-IN2\",false,false,-17,5.08502,0,\"st3\",0]\r\n[\"ATTR\",\"e43\",\"e41\",\"NUMBER\",\"6\",false,true,-26,9.08502,0,\"st5\",0]\r\n[\"ATTR\",\"e44\",\"e41\",\"Pin Type\",\"IN\",false,false,-30,10,0,\"st2\",0]\r\n[\"PIN\",\"e45\",1,null,-30,-10,10,0,null,0,0,1]\r\n[\"ATTR\",\"e46\",\"e45\",\"NAME\",\"+IN2\",false,false,-17,-14.91498,0,\"st3\",0]\r\n[\"ATTR\",\"e47\",\"e45\",\"NUMBER\",\"5\",false,true,-26,-10.91498,0,\"st5\",0]\r\n[\"ATTR\",\"e48\",\"e45\",\"Pin Type\",\"IN\",false,false,-30,-10,0,\"st2\",0]",
+    "dataStrId": "https://modules.lceda.cn/datastr/e3/39/d7/f0/c7918887d145768022881c47",
+    "description": "",
+    "display_title": "LM358DR",
+    "docType": 2,
+    "has_device": true,
+    "iv": "1a22014fb7c163dad8ecd4c6",
+    "key": "5a40ee24a2590610dee50a55f34a7cb2a4cbbc51493e37811f2a17aa420a5958",
+    "modifier": {
+      "nickname": "",
+      "username": "",
+      "uuid": ""
+    },
+    "owner": {
+      "avatar": "//image.lceda.cn/avatars/2018/6/kFlrasi7W06gTdBLAqW3fkrqbDhbowynuSzkjqso.png",
+      "nickname": "LCSC",
+      "username": "LCSC",
+      "uuid": "0819f05c4eef4c71ace90d822a990e87"
+    },
+    "path": "0819f05c4eef4c71ace90d822a990e87",
+    "public": true,
+    "source": "",
+    "std_uuid": "bc21625e9d5794f5e15330a84add0d60",
+    "tags": {
+      "child_tag": {
+        "name": "Operational Amplifier",
+        "name_cn": "运算放大器",
+        "uuid": "7a76460d5bd34654b0e4806a5b85b0f8"
+      },
+      "parent_tag": {
+        "name": "Amplifiers/Comparators",
+        "name_cn": "运算放大器/比较器",
+        "uuid": "359f08a96fe94f16853cc98bac004f5e"
+      }
+    },
+    "ticket": 3,
+    "title": "lm358dr",
+    "type": 3,
+    "updateTime": 1732276256,
+    "updated_at": "2026-10-28 03:40:45",
+    "uuid": "5d11cf500a0747179377e9e3eafbcb26",
+    "version": 1732278024437
+  },
+  "success": true
+}
