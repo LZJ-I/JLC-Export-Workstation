@@ -5,6 +5,7 @@
 pub mod altium;
 pub mod ad_bridge;
 pub mod ad_plugin;
+mod ad_recovery;
 pub mod bound_ad;
 pub mod bound_kicad;
 pub mod client;

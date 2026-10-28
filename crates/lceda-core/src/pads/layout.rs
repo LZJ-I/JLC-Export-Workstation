@@ -7,6 +7,37 @@ use crate::ir::{IrPin, SymbolIr};
 
 const CLEARANCE: f64 = 20.0;
 
+fn same_anchor(a: &IrPin, b: &IrPin) -> bool {
+    mils_snap(a.x) == mils_snap(b.x) && mils_snap(a.y) == mils_snap(b.y)
+        && pin_outward(a.rotation, 1.0) == pin_outward(b.rotation, 1.0)
+}
+
+/// Stacked electrical terminals stay stacked. Only their visible labels merge:
+/// repeated VDD names become one VDD, while every distinct pin number remains.
+pub(super) fn display_pins(symbol: &SymbolIr) -> Vec<IrPin> {
+    let mut groups: Vec<Vec<&IrPin>> = Vec::new();
+    for pin in &symbol.pins {
+        if let Some(group) = groups.iter_mut().find(|g| same_anchor(g[0], pin)) { group.push(pin); }
+        else { groups.push(vec![pin]); }
+    }
+    groups.into_iter().map(|group| {
+        if group.len() == 1 { return group[0].clone(); }
+        let mut pin = group[0].clone();
+        let join = |name: bool| {
+            let mut labels = Vec::new();
+            for p in &group {
+                let (visible, text) = if name { (p.show_name, &p.name) } else { (p.show_number, &p.number) };
+                if visible && !text.is_empty() && !labels.contains(&text) { labels.push(text); }
+            }
+            labels.into_iter().cloned().collect::<Vec<_>>().join(if name { "/" } else { "," })
+        };
+        pin.name = join(true); pin.number = join(false);
+        pin.show_name = !pin.name.is_empty(); pin.show_number = !pin.number.is_empty();
+        pin.length = group.iter().map(|p| p.length).fold(0.0, f64::max);
+        pin
+    }).collect()
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Bounds { x0: f64, y0: f64, x1: f64, y1: f64 }
 
@@ -59,7 +90,7 @@ fn number_bounds(pin: &IrPin) -> Bounds {
 fn crowded_axes(symbol: &SymbolIr) -> (bool, bool) {
     let mut boxes = Vec::new();
     let (mut grow_x, mut grow_y) = (false, false);
-    for pin in &symbol.pins {
+    for pin in &display_pins(symbol) {
         let anchor = (mils_snap(pin.x), mils_snap(pin.y));
         if pin.show_name && !pin.name.is_empty() {
             let b = name_bounds(pin);
@@ -97,6 +128,8 @@ fn crowded_axes(symbol: &SymbolIr) -> (bool, bool) {
             };
             let x = growth(bx - ax, a.x1 - b.x0 + CLEARANCE, b.x1 - a.x0 + CLEARANCE);
             let y = growth(by - ay, a.y1 - b.y0 + CLEARANCE, b.y1 - a.y0 + CLEARANCE);
+            // Scaling cannot separate labels sharing the same anchor.
+            if !x.is_finite() && !y.is_finite() { continue; }
             if x <= y { grow_x = true; } else { grow_y = true; }
         }
     }
@@ -106,9 +139,12 @@ fn crowded_axes(symbol: &SymbolIr) -> (bool, bool) {
 pub(super) fn arrange_with_scale(source: &SymbolIr) -> (SymbolIr, Scale) {
     let mut candidate = source.clone();
     // Long alphanumeric numbers also need enough shaft space outside the body.
+    let displayed = display_pins(&candidate);
     for pin in &mut candidate.pins {
-        let required = text_width(&pin.number, SCH_NUMBER_HEIGHT) + 10.0;
-        if pin.show_number {
+        let label = displayed.iter().find(|p| same_anchor(p, pin)).unwrap();
+        let required = text_width(&label.number, SCH_NUMBER_HEIGHT) + 10.0;
+        pin.length = label.length;
+        if label.show_number {
             pin.length = pin.length.max((required / 10.0).ceil() * 10.0 * 0.0254);
         }
     }
@@ -151,6 +187,29 @@ pub(super) fn arrange_with_scale(source: &SymbolIr) -> (SymbolIr, Scale) {
 mod tests {
     use super::*;
     use crate::ir::{IrRect, PartMeta};
+
+    #[test]
+    fn stacked_power_pins_keep_connections_and_fit_without_growing_the_body() {
+        for rotation in [0.0, 90.0, 180.0, 270.0] {
+            let (x, y) = pin_outward(rotation, 5.08);
+            let source = SymbolIr { name: "StackedPower".into(), description: String::new(), designator: "U?".into(),
+                meta: PartMeta::default(), pins: (1..=3).map(|i| IrPin {
+                    number: i.to_string(), name: "VDD".into(), x, y, rotation, ..Default::default()
+                }).collect(), rects: vec![IrRect { x1: -5.08, y1: -5.08, x2: 5.08, y2: 5.08 }], polys: vec![], ellipses: vec![] };
+            let (arranged, scale) = arrange_with_scale(&source);
+            assert_eq!((scale.x, scale.y), (1.0, 1.0));
+            assert_eq!(crowded_axes(&arranged), (false, false));
+            assert_eq!(arranged.pins.len(), 3);
+            for (before, after) in source.pins.iter().zip(&arranged.pins) {
+                assert_eq!((&before.number, &before.name, before.x, before.y, before.rotation),
+                           (&after.number, &after.name, after.x, after.y, after.rotation));
+                assert_eq!(sch_pin_tip(after), sch_pin_tip(&arranged.pins[0]));
+            }
+            let displayed = display_pins(&arranged);
+            assert_eq!(displayed.len(), 1); assert_eq!(displayed[0].name, "VDD"); assert_eq!(displayed[0].number, "1,2,3");
+            assert_eq!(serde_json::to_value(arrange_with_scale(&arranged).0).unwrap(), serde_json::to_value(arranged).unwrap());
+        }
+    }
 
     #[test]
     fn dense_rows_and_long_opposite_names_expand_without_changing_connections() {

@@ -599,24 +599,13 @@ fn original(path: &Path) -> Result<Original> {
 }
 fn journal_restore(journal: &Path, sch: &Path, pcb: &Path) -> Result<()> {
     let manifest: serde_json::Value = serde_json::from_slice(&fs::read(journal.join("manifest.json"))?)?;
-    let mut originals = Vec::new();
-    // Validate the entire journal before changing either original.
-    for (kind, path) in [("sch", sch), ("pcb", pcb)] {
+    for kind in ["sch", "pcb"] {
         let existed = manifest.get(kind).and_then(serde_json::Value::as_bool).ok_or_else(|| invalid("事务恢复记录无效"))?;
-        let expected = if existed { Some(fs::read(journal.join(format!("{kind}.old")))?) } else { None };
-        originals.push((kind, path, expected));
+        if crate::ad_recovery::read_optional(&journal.join(format!("{kind}.old")))?.is_some() != existed {
+            return Err(invalid("事务备份不完整"));
+        }
     }
-    for (kind, path, expected) in originals {
-        if let Some(expected) = expected {
-            if fs::read(path).ok().as_ref() != Some(&expected) {
-                let staged = journal.join(format!("{kind}.restore"));
-                persist_file(&staged, &expected)?;
-                fs::rename(&staged, path).map_err(|error| io_context("恢复原件", error))?;
-            }
-        } else if path.exists() { fs::remove_file(path).map_err(|error| io_context("恢复新建文件", error))?; }
-    }
-    fs::remove_dir_all(journal)?;
-    Ok(())
+    crate::ad_recovery::restore(journal, &[(sch, "sch.old"), (pcb, "pcb.old")])
 }
 fn persist_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = File::create(path)?;
@@ -681,6 +670,12 @@ pub fn update(sch_path: &Path, mut entry: Entry, colors: SchColors) -> Result<(P
         persist_file(&prepared.join("manifest.json"), &serde_json::to_vec(&serde_json::json!({
             "sch": original_sch.bytes.is_some(), "pcb": original_pcb.bytes.is_some()
         }))?)?;
+        let sch_next = crate::ad_recovery::read_optional(&sch_stage)?.or_else(|| original_sch.bytes.clone());
+        let pcb_next = crate::ad_recovery::read_optional(&pcb_stage)?.or_else(|| original_pcb.bytes.clone());
+        crate::ad_recovery::record(&prepared, &[
+            ("sch.old", original_sch.bytes.as_deref(), sch_next.as_deref()),
+            ("pcb.old", original_pcb.bytes.as_deref(), pcb_next.as_deref()),
+        ])?;
         fs::rename(&prepared, &journal)?;
         // Windows replacement needs these handles closed, including on WSL
         // shares. The sidecar lock still excludes other synchronization tasks.
@@ -929,12 +924,12 @@ mod tests {
         update(&sch, entry("C2040", "BAT54"), SchColors::default()).unwrap();
         let before_sch = fs::read(&sch).unwrap();
         let before_pcb = fs::read(&pcb).unwrap();
+        update(&sch, entry("C7777", "Interrupted"), SchColors::default()).unwrap();
         let journal = directory.0.join(".Recovery.SchLib.jlc-transaction");
-        fs::create_dir(&journal).unwrap();
-        fs::write(journal.join("sch.old"), &before_sch).unwrap();
-        fs::write(journal.join("pcb.old"), &before_pcb).unwrap();
-        fs::write(journal.join("manifest.json"), br#"{"sch":true,"pcb":true}"#).unwrap();
-        fs::write(&sch, b"interrupted partial replacement").unwrap();
+        fs::rename(directory.0.join(".Recovery.SchLib.jlc-backup"), &journal).unwrap();
+        assert_eq!(fs::read(journal.join("sch.old")).unwrap(), before_sch);
+        // One replacement reached disk and the paired file is still old.
+        fs::write(&pcb, &before_pcb).unwrap();
         update(&sch, entry("C9999", "Another"), SchColors::default()).unwrap();
         assert!(!journal.exists());
         let mut doc = open(&sch).unwrap();
@@ -945,6 +940,26 @@ mod tests {
         let original = fs::read(&sch).unwrap();
         assert!(update(&sch, entry("C8888", "Blocked"), SchColors::default()).is_err());
         assert_eq!(fs::read(&sch).unwrap(), original);
+    }
+
+    #[test]
+    fn recovery_keeps_external_edits_and_legacy_journals_untouched() {
+        for legacy in [false, true] {
+            let directory = Directory::new();
+            let sch = directory.0.join("User.SchLib"); let pcb = sch.with_extension("PcbLib");
+            update(&sch, entry("C2040", "Before"), SchColors::default()).unwrap();
+            update(&sch, entry("C9999", "Interrupted"), SchColors::default()).unwrap();
+            let journal = directory.0.join(".User.SchLib.jlc-transaction");
+            fs::rename(directory.0.join(".User.SchLib.jlc-backup"), &journal).unwrap();
+            if legacy { fs::remove_file(journal.join("recovery.json")).unwrap(); }
+            let mut manual = entry("C8888", "Manual").symbol.unwrap(); manual.name = "UserAddedAfterCrash".into();
+            altium::write_schlib(&sch, &manual).unwrap();
+            let before = (fs::read(&sch).unwrap(), fs::read(&pcb).unwrap());
+            assert!(update(&sch, entry("C1234", "Retry"), SchColors::default()).is_err());
+            assert_eq!((fs::read(&sch).unwrap(), fs::read(&pcb).unwrap()), before);
+            assert!(journal.join("sch.old").is_file());
+            assert!(inspect_library(&sch).unwrap().iter().any(|part| part.name == "UserAddedAfterCrash"));
+        }
     }
 
 }

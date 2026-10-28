@@ -220,8 +220,13 @@ fn sch_decal_with_text(symbol: &SymbolIr, extra_texts: &[SourceText]) -> String 
     // PADS part types require unique electrical pin names (OUT, OUT_2, ...).
     // Draw source names as decal text so repeated names stay visually identical,
     // and each source pin's name visibility is preserved.
-    let mut names: Vec<String> = symbol.pins.iter().filter(|p| p.show_name)
+    let displayed = layout::display_pins(symbol);
+    let stacked = displayed.len() != symbol.pins.len();
+    let mut names: Vec<String> = displayed.iter().filter(|p| p.show_name)
         .map(sch_pin_name).collect();
+    if stacked {
+        names.extend(displayed.iter().filter(|p| p.show_number).map(sch_pin_number));
+    }
     // Preserve source annotations such as op-amp + / - and supply labels.
     for text in extra_texts {
         names.push(format!("{} {} {} 0 {} 5 0 0 0 0 {FONT}\n{}\n",
@@ -229,7 +234,9 @@ fn sch_decal_with_text(symbol: &SymbolIr, extra_texts: &[SourceText]) -> String 
             clean_attr(&text.value).to_ascii_uppercase()));
     }
     let txt = names.len();
-    let vis = 8; // Hide automatic electrical pin names, keep pin numbers visible.
+    // Only stacked symbols need explicit grouped numbers; ordinary symbols keep
+    // their native editable pin numbers and their previously verified encoding.
+    let vis = if stacked { 24 } else { 8 };
     let mut out = format!(
         "{name} 0 0 {SCH_NUMBER_HEIGHT} {SCH_TEXT_WIDTH} {SCH_NAME_HEIGHT} {SCH_TEXT_WIDTH} {labels} {pieces} {txt} {terms} {vis}\nTIMESTAMP {TS}\n{FONT}\n{FONT}\n",
         pieces = pieces.len(),
@@ -343,6 +350,15 @@ fn sch_pin_name(pin: &IrPin) -> String {
     let just = if dx + dy > 0.0 { 18 } else { 16 };
     format!("{} {} {rotation} 0 {SCH_NAME_HEIGHT} {SCH_TEXT_WIDTH} 0 {just} 0 0 {FONT}\n{}\n",
         n(x), n(y), clean_attr(&pin.name).to_ascii_uppercase())
+}
+
+fn sch_pin_number(pin: &IrPin) -> String {
+    let (x, y) = sch_pin_tip(pin);
+    let (dx, dy) = pin_outward(pin.rotation, sch_pin_length(pin) / 2.0);
+    let (x, y) = (x - snap10(dx), y - snap10(dy));
+    let (x, y, rotation) = if dy != 0.0 { (x - 15.0, y, 90) } else { (x, y + 15.0, 0) };
+    format!("{} {} {rotation} 0 {SCH_NUMBER_HEIGHT} {SCH_TEXT_WIDTH} 0 1 0 0 {FONT}\n{}\n",
+        n(x), n(y), clean_attr(&pin.number))
 }
 
 fn pcb_decal(fp: &FootprintIr) -> String {
@@ -807,6 +823,22 @@ fn n(v: f64) -> String {
 mod tests {
     use super::*;
     use crate::ir::{IrPad, IrPin, IrRect, IrRegion, PartMeta};
+
+    #[test]
+    fn stacked_labels_are_drawn_once_but_all_electrical_pins_are_exported() {
+        let mut sym = sample_symbol();
+        sym.pins[0].name = "VDD".into(); sym.pins[1].name = "OUT".into();
+        let mut duplicate = sym.pins[0].clone(); duplicate.number = "3".into(); sym.pins.push(duplicate);
+        let c = sch_decal(&sym); let p = part_type(Some(&sym), None);
+        assert_eq!(c.lines().filter(|s| *s == "VDD").count(), 1);
+        assert_eq!(c.lines().filter(|s| *s == "1,3").count(), 1);
+        assert_eq!(c.lines().filter(|s| *s == "2").count(), 1);
+        assert_eq!(c.lines().next().unwrap().split_whitespace().last(), Some("24"));
+        let terminals: Vec<_> = c.lines().filter(|s| s.starts_with('T') && !s.starts_with("TIMESTAMP")).collect();
+        assert_eq!(terminals.len(), 3); assert_eq!(terminals[0], terminals[2]);
+        assert!(p.contains("GATE 1 3 0"));
+        for number in ["1", "2", "3"] { assert!(p.lines().any(|line| line.starts_with(&format!("{number} 0 ")))); }
+    }
 
     fn sample_symbol() -> SymbolIr {
         SymbolIr {

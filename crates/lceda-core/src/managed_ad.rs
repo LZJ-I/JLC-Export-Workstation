@@ -102,6 +102,12 @@ pub fn update(dir: &Path, entry: Entry, colors: SchColors) -> Result<(PathBuf, P
         for name in FILES {
             if dir.join(name).exists() { fs::copy(dir.join(name), backup.join(name))?; }
         }
+        let generations = FILES.iter().map(|name| Ok((*name,
+            crate::ad_recovery::read_optional(&backup.join(name))?,
+            crate::ad_recovery::read_optional(&staged.join(name))?,
+        ))).collect::<Result<Vec<_>>>()?;
+        let states: Vec<_> = generations.iter().map(|(name, old, new)| (*name, old.as_deref(), new.as_deref())).collect();
+        crate::ad_recovery::record(&backup, &states)?;
         fs::rename(&backup, &pending)?;
         for name in FILES {
             let dest = dir.join(name);
@@ -125,16 +131,9 @@ pub fn update(dir: &Path, entry: Entry, colors: SchColors) -> Result<(PathBuf, P
 }
 
 fn recover(dir: &Path, backup: &Path) -> Result<()> {
-    for name in FILES {
-        let dest = dir.join(name);
-        if backup.join(name).exists() {
-            fs::copy(backup.join(name), dest)?;
-        } else if dest.exists() {
-            fs::remove_file(dest)?;
-        }
-    }
-    fs::remove_dir_all(backup)?;
-    Ok(())
+    let paths: Vec<_> = FILES.iter().map(|name| dir.join(name)).collect();
+    let files: Vec<_> = paths.iter().zip(FILES).map(|(path, name)| (path.as_path(), name)).collect();
+    crate::ad_recovery::restore(backup, &files)
 }
 
 fn file_hash(path: &Path) -> Result<Option<u64>> {
@@ -189,12 +188,29 @@ mod tests {
         assert!(update(&p, entry("C1"), SchColors::default()).is_err());
         fs::remove_file(p.join(FILES[0])).unwrap();
         update(&p, entry("C1"), SchColors::default()).unwrap();
-        let journal = p.join(".JLC-transaction"); fs::create_dir(&journal).unwrap();
-        for name in FILES { if p.join(name).exists() { fs::copy(p.join(name), journal.join(name)).unwrap(); } }
-        fs::write(p.join(FILES[0]), b"interrupted").unwrap();
+        update(&p, entry("C3"), SchColors::default()).unwrap();
+        let journal = p.join(".JLC-transaction");
+        fs::rename(p.join(".JLC-previous"), &journal).unwrap();
+        fs::copy(journal.join(FILES[2]), p.join(FILES[2])).unwrap();
         update(&p, entry("C2"), SchColors::default()).unwrap();
         let c: Catalogue = serde_json::from_slice(&fs::read(p.join(FILES[2])).unwrap()).unwrap();
         assert_eq!(c.entries.len(), 2);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn recovery_does_not_replace_edits_saved_after_interruption() {
+        let p = dir();
+        update(&p, entry("C1"), SchColors::default()).unwrap();
+        update(&p, entry("C2"), SchColors::default()).unwrap();
+        let journal = p.join(".JLC-transaction");
+        fs::rename(p.join(".JLC-previous"), &journal).unwrap();
+        fs::write(p.join(FILES[0]), b"manual edit after interruption").unwrap();
+        let catalogue = fs::read(p.join(FILES[2])).unwrap();
+        assert!(update(&p, entry("C3"), SchColors::default()).is_err());
+        assert_eq!(fs::read(p.join(FILES[0])).unwrap(), b"manual edit after interruption");
+        assert_eq!(fs::read(p.join(FILES[2])).unwrap(), catalogue);
+        assert!(journal.is_dir());
         fs::remove_dir_all(p).unwrap();
     }
 }
