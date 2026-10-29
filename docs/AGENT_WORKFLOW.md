@@ -2,7 +2,7 @@
 
 [返回中文 README](../README_ZH.md) · [English README](../README.md) · [完整 CLI / JSON 契约](CLI_API.md)
 
-此流程使用当前源码新增的 CLI，无需打开 GUI。v0.9.3 发布包尚不包含这些新命令，请先编译并让 Agent 使用编译后的程序路径。
+此流程使用 v0.10.0 起提供的 CLI，无需打开 GUI。下载并解压发布包即可运行；ZIP 中附带接口文档和示例 BOM。也可从源码编译。
 
 ## 一句话提示词
 
@@ -11,6 +11,8 @@
 如果目标是 KiCad，把提示词里的 Altium 改成 KiCad。两种格式可以同时请求；“一个 Altium 库”会生成同名 `.SchLib` / `.PcbLib` 这一套文件，“一个 KiCad 库”会生成 `.kicad_sym` / `.pretty/`，有模型时还包含 `.3dshapes/`。
 
 ## 准备程序与示例
+
+从 [v0.10.0 发布页](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.0) 下载对应平台的 ZIP 并解压。命令中的 `lceda` 使用解压后的程序路径；Linux/macOS 可用 `./lceda`，Windows 可用 `./lceda.exe`。如果选择源码编译：
 
 ```bash
 cargo build -p lceda
@@ -107,7 +109,7 @@ Agent 最终报告应包含：输出库路径、成功 / 失败器件数、被�
 
 ## Python subprocess 调用示例
 
-这个示例使用仓库里的精确编号样例。如果换成自己的 BOM，遇到未确认项时会停下来报告，不会自行挑选或跳过。
+这个示例使用发布包或仓库里的精确编号样例。如果换成自己的 BOM，遇到未确认项时会停下来报告，不会自行挑选或跳过。
 
 ```python
 import json
@@ -115,7 +117,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-exe = str(Path("target/debug/lceda.exe" if sys.platform == "win32" else "target/debug/lceda").resolve())
+exe = str(Path("lceda.exe" if sys.platform == "win32" else "lceda").resolve())
+# 从源码编译时改为 target/debug/lceda（Windows: target/debug/lceda.exe）。
 profile = "./work/agent-profile"
 plan = "./work/agent-board.plan.json"
 output = "./out/agent-board"

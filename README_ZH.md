@@ -4,7 +4,7 @@
 
 搜索立创器件，查看原理图、封装和 3D 模型，导出 **Altium、KiCad、PADS** 器件库。使用 Rust 编写，提供原生桌面界面，也可通过 CLI 自动处理 BOM。
 
-[下载 v0.9.3](https://github.com/LZJ-I/JLC-Export-Workstation/releases) · [图形界面指南](docs/GUI_GUIDE_ZH.md) · [CLI 接口文档](docs/CLI_API.md) · [Agent 自动化](#agent-自动化)
+[下载 v0.10.0](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.0) · [图形界面指南](docs/GUI_GUIDE_ZH.md) · [CLI 接口文档](docs/CLI_API.md) · [Agent 自动化](#agent-自动化)
 
 ![搜索、3D 预览与器件库导出](docs/demo.gif)
 
@@ -49,7 +49,7 @@ cargo build --release -p lceda
 
 无参数时打开 GUI，带子命令时无需打开窗口。
 
-**下文的 JSON、BOM 计划和库检查接口属于当前源码新增功能，尚未包含在 v0.9.3 发布包中；使用时请先从源码编译。**
+**以下接口从 v0.10.0 开始提供。** 发布包中的程序可直接运行这些命令，ZIP 内附接口文档和 BOM 示例。
 
 ```bash
 lceda search C2913202 --json

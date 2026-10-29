@@ -2,7 +2,7 @@
 
 [English README](../README.md) · [中文 README](../README_ZH.md) · [完整 Agent 示例](AGENT_WORKFLOW.md)
 
-This document is the contract for invoking `lceda` as a subprocess. The BOM-plan, JSON and inspection commands are additions in the current source; build from source until they are included in a release. There is no HTTP server or remote-control port. The same executable provides the desktop and CLI.
+This document is the contract for invoking `lceda` as a subprocess. The BOM-plan, JSON and inspection commands are included in release v0.10.0 and later. There is no HTTP server or remote-control port. The same executable provides the desktop and CLI.
 
 ## Invocation and discovery
 

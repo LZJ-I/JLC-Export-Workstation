@@ -60,6 +60,17 @@ jobs:
           }
       - name: Build
         run: cargo build --release --locked -p lceda --target ${{ matrix.target }}
+      - name: Smoke-test release CLI
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          exe=lceda
+          if [[ "$TARGET" == *windows* ]]; then exe=lceda.exe; fi
+          python3 scripts/test_cli_release.py \
+            --binary "target/$TARGET/release/$exe" --version "${TAG#v}"
       - name: Package zip
         shell: bash
         env:
@@ -100,8 +111,14 @@ jobs:
               lic.compress_type = ZIP_DEFLATED
               lic.external_attr = 0o644 << 16
               z.writestr(lic, Path("LICENSE").read_bytes())
-              for document in [Path("README.md"), Path("README_ZH.md"), notes]:
-                  z.write(document, document.name)
+              # Preserve relative links and ship the agent contract / sample BOM
+              # with the executable. Only tracked files belong in a release ZIP.
+              documents = subprocess.check_output([
+                  "git", "ls-files", "-z", "--", "README.md", "README_ZH.md",
+                  "docs", "integrations/altium"
+              ]).decode("utf-8").split("\0")
+              for document in filter(None, documents):
+                  z.write(document, document)
           print(zpath, zpath.stat().st_size)
           PY
       - uses: actions/upload-artifact@v4
