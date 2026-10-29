@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod layout;
+mod grid;
+pub use grid::SchematicGrid;
 
 const TS: &str = "2026.8.21.0.0.0";
 const FONT: &str = "\"Default Font\"";
@@ -49,6 +51,18 @@ pub fn write_part_files_with_source(
     footprint: Option<&FootprintIr>,
     source: Option<&serde_json::Value>,
 ) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>, Option<std::path::PathBuf>)> {
+    write_part_files_with_grid(dir, base, symbol, footprint, source, SchematicGrid::default())
+}
+
+/// Export with a connection grid; PCB pad dimensions and part mappings are unchanged.
+pub fn write_part_files_with_grid(
+    dir: &Path,
+    base: &str,
+    symbol: Option<&SymbolIr>,
+    footprint: Option<&FootprintIr>,
+    source: Option<&serde_json::Value>,
+    grid: SchematicGrid,
+) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>, Option<std::path::PathBuf>)> {
     let units = match (symbol, source) {
         (Some(sym), Some(raw)) => source_units(sym, raw)?,
         _ => Vec::new(),
@@ -60,8 +74,8 @@ pub fn write_part_files_with_source(
     let mut p = None;
     if let Some(sym) = symbol {
         let path = dir.join(format!("{ident}.c"));
-        let text = if units.is_empty() { sch_library(&[sym]) } else {
-            let decals: Vec<_> = units.iter().map(|unit| sch_decal_with_text(&unit.symbol, &unit.texts)).collect();
+        let text = if units.is_empty() { sch_library_with_grid(&[sym], grid)? } else {
+            let decals: Vec<_> = units.iter().map(|unit| sch_decal_with_text(&unit.symbol, &unit.texts, grid)).collect::<Result<_>>()?;
             format!("*PADS-LIBRARY-SCH-DECALS-V9*\n\n{}*END*\n", decals.join("\n"))
         };
         write_text(&path, &text)?;
@@ -140,15 +154,20 @@ fn source_units(symbol: &SymbolIr, source: &serde_json::Value) -> Result<Vec<Sou
 }
 
 pub fn sch_library(symbols: &[&SymbolIr]) -> String {
+    // The legacy 10 mil layout is deliberately retained for existing callers.
+    sch_library_with_grid(symbols, SchematicGrid::default()).expect("legacy layout is infallible")
+}
+
+pub fn sch_library_with_grid(symbols: &[&SymbolIr], grid: SchematicGrid) -> Result<String> {
     let mut out = String::from("*PADS-LIBRARY-SCH-DECALS-V9*\n\n");
     for (i, sym) in symbols.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&sch_decal(sym));
+        out.push_str(&sch_decal_with_text(sym, &[], grid)?);
     }
     out.push_str("*END*\n");
-    out
+    Ok(out)
 }
 
 pub fn pcb_library(footprints: &[&FootprintIr]) -> String {
@@ -182,37 +201,33 @@ fn write_text(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn sch_decal(symbol: &SymbolIr) -> String {
-    sch_decal_with_text(symbol, &[])
-}
-
-fn sch_decal_with_text(symbol: &SymbolIr, extra_texts: &[SourceText]) -> String {
-    let (arranged, scale) = layout::arrange_with_scale(symbol);
+fn sch_decal_with_text(symbol: &SymbolIr, extra_texts: &[SourceText], grid: SchematicGrid) -> Result<String> {
+    let (arranged, placement) = layout::arrange_with_grid(symbol, grid)?;
     let symbol = &arranged;
     let name = pads_ident(&symbol.name, 40);
     let mut pieces = Vec::new();
     for r in &symbol.rects {
-        let x1 = mils_snap(r.x1);
-        let y1 = mils_snap(r.y1);
-        let x2 = mils_snap(r.x2);
-        let y2 = mils_snap(r.y2);
+        let x1 = grid.coordinate(r.x1);
+        let y1 = grid.coordinate(r.y1);
+        let x2 = grid.coordinate(r.x2);
+        let y2 = grid.coordinate(r.y2);
         pieces.push(closed_rect(x1, y1, x2, y2, 10.0, 0));
     }
     for poly in &symbol.polys {
-        if let Some(p) = open_poly(poly, true, 10.0, 0) {
+        if let Some(p) = open_poly_grid(poly, Some(grid), 10.0, 0) {
             pieces.push(p);
         }
     }
     for e in &symbol.ellipses {
-        pieces.push(circle_piece(mils_snap(e.x), mils_snap(e.y), mils_snap(e.rx.max(e.ry)), 10.0, 0));
+        pieces.push(circle_piece(grid.coordinate(e.x), grid.coordinate(e.y), grid.coordinate(e.rx.max(e.ry)), 10.0, 0));
     }
     for pin in &symbol.pins {
-        if let Some(p) = pin_extension(pin) {
+        if let Some(p) = pin_extension(pin, grid) {
             pieces.push(p);
         }
     }
 
-    let terms: Vec<String> = symbol.pins.iter().map(sch_terminal).collect();
+    let terms: Vec<String> = symbol.pins.iter().map(|pin| sch_terminal(pin, grid)).collect();
     // Follow native V9 libraries' four editor slots: refdes, part type, and two
     // free attribute placeholders. These records deliberately use the compact
     // six-number form and native PART-TYPE spelling, matching vendor .c files.
@@ -220,17 +235,17 @@ fn sch_decal_with_text(symbol: &SymbolIr, extra_texts: &[SourceText]) -> String 
     // PADS part types require unique electrical pin names (OUT, OUT_2, ...).
     // Draw source names as decal text so repeated names stay visually identical,
     // and each source pin's name visibility is preserved.
-    let displayed = layout::display_pins(symbol);
+    let displayed = layout::display_pins_on_grid(symbol, grid);
     let stacked = displayed.len() != symbol.pins.len();
     let mut names: Vec<String> = displayed.iter().filter(|p| p.show_name)
-        .map(sch_pin_name).collect();
+        .map(|pin| sch_pin_name(pin, grid)).collect();
     if stacked {
-        names.extend(displayed.iter().filter(|p| p.show_number).map(sch_pin_number));
+        names.extend(displayed.iter().filter(|p| p.show_number).map(|pin| sch_pin_number(pin, grid)));
     }
     // Preserve source annotations such as op-amp + / - and supply labels.
     for text in extra_texts {
         names.push(format!("{} {} {} 0 {} 5 0 0 0 0 {FONT}\n{}\n",
-            n(text.x * scale.x), n(text.y * scale.y), n(text.rotation), n(text.height),
+            n(placement.x(text.x)), n(placement.y(text.y)), n(text.rotation), n(text.height),
             clean_attr(&text.value).to_ascii_uppercase()));
     }
     let txt = names.len();
@@ -242,7 +257,7 @@ fn sch_decal_with_text(symbol: &SymbolIr, extra_texts: &[SourceText]) -> String 
         pieces = pieces.len(),
         terms = terms.len(),
     );
-    let (ref_x, ref_y, type_x, type_y) = sch_label_xy(symbol);
+    let (ref_x, ref_y, type_x, type_y) = sch_label_xy(symbol, grid);
     out.push_str(&format!("{ref_x} {ref_y} 0 0 {SCH_ATTRIBUTE_HEIGHT} {SCH_TEXT_WIDTH}\nREF-DES\n"));
     // Attribute justification uses a different encoding from terminal/free text.
     out.push_str(&format!("{type_x} {type_y} 0 2 {SCH_ATTRIBUTE_HEIGHT} {SCH_TEXT_WIDTH}\nPART-TYPE\n"));
@@ -259,10 +274,10 @@ fn sch_decal_with_text(symbol: &SymbolIr, extra_texts: &[SourceText]) -> String 
     for t in terms {
         out.push_str(&t);
     }
-    out
+    Ok(out)
 }
 
-fn sch_label_xy(symbol: &SymbolIr) -> (f64, f64, f64, f64) {
+fn sch_label_xy(symbol: &SymbolIr, grid: SchematicGrid) -> (f64, f64, f64, f64) {
     let (mut left, mut top, mut bot) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY);
     let mut include = |x: f64, y: f64| {
         left = left.min(x);
@@ -270,19 +285,19 @@ fn sch_label_xy(symbol: &SymbolIr) -> (f64, f64, f64, f64) {
         bot = bot.min(y);
     };
     for r in &symbol.rects {
-        include(mils_snap(r.x1), mils_snap(r.y1));
-        include(mils_snap(r.x2), mils_snap(r.y2));
+        include(grid.coordinate(r.x1), grid.coordinate(r.y1));
+        include(grid.coordinate(r.x2), grid.coordinate(r.y2));
     }
     for poly in &symbol.polys {
-        for &(x, y) in poly { include(mils_snap(x), mils_snap(y)); }
+        for &(x, y) in poly { include(grid.coordinate(x), grid.coordinate(y)); }
     }
     for e in &symbol.ellipses {
-        include(mils_snap(e.x - e.rx), mils_snap(e.y - e.ry));
-        include(mils_snap(e.x + e.rx), mils_snap(e.y + e.ry));
+        include(grid.coordinate(e.x - e.rx), grid.coordinate(e.y - e.ry));
+        include(grid.coordinate(e.x + e.rx), grid.coordinate(e.y + e.ry));
     }
     for pin in &symbol.pins {
-        include(mils_snap(pin.x), mils_snap(pin.y));
-        let (x, y) = sch_pin_tip(pin);
+        include(grid.coordinate(pin.x), grid.coordinate(pin.y));
+        let (x, y) = sch_pin_tip(pin, grid);
         // Reserve room for the terminal number as well as the shaft.
         include(x, y + SCH_NUMBER_HEIGHT);
         include(x, y - SCH_NUMBER_HEIGHT);
@@ -293,27 +308,27 @@ fn sch_label_xy(symbol: &SymbolIr) -> (f64, f64, f64, f64) {
         bot = -200.0;
     }
     // Align attributes to the body when available, outside every graphic/pin.
-    let body_left = symbol.rects.iter().map(|r| mils_snap(r.x1.min(r.x2)))
+    let body_left = symbol.rects.iter().map(|r| grid.coordinate(r.x1.min(r.x2)))
         .reduce(f64::min).unwrap_or(left);
     (body_left, snap10(top + 80.0), body_left, snap10(bot - 80.0))
 }
 
-fn sch_pin_tip(pin: &IrPin) -> (f64, f64) {
-    let (dx, dy) = pin_outward(pin.rotation, sch_pin_length(pin));
-    (snap10(mils_snap(pin.x) + dx), snap10(mils_snap(pin.y) + dy))
+fn sch_pin_tip(pin: &IrPin, grid: SchematicGrid) -> (f64, f64) {
+    let (dx, dy) = pin_outward(pin.rotation, sch_pin_length(pin, grid));
+    (grid.coordinate(pin.x) + dx, grid.coordinate(pin.y) + dy)
 }
 
-fn sch_pin_length(pin: &IrPin) -> f64 {
-    mils_snap(pin.length).max(SCH_PIN_LENGTH)
+fn sch_pin_length(pin: &IrPin, grid: SchematicGrid) -> f64 {
+    grid.coordinate(pin.length).max(SCH_PIN_LENGTH)
 }
 
-fn pin_extension(pin: &IrPin) -> Option<String> {
+fn pin_extension(pin: &IrPin, grid: SchematicGrid) -> Option<String> {
     // PIN supplies the first 200 mil. Draw only the remaining length, otherwise
     // editing the decal would expose two overlapping shafts on every terminal.
-    if sch_pin_length(pin) <= SCH_PIN_LENGTH { return None; }
-    let (x, y) = sch_pin_tip(pin);
+    if sch_pin_length(pin, grid) <= SCH_PIN_LENGTH { return None; }
+    let (x, y) = sch_pin_tip(pin, grid);
     let (dx, dy) = pin_outward(pin.rotation, SCH_PIN_LENGTH);
-    let (bx, by) = (mils_snap(pin.x), mils_snap(pin.y));
+    let (bx, by) = (grid.coordinate(pin.x), grid.coordinate(pin.y));
     Some(format!(
         "OPEN 2 10 0 {SOLID_LINE_STYLE}\n{} {}\n{} {}\n",
         n(x - dx),
@@ -323,9 +338,9 @@ fn pin_extension(pin: &IrPin) -> Option<String> {
     ))
 }
 
-fn sch_terminal(pin: &IrPin) -> String {
-    let (x, y) = sch_pin_tip(pin);
-    let len = sch_pin_length(pin);
+fn sch_terminal(pin: &IrPin, grid: SchematicGrid) -> String {
+    let (x, y) = sch_pin_tip(pin, grid);
+    let len = sch_pin_length(pin, grid);
     let (dx, dy) = pin_outward(pin.rotation, 1.0);
     // Native PADS library exports use these terminal transforms for PIN:
     // left (0,0), right (0,2), bottom (90,0), top (90,4).
@@ -342,19 +357,19 @@ fn sch_terminal(pin: &IrPin) -> String {
     )
 }
 
-fn sch_pin_name(pin: &IrPin) -> String {
+fn sch_pin_name(pin: &IrPin, grid: SchematicGrid) -> String {
     let (dx, dy) = pin_outward(pin.rotation, 1.0);
-    let x = mils_snap(pin.x) - dx * SCH_TEXT_GAP;
-    let y = mils_snap(pin.y) - dy * SCH_TEXT_GAP;
+    let x = grid.coordinate(pin.x) - dx * SCH_TEXT_GAP;
+    let y = grid.coordinate(pin.y) - dy * SCH_TEXT_GAP;
     let rotation = if dy != 0.0 { 90 } else { 0 };
     let just = if dx + dy > 0.0 { 18 } else { 16 };
     format!("{} {} {rotation} 0 {SCH_NAME_HEIGHT} {SCH_TEXT_WIDTH} 0 {just} 0 0 {FONT}\n{}\n",
         n(x), n(y), clean_attr(&pin.name).to_ascii_uppercase())
 }
 
-fn sch_pin_number(pin: &IrPin) -> String {
-    let (x, y) = sch_pin_tip(pin);
-    let (dx, dy) = pin_outward(pin.rotation, sch_pin_length(pin) / 2.0);
+fn sch_pin_number(pin: &IrPin, grid: SchematicGrid) -> String {
+    let (x, y) = sch_pin_tip(pin, grid);
+    let (dx, dy) = pin_outward(pin.rotation, sch_pin_length(pin, grid) / 2.0);
     let (x, y) = (x - snap10(dx), y - snap10(dy));
     let (x, y, rotation) = if dy != 0.0 { (x - 15.0, y, 90) } else { (x, y + 15.0, 0) };
     format!("{} {} {rotation} 0 {SCH_NUMBER_HEIGHT} {SCH_TEXT_WIDTH} 0 1 0 0 {FONT}\n{}\n",
@@ -598,10 +613,15 @@ fn closed_rect(x1: f64, y1: f64, x2: f64, y2: f64, width: f64, layer: i32) -> St
 }
 
 fn open_poly(pts: &[(f64, f64)], sch: bool, width: f64, layer: i32) -> Option<String> {
-    if pts.len() < 2 {
-        return None;
-    }
-    let conv = |p: (f64, f64)| if sch { (mils_snap(p.0), mils_snap(p.1)) } else { (mils(p.0), mils(p.1)) };
+    open_poly_grid(pts, sch.then(SchematicGrid::default), width, layer)
+}
+
+fn open_poly_grid(pts: &[(f64, f64)], grid: Option<SchematicGrid>, width: f64, layer: i32) -> Option<String> {
+    if pts.len() < 2 { return None; }
+    let conv = |p: (f64, f64)| match grid {
+        Some(grid) => (grid.coordinate(p.0), grid.coordinate(p.1)),
+        None => (mils(p.0), mils(p.1)),
+    };
     let pts: Vec<(f64, f64)> = pts.iter().copied().map(conv).collect();
     let mut out = format!("OPEN {} {} {layer} {SOLID_LINE_STYLE}\n", pts.len(), n(width));
     for (x, y) in pts {
@@ -780,6 +800,7 @@ fn line_mil(mm: f64) -> f64 {
     mils(mm).max(MIN_LINE_MIL)
 }
 
+#[cfg(test)]
 fn mils_snap(mm: f64) -> f64 {
     snap10(mils(mm))
 }
@@ -829,7 +850,7 @@ mod tests {
         let mut sym = sample_symbol();
         sym.pins[0].name = "VDD".into(); sym.pins[1].name = "OUT".into();
         let mut duplicate = sym.pins[0].clone(); duplicate.number = "3".into(); sym.pins.push(duplicate);
-        let c = sch_decal(&sym); let p = part_type(Some(&sym), None);
+        let c = sch_decal_with_text(&sym, &[], SchematicGrid::default()).unwrap(); let p = part_type(Some(&sym), None);
         assert_eq!(c.lines().filter(|s| *s == "VDD").count(), 1);
         assert_eq!(c.lines().filter(|s| *s == "1,3").count(), 1);
         assert_eq!(c.lines().filter(|s| *s == "2").count(), 1);
@@ -969,8 +990,8 @@ mod tests {
             (270.0, (0.0, -200.0), (0.0, 30.0)),
         ] {
             let pin = IrPin { rotation, name: "TEST".into(), ..Default::default() };
-            assert_eq!(sch_pin_tip(&pin), expected_tip);
-            let name = sch_pin_name(&pin);
+            assert_eq!(sch_pin_tip(&pin, SchematicGrid::default()), expected_tip);
+            let name = sch_pin_name(&pin, SchematicGrid::default());
             let cols: Vec<_> = name.lines().next().unwrap().split_whitespace().collect();
             assert_eq!((cols[0].parse::<f64>().unwrap(), cols[1].parse::<f64>().unwrap()), expected_name);
             assert_eq!(cols[2], if rotation == 90.0 || rotation == 270.0 { "90" } else { "0" });
@@ -983,7 +1004,7 @@ mod tests {
         for rotation in [0.0, 90.0, 180.0, 270.0] {
             for length in [1.27, 2.54, 5.08, 7.62] {
                 let pin = IrPin { x: 2.54, y: -5.08, rotation, length, ..Default::default() };
-                let terminal = sch_terminal(&pin);
+                let terminal = sch_terminal(&pin, SchematicGrid::default());
                 let t: Vec<_> = terminal.lines().next().unwrap()[1..].split_whitespace().collect();
                 assert_eq!(t[12], "PIN", "a numeric 0 requests a nonexistent decal");
                 // Decode PIN's native endpoint using the four PADS transforms.
@@ -994,7 +1015,7 @@ mod tests {
                 };
                 let end = (t[0].parse::<f64>().unwrap() + inward.0,
                     t[1].parse::<f64>().unwrap() + inward.1);
-                if let Some(extension) = pin_extension(&pin) {
+                if let Some(extension) = pin_extension(&pin, SchematicGrid::default()) {
                     let points: Vec<Vec<f64>> = extension.lines().skip(1)
                         .map(|l| l.split_whitespace().map(|s| s.parse().unwrap()).collect()).collect();
                     assert_eq!(points[0], [end.0, end.1]);
@@ -1018,7 +1039,7 @@ mod tests {
         let terminals: Vec<_> = c.lines().filter(|l| l.starts_with('T') && !l.starts_with("TIMESTAMP"))
             .map(|l| l[1..].split_whitespace().collect::<Vec<_>>()).collect();
         for (pin, t) in arranged.pins.iter().zip(&terminals) {
-            assert_eq!((t[0].parse().unwrap(), t[1].parse().unwrap()), sch_pin_tip(pin));
+            assert_eq!((t[0].parse().unwrap(), t[1].parse().unwrap()), sch_pin_tip(pin, SchematicGrid::default()));
             assert_eq!(t[12], "PIN");
         }
         // No visible suffixes, no doubled names from the part type and decal.
@@ -1041,10 +1062,10 @@ mod tests {
         let mut sym = sample_symbol();
         sym.rects.clear();
         sym.polys = vec![vec![(-2.54, -25.4), (2.54, 25.4)]];
-        let (_, top, _, bottom) = sch_label_xy(&sym);
+        let (_, top, _, bottom) = sch_label_xy(&sym, SchematicGrid::default());
         assert!(top > 1000.0 && bottom < -1000.0);
         sym.pins.push(IrPin { y: -25.4, length: 5.08, rotation: 270.0, ..Default::default() });
-        assert!(sch_label_xy(&sym).3 < -1200.0);
+        assert!(sch_label_xy(&sym, SchematicGrid::default()).3 < -1200.0);
     }
 
     #[test]
@@ -1062,7 +1083,7 @@ mod tests {
         assert!(part.contains("GATE 1 5 0\nany-dual-unit_1\n"));
         assert!(part.contains("GATE 1 3 0\nany-dual-unit_2\n"));
         assert_eq!(part.lines().filter(|line| line.starts_with("GATE ")).count(), 2);
-        let c = sch_decal_with_text(&units[0].symbol, &units[0].texts);
+        let c = sch_decal_with_text(&units[0].symbol, &units[0].texts, SchematicGrid::default()).unwrap();
         assert!(c.contains("\n+\n") && c.contains("\n-\n") && c.contains("\n+V\n"));
         // Two units must no longer trigger runaway scaling of coincident pins.
         let scale = layout::arrange_with_scale(&units[0].symbol).1;
@@ -1100,7 +1121,7 @@ mod tests {
             open_poly(&[(0.0, 0.0), (2.54, 0.0)], true, 10.0, 0).unwrap(),
             closed_poly(&[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)], 5.0, 26).unwrap(),
             circle_piece(0.0, 0.0, 50.0, 10.0, 0),
-            pin_extension(&IrPin { length: 7.62, ..Default::default() }).unwrap(),
+            pin_extension(&IrPin { length: 7.62, ..Default::default() }, SchematicGrid::default()).unwrap(),
         ];
         for piece in primitives {
             assert_eq!(piece.lines().next().unwrap().split_whitespace().nth(4), Some("-1"));

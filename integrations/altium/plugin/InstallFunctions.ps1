@@ -60,7 +60,7 @@ function New-LcedaRegistry([string]$RegistryPath, [string]$DeployDirectory, [boo
         $xml.DocumentElement.AppendChild($item) | Out-Null
     }
     $ole = [DateTime]::UtcNow.ToOADate().ToString('F7', [Globalization.CultureInfo]::InvariantCulture)
-    $fields = [ordered]@{ Path = $DeployDirectory; Status = '0'; VaultGuid = ''; CreatedBy = 'LZJ-I'; CategoryGuid = '793A1F67-0B22-4E01-A5DE-3176A1E8C60D'; CategoryName = ''; ReadMe = ''; Help = ''; Requirements = ''; Title = 'JLC Export Workstation'; ShortDescription = 'Native library synchronization'; LongDescription = 'Append new library parts from JLC Export Workstation inside AD'; SmallImage = ''; LargeImage = ''; Version = '0.9.2.0'; VersionGuid = '040C40AB-928D-4DD2-B137-9D508D96EE6C'; ReleasedDate = $ole; ReleaseNotes = ''; DateInstalled = $ole }
+    $fields = [ordered]@{ Path = $DeployDirectory; Status = '0'; VaultGuid = ''; CreatedBy = 'LZJ-I'; CategoryGuid = '793A1F67-0B22-4E01-A5DE-3176A1E8C60D'; CategoryName = ''; ReadMe = ''; Help = ''; Requirements = ''; Title = 'JLC Export Workstation'; ShortDescription = 'Native library synchronization'; LongDescription = 'Append new library parts from JLC Export Workstation inside AD'; SmallImage = ''; LargeImage = ''; Version = '0.9.3.0'; VersionGuid = '040C40AB-928D-4DD2-B137-9D508D96EE6C'; ReleasedDate = $ole; ReleaseNotes = ''; DateInstalled = $ole }
     foreach ($key in $fields.Keys) {
         $node = $item.SelectSingleNode($key)
         if (-not $node) { $node = $xml.CreateElement($key); $item.AppendChild($node) | Out-Null }
@@ -128,7 +128,7 @@ function Invoke-LcedaInstall([string]$Action, [string]$AdDirectory, [string]$Ext
         if (Test-Path -LiteralPath $deploy) { Move-Item -LiteralPath $deploy -Destination $backup; $movedOld = $true }
         if ($Action -eq 'Install') { Move-Item -LiteralPath $stage -Destination $deploy; $movedNew = $true }
         [IO.File]::Replace($xmlNew, $registry, [NullString]::Value); $replaced = $true
-        $state = @{ ok = $true; version = '0.9.2'; ad_directory = $AdDirectory; extensions_directory = $ExtensionsDirectory; plugin = $deploy; registry_backup = $xmlBackup; installed = ($Action -eq 'Install'); message = $(if ($Action -eq 'Install') { 'Native plugin installed. Start AD to connect automatically.' } else { 'Native plugin removed. Bound libraries were retained.' }) }
+        $state = @{ ok = $true; version = '0.9.3'; ad_directory = $AdDirectory; extensions_directory = $ExtensionsDirectory; plugin = $deploy; registry_backup = $xmlBackup; installed = ($Action -eq 'Install'); message = $(if ($Action -eq 'Install') { 'Native plugin installed. Start AD to connect automatically.' } else { 'Native plugin removed. Bound libraries were retained.' }) }
         $statePath = Join-Path $BridgeDirectory 'native-install.json'
         [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
         if ($Action -eq 'Install') {

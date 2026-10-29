@@ -363,6 +363,8 @@ struct App {
     shot_pointer_release: Option<(egui::Pos2, egui::PointerButton)>,
     ad_embed_3d: bool,
     kicad_attach_3d: bool,
+    pads_grid: lceda_core::pads::SchematicGrid,
+    pads_grid_custom: bool,
     rename_footprint: bool,
     batch_merge: bool,
     sch_scheme: SchColorScheme,
@@ -538,6 +540,8 @@ impl App {
             shot_pointer_release: None,
             ad_embed_3d: prefs.ad_embed_3d,
             kicad_attach_3d: prefs.kicad_attach_3d,
+            pads_grid: prefs.pads_grid,
+            pads_grid_custom: ![10, 50, 100].contains(&prefs.pads_grid.mils()),
             rename_footprint: prefs.rename_footprint,
             batch_merge: prefs.batch_merge,
             sch_scheme: prefs.sch_scheme,
@@ -1253,6 +1257,38 @@ impl App {
             {
                 persist = true;
             }
+        });
+        ui.add_space(8.0);
+        theme::show_card(ui, |ui| {
+            ui.label(egui::RichText::new(i18n::t(lang, "pads_schematic")).strong().color(theme::label()));
+            let before = self.pads_grid;
+            ui.horizontal(|ui| {
+                ui.label(i18n::t(lang, "pads_grid"));
+                let mut selected = if self.pads_grid_custom { 0 } else { self.pads_grid.mils() };
+                let label = if selected == 0 { i18n::t(lang, "pads_grid_custom").into() }
+                    else if selected == 10 { i18n::t(lang, "pads_grid_default").into() }
+                    else { format!("{selected} mil") };
+                egui::ComboBox::from_id_salt("pads_connection_grid").selected_text(label).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selected, 10, i18n::t(lang, "pads_grid_default"));
+                    ui.selectable_value(&mut selected, 50, "50 mil");
+                    ui.selectable_value(&mut selected, 100, "100 mil");
+                    ui.selectable_value(&mut selected, 0, i18n::t(lang, "pads_grid_custom"));
+                });
+                self.pads_grid_custom = selected == 0;
+                if self.pads_grid_custom {
+                    let mut mils = self.pads_grid.mils();
+                    if ui.add(egui::DragValue::new(&mut mils).range(
+                        lceda_core::pads::SchematicGrid::MIN..=lceda_core::pads::SchematicGrid::MAX
+                    ).suffix(" mil").speed(1)).changed() {
+                        self.pads_grid = lceda_core::pads::SchematicGrid::new(mils).unwrap_or_default();
+                    }
+                } else {
+                    self.pads_grid = lceda_core::pads::SchematicGrid::new(selected).unwrap_or_default();
+                }
+            });
+            ui.add(egui::Label::new(egui::RichText::new(i18n::t(lang, "pads_grid_hint"))
+                .small().color(theme::secondary())).wrap());
+            persist |= before != self.pads_grid;
         });
         persist
     }
@@ -3870,6 +3906,7 @@ impl App {
         crate::prefs::save(&crate::prefs::Prefs {
             ad_embed_3d: self.ad_embed_3d,
             kicad_attach_3d: self.kicad_attach_3d,
+            pads_grid: self.pads_grid,
             rename_footprint: self.rename_footprint,
             batch_merge: self.batch_merge,
             preview_mode: self.preview_mode,
@@ -3918,6 +3955,7 @@ impl App {
     fn apply_export_opts(&self, req: &mut ExportRequest) {
         req.ad_embed_3d = self.ad_embed_3d;
         req.kicad_attach_3d = self.kicad_attach_3d;
+        req.pads_grid = self.pads_grid;
         req.rename_footprint = self.rename_footprint;
         req.sch_colors = self.resolved_sch_colors();
         req.desc_fields = self.desc_fields.clone();

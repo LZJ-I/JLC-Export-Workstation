@@ -1,6 +1,7 @@
 use lceda_core::altium::{SchColorScheme, SchColors};
 use lceda_core::desc::{self, DescField};
 use serde_json::{json, Value};
+use lceda_core::pads::SchematicGrid;
 use std::fs;
 use std::path::PathBuf;
 
@@ -105,6 +106,7 @@ impl PreviewMode {
 pub struct Prefs {
     pub ad_embed_3d: bool,
     pub kicad_attach_3d: bool,
+    pub pads_grid: SchematicGrid,
     pub rename_footprint: bool,
     pub batch_merge: bool,
     pub preview_mode: PreviewMode,
@@ -141,6 +143,7 @@ impl Default for Prefs {
         Self {
             ad_embed_3d: true,
             kicad_attach_3d: true,
+            pads_grid: SchematicGrid::default(),
             rename_footprint: false,
             batch_merge: false,
             preview_mode: PreviewMode::default(),
@@ -191,6 +194,8 @@ fn from_json(v: &Value) -> Prefs {
     Prefs {
         ad_embed_3d: v.get("ad_embed_3d").and_then(Value::as_bool).unwrap_or(true),
         kicad_attach_3d: v.get("kicad_attach_3d").and_then(Value::as_bool).unwrap_or(true),
+        pads_grid: v.get("pads_grid_mil").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()).and_then(|n| SchematicGrid::new(n).ok()).unwrap_or_default(),
         rename_footprint: v
             .get("rename_footprint")
             .and_then(Value::as_bool)
@@ -328,6 +333,7 @@ fn to_json(prefs: &Prefs) -> Value {
     let mut body = json!({
         "ad_embed_3d": prefs.ad_embed_3d,
         "kicad_attach_3d": prefs.kicad_attach_3d,
+        "pads_grid_mil": prefs.pads_grid.mils(),
         "rename_footprint": prefs.rename_footprint,
         "batch_merge": prefs.batch_merge,
         "preview_mode": prefs.preview_mode.as_str(),
@@ -448,6 +454,7 @@ mod tests {
         let mut prefs = Prefs::default();
         prefs.ad_embed_3d = false;
         prefs.kicad_attach_3d = false;
+        prefs.pads_grid = SchematicGrid::new(100).unwrap();
         prefs.rename_footprint = true;
         prefs.batch_merge = true;
         prefs.hide_welcome = true;
@@ -488,6 +495,18 @@ mod tests {
     }
 
     #[test]
+    fn pads_grid_preferences_validate_and_restore_custom_values() {
+        for mils in [1, 7, 10, 25, 50, 100, 1000] {
+            let prefs = from_json(&json!({"pads_grid_mil": mils}));
+            assert_eq!(prefs.pads_grid.mils(), mils);
+            assert_eq!(roundtrip(&prefs).pads_grid, prefs.pads_grid);
+        }
+        for value in [json!(0), json!(-10), json!(1.5), json!(1001), json!(4294967306u64), json!("100"), Value::Null] {
+            assert_eq!(from_json(&json!({"pads_grid_mil": value})).pads_grid.mils(), 10);
+        }
+    }
+
+    #[test]
     fn missing_new_keys_keep_old_defaults() {
         let v = json!({
             "ad_embed_3d": false,
@@ -500,6 +519,7 @@ mod tests {
         assert_eq!(prefs.export_section, ExportSection::Format);
         assert_eq!(prefs.desc_fields, DescField::library());
         assert!(prefs.nav_expanded);
+        assert_eq!(prefs.pads_grid.mils(), 10);
         assert_eq!(
             prefs.sch_custom.background,
             SchColors::altium_classic().background

@@ -22,6 +22,8 @@ pub struct ExportRequest {
     pub ad: bool,
     pub kicad: bool,
     pub pads: bool,
+    /// PADS schematic connection grid; PCB pad geometry is unaffected.
+    pub pads_grid: pads::SchematicGrid,
     pub datasheet: bool,
     pub source_json: bool,
     pub force: bool,
@@ -60,6 +62,7 @@ impl Default for ExportRequest {
             ad: false,
             kicad: false,
             pads: false,
+            pads_grid: pads::SchematicGrid::default(),
             datasheet: false,
             source_json: false,
             force: false,
@@ -244,6 +247,7 @@ fn export_part(client: &LcedaClient, item: &SearchItem, req: &ExportRequest) -> 
                 &base,
                 symbol_ir.as_ref(),
                 footprint_ir.as_ref(),
+                req.pads_grid,
             )?;
         }
     }
@@ -713,11 +717,12 @@ fn export_pads(
     base: &str,
     symbol_ir: Option<&SymbolIr>,
     footprint_ir: Option<&FootprintIr>,
+    grid: pads::SchematicGrid,
 ) -> Result<()> {
     let source = out.symbol_json.as_ref().map(|path| -> Result<Value> {
         Ok(serde_json::from_slice(&fs::read(path)?)?)
     }).transpose()?;
-    let (c, d, p) = pads::write_part_files_with_source(out_dir, base, symbol_ir, footprint_ir, source.as_ref())?;
+    let (c, d, p) = pads::write_part_files_with_grid(out_dir, base, symbol_ir, footprint_ir, source.as_ref(), grid)?;
     out.pads_c = c;
     out.pads_d = d;
     out.pads_p = p;

@@ -46,6 +46,9 @@ pub enum Cmd {
         /// 写出 PADS Logic/Layout ASCII 库（.c / .d / .p）
         #[arg(long)]
         pads: bool,
+        /// PADS 原理图连接栅格，1–1000 mil 整数（省略时沿用设置）
+        #[arg(long)]
+        pads_grid: Option<lceda_core::pads::SchematicGrid>,
         /// 下载数据手册 PDF
         #[arg(long)]
         datasheet: bool,
@@ -88,6 +91,9 @@ pub enum Cmd {
         kicad: bool,
         #[arg(long)]
         pads: bool,
+        /// PADS 原理图连接栅格，1–1000 mil 整数（省略时沿用设置）
+        #[arg(long)]
+        pads_grid: Option<lceda_core::pads::SchematicGrid>,
         #[arg(long)]
         datasheet: bool,
         #[arg(long)]
@@ -170,6 +176,7 @@ pub fn run() -> Result<i32> {
             ad,
             kicad,
             pads,
+            pads_grid,
             datasheet,
             source,
             no_ad_3d,
@@ -189,6 +196,7 @@ pub fn run() -> Result<i32> {
                 ad,
                 kicad,
                 pads,
+                pads_grid,
                 datasheet,
                 source,
                 !no_ad_3d,
@@ -217,6 +225,7 @@ pub fn run() -> Result<i32> {
             ad,
             kicad,
             pads,
+            pads_grid,
             datasheet,
             source,
             no_ad_3d,
@@ -240,6 +249,7 @@ pub fn run() -> Result<i32> {
                 ad,
                 kicad,
                 pads,
+                pads_grid,
                 datasheet,
                 source,
                 !no_ad_3d,
@@ -275,6 +285,7 @@ fn build_req(
     ad: bool,
     kicad: bool,
     pads: bool,
+    pads_grid: Option<lceda_core::pads::SchematicGrid>,
     datasheet: bool,
     source: bool,
     ad_embed_3d: bool,
@@ -294,6 +305,7 @@ fn build_req(
         ad,
         kicad,
         pads,
+        pads_grid: pads_grid.unwrap_or(prefs.pads_grid),
         datasheet,
         source_json: source || ad || kicad || pads,
         force,
@@ -361,5 +373,27 @@ fn print_paths(paths: &DownloadPaths) {
     }
     if let Some(p) = &paths.pads_p {
         println!("PADS .p: {}", p.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_and_batch_accept_custom_grid_and_reject_invalid_values() {
+        for command in ["get", "batch"] {
+            for mils in ["1", "7", "25", "50", "100", "1000"] {
+                let cli = Cli::try_parse_from(["lceda", command, "input", "--pads", "--pads-grid", mils]).unwrap();
+                let grid = match cli.cmd.unwrap() {
+                    Cmd::Get { pads_grid, .. } | Cmd::Batch { pads_grid, .. } => pads_grid.unwrap(),
+                    _ => panic!("wrong command"),
+                };
+                assert_eq!(grid.mils().to_string(), mils);
+            }
+            for bad in ["0", "-10", "1.5", "NaN", "1001", "4294967306"] {
+                assert!(Cli::try_parse_from(["lceda", command, "input", "--pads", "--pads-grid", bad]).is_err());
+            }
+        }
     }
 }

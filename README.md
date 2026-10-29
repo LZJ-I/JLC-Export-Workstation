@@ -2,7 +2,7 @@
 
 # JLC Export Workstation
 
-Release version: **0.9.2**.
+Release version: **0.9.3**.
 
 | 中文 | English |
 | --- | --- |
@@ -65,6 +65,10 @@ The **Activity** button reserves its space in the status bar, so long output pat
 
 3D options default on (a missing model is skipped). Footprint names stay as LCSC left them unless you turn renaming on.
 
+**Settings → Export → Formats → PADS schematic** offers a connection grid of 10 mil (default, retains existing layout), 50 mil, 100 mil, or a custom whole number from 1 to 1000 mil. The saved value applies to single and batch exports. Pins retain their numbers, directions and intentional stacks; spacing expands in grid multiples while lettering stays at 7 pt. PCB dimensions are unchanged. Re-export the schematic library after changing this setting, use the same connection grid in PADS, and place symbols on-grid. This does not change PADS display or movement settings.
+
+The CLI accepts `lceda get C534828 --pads --pads-grid 100` and `lceda batch parts.txt --pads --pads-grid 100`; omitting the option uses the saved preference.
+
 **Settings → Export → Description** places field selection and drag ordering on the left, and the Designator / Comment / Description preview on the right. The preview defaults to a 10kΩ resistor (C25804), updates immediately when fields change, and can look up another part.
 
 **Sponsor** loads QR codes from the shared [LZJ-I/sponsor](https://github.com/LZJ-I/sponsor) repo. GitHub’s funding link points there only.
@@ -97,7 +101,7 @@ Native export offers **Include supplementary resources (retain original links)**
 
 ### Library exports and binding synchronization
 
-**AD synchronization is experimental**, including editor integration and offline file synchronization. Try a library copy first. The user has verified ordinary PADS exports in VX2.7; stacked-pin handling has local regression coverage but has not been verified in the PADS editor.
+**AD synchronization is experimental**, including editor integration and offline file synchronization. Try a library copy first. The user has verified ordinary PADS exports in VX2.7 and confirmed the connection-grid test build. Stacked-pin handling has local regression coverage; separate PADS editor confirmation is still pending.
 
 AD recovery validates the complete file set and backups before rollback. External edits, deletions or damaged backups stop recovery and preserve the files. Older journals have no content digests; differing current files require manual review and recovery.
 
