@@ -213,6 +213,8 @@ pub fn run(lang: Lang, instance: InstanceGuard) -> anyhow::Result<()> {
         .with_title(i18n::t(lang, "app_title"))
         .with_inner_size([win_w, win_h])
         .with_min_inner_size([960.0, 620.0])
+        // 本程序通过文件选择器导入，未使用拖放；避免 Windows OLE 在长 EXE 路径下注册失败。
+        .with_drag_and_drop(false)
         .with_transparent(true)
         .with_decorations(false);
     if !shooting && prefs.always_on_top {
@@ -1969,6 +1971,7 @@ impl App {
             return;
         };
         let downloading = self.update_job.is_some();
+        let can_install = !self.busy();
         let mut later = false;
         let mut now = false;
         let mut open = false;
@@ -2040,7 +2043,7 @@ impl App {
                                 && theme::pill_button(
                                     ui,
                                     i18n::t(lang, "update_now"),
-                                    true,
+                                    can_install,
                                     true,
                                 )
                                 .clicked()
@@ -2062,7 +2065,7 @@ impl App {
                             {
                                 later = true;
                             }
-                            if consume_dialog_confirm(ui, true) {
+                            if consume_dialog_confirm(ui, can_install) {
                                 if info.zip_url.is_some() {
                                     now = true;
                                 } else {
@@ -2081,6 +2084,8 @@ impl App {
             self.update = None;
         }
         if now {
+            self.persist_prefs();
+            self.persist_sync_queue();
             let info = info.clone();
             let progress = Arc::new(Mutex::new(UpdateProgress::default()));
             let progress_for_job = Arc::clone(&progress);
@@ -2278,6 +2283,7 @@ impl eframe::App for App {
         self.tick_debug_shot(ctx);
         self.persist_window(ctx);
         handle_window_resize(ctx, maxed);
+        update::confirm_startup();
     }
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {

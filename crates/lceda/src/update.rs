@@ -1,8 +1,12 @@
+mod runtime;
+mod transaction;
+#[cfg(windows)]
+mod windows;
+
 use serde_json::Value;
 use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,6 +19,7 @@ const PROXY: &str = "https://gh-proxy.com/";
 pub struct UpdateInfo {
     pub version: String,
     pub zip_url: Option<String>,
+    pub zip_sha256: Option<String>,
     pub page_url: String,
     /// 当前版本到最新版本之间各 Release 的 markdown（新→旧）。
     pub notes: String,
@@ -74,8 +79,10 @@ pub fn check_for_update() -> CheckResult {
 }
 
 fn fetch_json(url: &str) -> Option<Value> {
-    let body = fetch_bytes(&via_proxy(url)).or_else(|| fetch_bytes(url))?;
-    serde_json::from_slice(&body).ok()
+    // 官方源优先；代理返回非 JSON 时也继续尝试下一条线路。
+    [url.to_string(), via_proxy(url)]
+        .into_iter()
+        .find_map(|source| serde_json::from_slice(&fetch_bytes(&source)?).ok())
 }
 
 #[derive(Debug, Clone)]
@@ -84,13 +91,17 @@ struct Release {
     parsed: (u64, u64, u64),
     notes: String,
     zip_url: Option<String>,
+    zip_sha256: Option<String>,
 }
 
 fn parse_release(v: &Value) -> Option<Release> {
     if v.get("draft").and_then(Value::as_bool).unwrap_or(false) {
         return None;
     }
-    if v.get("prerelease").and_then(Value::as_bool).unwrap_or(false) {
+    if v.get("prerelease")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return None;
     }
     let tag = v.get("tag_name").and_then(Value::as_str)?.trim();
@@ -99,6 +110,14 @@ fn parse_release(v: &Value) -> Option<Release> {
         version: tag.trim_start_matches('v').to_string(),
         parsed,
         notes: release_notes(v),
+        zip_sha256: v
+            .get("assets")
+            .and_then(Value::as_array)
+            .and_then(|assets| pick_asset_entry(assets))
+            .and_then(|asset| asset.get("digest").and_then(Value::as_str))
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_ascii_lowercase),
         zip_url: v
             .get("assets")
             .and_then(Value::as_array)
@@ -120,6 +139,7 @@ fn result_from_list(json: &Value, local: (u64, u64, u64)) -> Option<CheckResult>
     Some(CheckResult::Available(UpdateInfo {
         version: rels[0].version.clone(),
         zip_url: rels[0].zip_url.clone(),
+        zip_sha256: rels[0].zip_sha256.clone(),
         page_url: via_proxy(RELEASES_URL),
         notes: compose_notes(&rels, local, latest),
     }))
@@ -134,6 +154,7 @@ fn result_from_latest(url: &str, local: (u64, u64, u64)) -> Option<CheckResult> 
     Some(CheckResult::Available(UpdateInfo {
         version: rel.version.clone(),
         zip_url: rel.zip_url.clone(),
+        zip_sha256: rel.zip_sha256.clone(),
         page_url: via_proxy(RELEASES_URL),
         notes: compose_notes(std::slice::from_ref(&rel), local, rel.parsed),
     }))
@@ -168,26 +189,37 @@ fn release_notes(json: &Value) -> String {
         .to_string()
 }
 
-pub fn download_and_apply(info: &UpdateInfo, progress: Option<ProgressHandle>) -> Result<(), String> {
+pub fn download_and_apply(
+    info: &UpdateInfo,
+    progress: Option<ProgressHandle>,
+) -> Result<(), String> {
     let url = info
         .zip_url
         .as_deref()
         .ok_or_else(|| "没有找到可下载的安装包".to_string())?;
-    set_progress(
-        &progress,
-        UpdatePhase::Downloading,
-        0.0,
-        true,
-    );
-    let bytes = fetch_bytes_with_progress(url, &progress)
-        .ok_or_else(|| "下载更新失败".to_string())?;
+    set_progress(&progress, UpdatePhase::Downloading, 0.0, true);
+    let expected = info.zip_sha256.as_deref().ok_or_else(|| {
+        "更新源缺少 SHA-256 校验信息，请稍后重新检查更新或从发布页手动下载。".to_string()
+    })?;
+    let direct = url.strip_prefix(PROXY).unwrap_or(url);
+    let mut bytes = None;
+    for source in [direct.to_string(), via_proxy(direct)] {
+        if let Some(download) = fetch_bytes_with_progress(&source, &progress) {
+            if transaction::digest(&download).eq_ignore_ascii_case(expected) {
+                bytes = Some(download);
+                break;
+            }
+        }
+    }
+    let bytes =
+        bytes.ok_or_else(|| "下载失败或安装包校验不一致，已保留当前版本，请重试。".to_string())?;
     if bytes.len() < 64 {
         return Err("下载内容太小，不是安装包".into());
     }
     set_progress(&progress, UpdatePhase::Extracting, 0.88, false);
     let exe = extract_exe(&bytes)?;
     set_progress(&progress, UpdatePhase::Installing, 0.96, false);
-    replace_self_and_restart(&exe)?;
+    runtime::apply(&exe, &info.version)?;
     set_progress(&progress, UpdatePhase::Idle, 1.0, false);
     Ok(())
 }
@@ -237,7 +269,6 @@ fn leftover_update_paths(current: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         current.with_file_name(format!("{name}.old")),
         current.with_file_name(format!("{name}.new")),
-        staging_exe_path(),
     ];
     if let Some(parent) = current.parent() {
         if !stem.is_empty() {
@@ -263,16 +294,25 @@ fn set_progress(
     }
 }
 
+fn pick_asset_entry(assets: &[Value]) -> Option<&Value> {
+    assets.iter().find(|asset| {
+        let Some(name) = asset.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        name.ends_with(".zip")
+            && name.contains(asset_hint())
+            && asset
+                .get("browser_download_url")
+                .and_then(Value::as_str)
+                .is_some()
+    })
+}
+
 fn pick_asset(assets: &[Value]) -> Option<String> {
-    let hint = asset_hint();
-    for a in assets {
-        let name = a.get("name")?.as_str()?;
-        let url = a.get("browser_download_url")?.as_str()?;
-        if name.ends_with(".zip") && name.contains(hint) {
-            return Some(via_proxy(url));
-        }
-    }
-    None
+    let url = pick_asset_entry(assets)?
+        .get("browser_download_url")?
+        .as_str()?;
+    Some(via_proxy(url))
 }
 
 fn asset_hint() -> &'static str {
@@ -299,7 +339,16 @@ fn extract_exe(zip_bytes: &[u8]) -> Result<Vec<u8>, String> {
         let base = name.rsplit('/').next().unwrap_or(&name);
         if base.eq_ignore_ascii_case(want) {
             let mut buf = Vec::new();
-            file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            if file.size() > transaction::MAX_EXE_SIZE {
+                return Err("安装包内程序文件过大".into());
+            }
+            (&mut file)
+                .take(transaction::MAX_EXE_SIZE + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| e.to_string())?;
+            if buf.len() as u64 > transaction::MAX_EXE_SIZE {
+                return Err("安装包内程序文件过大".into());
+            }
             if buf.len() > 64 {
                 return Ok(buf);
             }
@@ -308,116 +357,12 @@ fn extract_exe(zip_bytes: &[u8]) -> Result<Vec<u8>, String> {
     Err("压缩包里没有程序文件".into())
 }
 
-/// 新进程入口：等旧进程放开文件后，原地覆盖桌面上的同一个 exe，图标就不会跑回左边。
 pub fn maybe_apply_update() -> Option<i32> {
-    let mut args = std::env::args();
-    let _ = args.next();
-    if args.next()?.as_str() != "--apply-update" {
-        return None;
-    }
-    let dest = PathBuf::from(args.next()?);
-    let rest: Vec<String> = args.collect();
-    Some(finish_apply_update(&dest, &rest))
+    runtime::maybe_handle()
 }
 
-fn replace_self_and_restart(new_bytes: &[u8]) -> Result<(), String> {
-    let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    let tmp = if cfg!(windows) {
-        staging_exe_path()
-    } else {
-        current.with_file_name(format!(
-            "{}.new",
-            current.file_name().unwrap_or_default().to_string_lossy()
-        ))
-    };
-    fs::write(&tmp, new_bytes).map_err(|e| format!("无法写入更新文件: {e}"))?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    #[cfg(windows)]
-    {
-        let mut cmd = Command::new(&tmp);
-        cmd.arg("--apply-update");
-        cmd.arg(&current);
-        cmd.args(&args);
-        cmd.spawn().map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("无法重新启动: {e}")
-        })?;
-        std::process::exit(0);
-    }
-
-    #[cfg(not(windows))]
-    {
-        let old = old_path(&current);
-        let _ = fs::remove_file(&old);
-        fs::rename(&current, &old).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("无法替换正在运行的程序: {e}")
-        })?;
-        if let Err(e) = fs::rename(&tmp, &current) {
-            let _ = fs::rename(&old, &current);
-            return Err(format!("无法安装新版本: {e}"));
-        }
-        let mut cmd = Command::new(&current);
-        cmd.args(&args);
-        cmd.spawn().map_err(|e| {
-            let _ = fs::rename(&old, &current);
-            format!("无法重新启动: {e}")
-        })?;
-        std::process::exit(0);
-    }
-}
-
-fn finish_apply_update(dest: &Path, rest: &[String]) -> i32 {
-    let Ok(src) = std::env::current_exe() else {
-        return 2;
-    };
-    let Ok(bytes) = fs::read(&src) else {
-        return 2;
-    };
-    if overwrite_in_place_retry(dest, &bytes).is_err() {
-        return 2;
-    }
-    let mut cmd = Command::new(dest);
-    cmd.args(rest);
-    if cmd.spawn().is_err() {
-        return 2;
-    }
-    0
-}
-
-fn staging_exe_path() -> PathBuf {
-    std::env::temp_dir().join("lceda-update.exe")
-}
-
-fn overwrite_in_place_retry(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut last = String::new();
-    for i in 0..50 {
-        match overwrite_in_place(path, bytes) {
-            Ok(()) => return Ok(()),
-            Err(e) => last = e,
-        }
-        std::thread::sleep(Duration::from_millis(40 + i * 10));
-    }
-    Err(last)
-}
-
-/// 打开已有文件写入，不删再建。Windows 桌面图标按文件身份记位置。
-fn overwrite_in_place(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|e| e.to_string())?;
-    f.write_all(bytes).map_err(|e| e.to_string())?;
-    f.flush().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn old_path(current: &Path) -> PathBuf {
-    let name = current.file_name().unwrap_or_default().to_string_lossy();
-    current.with_file_name(format!("{name}.old"))
+pub fn confirm_startup() {
+    runtime::confirm_startup();
 }
 
 pub(crate) fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
@@ -466,6 +411,9 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let major = it.next()?.parse().ok()?;
     let minor = it.next()?.parse().ok()?;
     let patch = it.next().unwrap_or("0").parse().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
     Some((major, minor, patch))
 }
 
@@ -507,16 +455,7 @@ mod tests {
         assert!(names.contains(&"lceda.exe.old".into()));
         assert!(names.contains(&"lceda.exe.new".into()));
         assert!(names.contains(&"lceda.old.exe".into()));
-        assert!(names.contains(&"lceda-update.exe".into()));
-    }
-
-    #[test]
-    fn overwrite_in_place_replaces_bytes() {
-        let path = std::env::temp_dir().join(format!("lceda-overwrite-{}.bin", std::process::id()));
-        fs::write(&path, b"old-bytes").unwrap();
-        overwrite_in_place(&path, b"new-content").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"new-content");
-        let _ = fs::remove_file(&path);
+        assert!(!names.contains(&"lceda-update.exe".into()));
     }
 
     #[test]
@@ -607,5 +546,44 @@ mod tests {
         assert!(info.notes.contains("stable"));
         assert!(!info.notes.contains("rc"));
         assert!(!info.notes.contains("drafted"));
+    }
+
+    #[test]
+    fn current_release_never_prompts_for_same_or_older_version() {
+        let json = serde_json::json!([
+            { "tag_name": "v0.9.2", "draft": false, "prerelease": false },
+            { "tag_name": "v0.9.1", "draft": false, "prerelease": false }
+        ]);
+        assert!(matches!(
+            result_from_list(&json, (0, 9, 2)),
+            Some(CheckResult::UpToDate)
+        ));
+        assert!(matches!(
+            result_from_list(&json, (0, 9, 3)),
+            Some(CheckResult::UpToDate)
+        ));
+        assert!(matches!(
+            result_from_list(&json, (0, 9, 1)),
+            Some(CheckResult::Available(_))
+        ));
+        assert!(parse_version("0.9.2.unexpected").is_none());
+    }
+
+    #[test]
+    fn release_hash_matches_selected_platform_even_after_malformed_asset() {
+        let hash = transaction::digest(b"downloaded package");
+        let json = serde_json::json!({"tag_name":"v0.9.2", "assets":[
+            {"irrelevant":true},
+            {"name":format!("lceda-v0.9.2-{}.zip", asset_hint()),
+                "browser_download_url":"https://example.com/package.zip", "digest":format!("sha256:{hash}")}
+        ]});
+        let release = parse_release(&json).unwrap();
+        assert_eq!(release.zip_sha256.as_deref(), Some(hash.as_str()));
+        assert!(release.zip_url.unwrap().ends_with("package.zip"));
+    }
+
+    #[test]
+    fn invalid_package_is_rejected_before_replacement() {
+        assert!(extract_exe(b"not a zip archive").is_err());
     }
 }

@@ -115,7 +115,7 @@ namespace Lceda.Altium
         {
             var fields = new Dictionary<string, string> {
                 { "protocol", "1" }, { "session", session }, { "state", state },
-                { "backend", "native" }, { "version", "0.9.1" }, { "pid", System.Diagnostics.Process.GetCurrentProcess().Id.ToString() }
+                { "backend", "native" }, { "version", "0.9.2" }, { "pid", System.Diagnostics.Process.GetCurrentProcess().Id.ToString() }
             };
             if (error != null) fields["error"] = Fields.Hex(error);
             Fields.Write(Path.Combine(root, "heartbeat.ini"), fields, false);

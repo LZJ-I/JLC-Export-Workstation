@@ -2,7 +2,7 @@
 
 # JLC Export Workstation
 
-Release version: **0.9.1**.
+Release version: **0.9.2**.
 
 | 中文 | English |
 | --- | --- |
@@ -15,7 +15,7 @@ Release version: **0.9.1**.
 
 ## Install
 
-Download a zip for your OS from [Releases](https://github.com/LZJ-I/JLC-Export-Workstation/releases), unzip, and run it. To update, unzip over the previous files, or use in-app update (downloads the matching OS zip, replaces, restarts).
+Download a zip for your OS from [Releases](https://github.com/LZJ-I/JLC-Export-Workstation/releases), unzip, and run it. To update, unzip over the previous files, or use in-app update. The updater verifies the package and version, retains a backup, and closes the old app only after the new window confirms startup. Protected Windows folders use a system elevation prompt; cancellation or failure keeps the old version available and reports the reason.
 
 - Windows x64: `lceda-v*-x86_64-pc-windows-msvc.zip` → `lceda.exe`
 - Linux x64: `lceda-v*-x86_64-unknown-linux-gnu.zip` → `lceda`

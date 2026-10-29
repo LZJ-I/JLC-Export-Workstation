@@ -2,7 +2,7 @@
 
 # 嘉立创导出工作站
 
-发布版本：**0.9.1**。
+发布版本：**0.9.2**。
 
 | 中文 | English |
 | --- | --- |
@@ -15,7 +15,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/LZJ-I/JLC-Export-Workstation/releases) 下载对应系统的压缩包，解压后运行。更新时解压覆盖即可。软件内检查更新会按当前系统下载对应安装包并替换重启。
+从 [Releases](https://github.com/LZJ-I/JLC-Export-Workstation/releases) 下载对应系统的压缩包，解压后运行。更新时解压覆盖即可。软件内更新会校验安装包和版本，保留旧版备份，并在新版窗口启动确认后退出旧版。Windows 目录需要管理员权限时会显示系统授权提示；取消授权或更新失败会保留可用旧版并提示原因。
 
 - Windows x64：`lceda-v*-x86_64-pc-windows-msvc.zip` → `lceda.exe`
 - Linux x64：`lceda-v*-x86_64-unknown-linux-gnu.zip` → `lceda`
