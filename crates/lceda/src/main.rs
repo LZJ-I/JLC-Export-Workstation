@@ -10,6 +10,8 @@ mod prefs;
 mod sponsor;
 mod update;
 
+static PROFILE_OVERRIDE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 fn main() {
     if let Some(code) = update::maybe_apply_update() {
         std::process::exit(code);
@@ -37,7 +39,18 @@ fn attach_console_if_cli() {
     }
     const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
     unsafe {
+        // Keep subprocess pipes and shell redirection when attaching this GUI
+        // executable to a console. JSON must reach the calling agent's stdout.
+        let redirected = [(-10_i32) as u32, (-11_i32) as u32, (-12_i32) as u32]
+            .map(|kind| {
+                let handle = GetStdHandle(kind);
+                let file_type = GetFileType(handle);
+                (kind, handle, file_type == 1 || file_type == 3) // disk or pipe
+            });
         AttachConsole(ATTACH_PARENT_PROCESS);
+        for (kind, handle, keep) in redirected {
+            if keep { SetStdHandle(kind, handle); }
+        }
     }
 }
 
@@ -45,10 +58,14 @@ fn attach_console_if_cli() {
 #[link(name = "kernel32")]
 extern "system" {
     fn AttachConsole(dwProcessId: u32) -> i32;
+    fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+    fn GetFileType(hFile: *mut std::ffi::c_void) -> u32;
+    fn SetStdHandle(nStdHandle: u32, hHandle: *mut std::ffi::c_void) -> i32;
 }
 
-/// Screenshot runs can isolate their state from the user's working library.
+/// Explicit CLI profiles and screenshot runs can isolate state from the desktop.
 fn profile_dir() -> Option<std::path::PathBuf> {
+    if let Some(path) = PROFILE_OVERRIDE.get() { return Some(path.clone()); }
     if std::env::var_os("LCEDA_SHOT").is_some() {
         if let Some(path) = std::env::var_os("LCEDA_SHOT_PROFILE") { return Some(path.into()); }
     }

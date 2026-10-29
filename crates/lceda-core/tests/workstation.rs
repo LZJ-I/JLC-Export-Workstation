@@ -383,3 +383,24 @@ fn separate_step_does_not_embed_when_ad_embedding_is_disabled() {
         assert_eq!(i32::from_le_bytes(header.try_into().unwrap()), 0, "{mode}: independent STEP must not bypass the AD embedding toggle");
     }
 }
+
+#[test]
+fn merged_results_retain_each_parts_footprint_path_and_do_not_hide_missing_symbols() {
+    let dir = TemporaryDirectory::new("merged-result-paths");
+    let first = cached_item(&dir.0, "C167747", "First");
+    let second = cached_item(&dir.0, "C167748", "Second");
+    // Valid JSON with no symbol document: the footprint/source can still export.
+    let symbol = dir.0.join(second.export_stem()).join("Second_symbol_easyeda.json");
+    fs::write(symbol, "{}").unwrap();
+    let req = ExportRequest { ad: true, kicad: true, merge: true, rename_footprint: true,
+        out_dir: dir.0.clone(), ..Default::default() };
+    let rows = export_items(&LcedaClient::new(), &[first, second], &req);
+    let a = rows[0].1.as_ref().unwrap(); let b = rows[1].1.as_ref().unwrap();
+    assert!(a.schlib.is_some()); assert!(a.kicad_sym.is_some());
+    assert!(b.schlib.is_none(), "a shared SchLib must not imply the second symbol was written");
+    assert!(b.kicad_sym.is_none());
+    let afp = a.kicad_mod.as_ref().unwrap(); let bfp = b.kicad_mod.as_ref().unwrap();
+    assert_ne!(afp, bfp); assert!(afp.is_file()); assert!(bfp.is_file());
+    assert!(afp.file_name().unwrap().to_string_lossy().starts_with("First"));
+    assert!(bfp.file_name().unwrap().to_string_lossy().starts_with("Second"));
+}

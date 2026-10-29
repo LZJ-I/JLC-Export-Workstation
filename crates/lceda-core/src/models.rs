@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchItem {
     pub index: usize,
     pub display_title: String,

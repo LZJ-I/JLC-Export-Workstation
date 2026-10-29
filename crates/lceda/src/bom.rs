@@ -7,7 +7,7 @@ use std::{collections::{HashMap, HashSet}, path::Path, sync::atomic::{AtomicBool
 const MAX_ROWS: usize = 10_000;
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BomRow {
     pub line: usize,
     pub lcsc: String,
@@ -45,7 +45,7 @@ impl BomRow {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BomDocument {
     pub source: String,
     pub rows: Vec<BomRow>,

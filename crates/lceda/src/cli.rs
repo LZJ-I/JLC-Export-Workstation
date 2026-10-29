@@ -1,399 +1,283 @@
-use crate::gui;
-use crate::i18n::{self, Lang};
-use anyhow::{Context, Result};
+//! Human and agent interfaces share selection, BOM validation and export code with the GUI.
+mod bom;
+mod library;
+mod options;
+mod output;
+
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use lceda_core::client::LcedaClient;
-use lceda_core::export::{self, ExportRequest};
-use lceda_core::models::{self, DownloadPaths};
-use std::path::PathBuf;
+use lceda_core::{
+    client::LcedaClient,
+    export,
+    models::{self, SearchItem},
+};
+use options::{ExportOptions, MergeOptions};
+use output::Outcome;
+use serde_json::json;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 #[derive(Parser)]
-    #[command(name = "lceda", version, about = "嘉立创导出工作站 / JLC Export Workstation：搜索、3D、Altium / KiCad / PADS")]
+#[command(
+    name = "lceda",
+    version,
+    about = "JLC Export Workstation — search, BOM review, Altium / KiCad / PADS export"
+)]
 pub struct Cli {
-    /// zh / en（默认跟随系统；图形界面会记住上次选择）
-    #[arg(long, global = true)]
+    /// GUI language: zh / en (otherwise use saved preference or system language).
+    #[arg(long, global = true, value_parser = ["en", "zh"])]
     pub lang: Option<String>,
-
+    /// Emit one versioned JSON response on stdout; diagnostics go to stderr.
+    #[arg(long, global = true)]
+    json: bool,
+    /// Isolate settings and local cache from the default desktop profile.
+    #[arg(long, global = true)]
+    profile: Option<PathBuf>,
     #[command(subcommand)]
-    pub cmd: Option<Cmd>,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
-pub enum Cmd {
-    /// 打开图形界面
+enum Cmd {
+    /// Open the desktop application (also the default with no command).
     Gui,
-    /// 按关键字搜索
+    /// Search parts; use the returned LCSC ID for subsequent operations.
     Search {
         keyword: String,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// 下载 / 导出指定器件
+    /// Export an exact LCSC ID or an unambiguous MPN.
     Get {
         keyword: String,
-        #[arg(long, default_value_t = 1)]
-        index: usize,
-        #[arg(long)]
-        step: bool,
-        #[arg(long)]
-        obj: bool,
-        /// 写出 .SchLib / .PcbLib
-        #[arg(long)]
-        ad: bool,
-        /// 写出 KiCad 符号 / 封装
-        #[arg(long)]
-        kicad: bool,
-        /// 写出 PADS Logic/Layout ASCII 库（.c / .d / .p）
-        #[arg(long)]
-        pads: bool,
-        /// PADS 原理图连接栅格，1–1000 mil 整数（省略时沿用设置）
-        #[arg(long)]
-        pads_grid: Option<lceda_core::pads::SchematicGrid>,
-        /// 下载数据手册 PDF
-        #[arg(long)]
-        datasheet: bool,
-        /// 同时（或仅）保存 EasyEDA JSON
-        #[arg(long)]
-        source: bool,
-        /// 不把 STEP 嵌入 PcbLib（默认嵌入）
-        #[arg(long = "no-ad-3d")]
-        no_ad_3d: bool,
-        /// 不把 STEP 写入 KiCad .3dshapes（默认写入）
-        #[arg(long = "no-kicad-3d")]
-        no_kicad_3d: bool,
-        /// 用器件型号覆盖立创原来的封装名（默认保留原名）
-        #[arg(long)]
-        rename_footprint: bool,
-        /// 原理图颜色：altium（默认）/ easyeda / mono
-        #[arg(long = "sch-color")]
-        sch_color: Option<String>,
-        /// Add/update this part in an existing SchLib and its matching PcbLib.
+        /// Explicitly choose a search result for an ambiguous MPN (1-based).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        index: Option<u32>,
+        #[command(flatten)]
+        export: ExportOptions,
+        /// Update an existing AD library and its companion PcbLib (close AD first).
         #[arg(long, requires = "ad")]
         ad_library_file: Option<PathBuf>,
-        /// Add/update this part in a KiCad symbol library and its matching .pretty directory.
+        /// Update an existing KiCad library and its companions.
         #[arg(long, requires = "kicad")]
         kicad_library_file: Option<PathBuf>,
-        #[arg(short, long, default_value = "out")]
-        output: PathBuf,
-        #[arg(long)]
-        force: bool,
     },
-    /// 从文本文件批量导出（每行一个编号或关键字）
+    /// Export a text list (one exact LCSC ID or unambiguous MPN per line).
     Batch {
         file: PathBuf,
-        #[arg(long)]
-        step: bool,
-        #[arg(long)]
-        obj: bool,
-        #[arg(long)]
-        ad: bool,
-        #[arg(long)]
-        kicad: bool,
-        #[arg(long)]
-        pads: bool,
-        /// PADS 原理图连接栅格，1–1000 mil 整数（省略时沿用设置）
-        #[arg(long)]
-        pads_grid: Option<lceda_core::pads::SchematicGrid>,
-        #[arg(long)]
-        datasheet: bool,
-        #[arg(long)]
-        source: bool,
-        /// 不把 STEP 嵌入 PcbLib（默认嵌入）
-        #[arg(long = "no-ad-3d")]
-        no_ad_3d: bool,
-        /// 不把 STEP 写入 KiCad .3dshapes（默认写入）
-        #[arg(long = "no-kicad-3d")]
-        no_kicad_3d: bool,
-        /// 用器件型号覆盖立创原来的封装名（默认保留原名）
-        #[arg(long)]
-        rename_footprint: bool,
-        /// 原理图颜色：altium（默认）/ easyeda / mono
-        #[arg(long = "sch-color")]
-        sch_color: Option<String>,
-        /// 将本次批量的 AD/KiCad 合成一个库（不追加已有文件）
-        #[arg(long)]
-        merge: bool,
-        #[arg(short, long, default_value = "out")]
-        output: PathBuf,
-        #[arg(long)]
-        force: bool,
+        #[command(flatten)]
+        export: ExportOptions,
+        #[command(flatten)]
+        merge: MergeOptions,
     },
-}
-
-fn resolve_lang(cli_lang: Option<&str>) -> Lang {
-    if let Some(code) = cli_lang {
-        return Lang::from_code(code);
-    }
-    if let Some(code) = crate::prefs::load().lang {
-        return Lang::from_code(&code);
-    }
-    Lang::detect()
+    /// Import, match, review and export a BOM without opening the GUI.
+    Bom {
+        #[command(subcommand)]
+        command: bom::Command,
+    },
+    /// Read back native library contents without opening an EDA editor.
+    Library {
+        #[command(subcommand)]
+        command: library::Command,
+    },
 }
 
 pub fn run() -> Result<i32> {
-    let cli = Cli::parse();
-    let lang = resolve_lang(cli.lang.as_deref());
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let json_mode = arguments.iter().any(|arg| arg == "--json");
+    let cli = match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error) if !error.use_stderr() => {
+            error.print()?;
+            return Ok(0);
+        }
+        Err(error) => return output::failure("arguments", json_mode, &error.to_string()),
+    };
+    let json_mode = cli.json;
+    if let Some(path) = &cli.profile {
+        let result = std::path::absolute(path)
+            .context("resolve profile directory")
+            .and_then(|path| {
+                crate::PROFILE_OVERRIDE
+                    .set(path)
+                    .map_err(|_| anyhow::anyhow!("Profile already initialized"))
+            });
+        if let Err(error) = result {
+            return output::failure("arguments", json_mode, &format!("{error:#}"));
+        }
+    }
+    let name = match &cli.cmd {
+        None | Some(Cmd::Gui) => "gui",
+        Some(Cmd::Search { .. }) => "search",
+        Some(Cmd::Get { .. }) => "get",
+        Some(Cmd::Batch { .. }) => "batch",
+        Some(Cmd::Bom { command }) => command.name(),
+        Some(Cmd::Library { .. }) => "library.inspect",
+    };
+    match execute(cli) {
+        Ok(outcome) => output::emit(name, json_mode, outcome),
+        Err(error) => output::failure(name, json_mode, &format!("{error:#}")),
+    }
+}
 
+fn execute(cli: Cli) -> Result<Outcome> {
     match cli.cmd {
         None | Some(Cmd::Gui) => {
-            let Some(instance) = crate::instance::acquire() else {
-                return Ok(0);
-            };
-            gui::run(lang, instance)?;
-            Ok(0)
+            if cli.json {
+                bail!("--json requires a CLI command, such as search or bom show");
+            }
+            let lang = cli
+                .lang
+                .or_else(|| crate::prefs::load().lang)
+                .map(|code| crate::i18n::Lang::from_code(&code))
+                .unwrap_or_else(crate::i18n::Lang::detect);
+            if let Some(instance) = crate::instance::acquire() {
+                crate::gui::run(lang, instance)?;
+            }
+            Ok(Outcome::success(json!({}), String::new()))
         }
         Some(Cmd::Search { keyword, limit }) => {
-            let client = LcedaClient::new();
-            let items = client.search(&keyword)?;
-            if items.is_empty() {
-                println!("{}", i18n::t(lang, "no_results"));
-                return Ok(0);
-            }
-            println!("Found {}:", items.len());
+            let items = LcedaClient::new().search(&keyword)?;
+            let mut text = format!(
+                "Found {} (showing {}):",
+                items.len(),
+                limit.min(items.len())
+            );
             for item in items.iter().take(limit) {
-                let flag = if item.model_uuid.is_some() { "yes" } else { "no" };
-                let lcsc = item.lcsc_id().unwrap_or_default();
-                println!(
-                    "[{:>3}] {} | {} | {} | 3D: {}",
+                text.push_str(&format!(
+                    "\n[{}] {} | {} | {} | {}",
                     item.index,
+                    item.lcsc_id().unwrap_or_default(),
                     item.name(),
-                    if lcsc.is_empty() { "-" } else { &lcsc },
-                    if item.manufacturer.is_empty() {
-                        "-"
-                    } else {
-                        &item.manufacturer
-                    },
-                    flag
-                );
+                    item.manufacturer_label(),
+                    crate::library::package_from_item(item)
+                ));
             }
-            Ok(0)
+            Ok(Outcome::success(
+                json!({"query": keyword, "total": items.len(),
+                "items": items.iter().take(limit).map(output::item).collect::<Vec<_>>()}),
+                text,
+            ))
         }
         Some(Cmd::Get {
             keyword,
             index,
-            step,
-            obj,
-            ad,
-            kicad,
-            pads,
-            pads_grid,
-            datasheet,
-            source,
-            no_ad_3d,
-            no_kicad_3d,
-            rename_footprint,
-            sch_color,
+            export: options,
             ad_library_file,
             kicad_library_file,
-            output,
-            force,
         }) => {
             let client = LcedaClient::new();
-            let item = client.select(&keyword, index)?;
-            let mut req = build_req(
-                step,
-                obj,
-                ad,
-                kicad,
-                pads,
-                pads_grid,
-                datasheet,
-                source,
-                !no_ad_3d,
-                !no_kicad_3d,
-                rename_footprint,
-                sch_color.as_deref(),
-                output,
-                force,
-            );
+            let selected = select(&keyword, client.search(&keyword)?, index)?;
+            let mut req = options.request();
             if let Some(path) = ad_library_file {
-                let id = item.lcsc_id().ok_or_else(|| anyhow::anyhow!("绑定 AD 库需要明确的 C 编号"))?;
-                req.ad_library_files.insert(id, path);
+                req.ad_library_files.insert(
+                    selected.lcsc_id().context("AD binding needs an LCSC ID")?,
+                    path,
+                );
             }
             if let Some(path) = kicad_library_file {
-                let id = item.lcsc_id().ok_or_else(|| anyhow::anyhow!("绑定 KiCad 库需要明确的 C 编号"))?;
-                req.kicad_library_files.insert(id, path);
+                req.kicad_library_files.insert(
+                    selected
+                        .lcsc_id()
+                        .context("KiCad binding needs an LCSC ID")?,
+                    path,
+                );
             }
-            let paths = export::export(&client, &item, &req).context("export failed")?;
-            print_paths(&paths);
-            Ok(0)
+            let result = export::export(&client, &selected, &req).map_err(|e| e.to_string());
+            Ok(output::exports(
+                vec![output::export_row(&keyword, Some(&selected), result, &req)],
+                &req,
+            ))
         }
         Some(Cmd::Batch {
             file,
-            step,
-            obj,
-            ad,
-            kicad,
-            pads,
-            pads_grid,
-            datasheet,
-            source,
-            no_ad_3d,
-            no_kicad_3d,
-            rename_footprint,
-            sch_color,
+            export: options,
             merge,
-            output,
-            force,
         }) => {
-            let text = std::fs::read_to_string(&file)
-                .with_context(|| format!("read {}", file.display()))?;
-            let ids = models::parse_id_list(&text);
-            if ids.is_empty() {
-                println!("empty list");
-                return Ok(1);
-            }
-            let mut req = build_req(
-                step,
-                obj,
-                ad,
-                kicad,
-                pads,
-                pads_grid,
-                datasheet,
-                source,
-                !no_ad_3d,
-                !no_kicad_3d,
-                rename_footprint,
-                sch_color.as_deref(),
-                output,
-                force,
+            let keywords = models::parse_id_list(
+                &std::fs::read_to_string(&file)
+                    .with_context(|| format!("read {}", file.display()))?,
             );
-            req.merge = merge;
+            if keywords.is_empty() {
+                bail!("Part list is empty");
+            }
+            let mut req = options.request();
+            merge.apply(&mut req)?;
             let client = LcedaClient::new();
-            let mut failed = 0;
-            for (kw, result) in export::export_batch(&client, &ids, &req) {
+            let mut selected = Vec::new();
+            let mut queries = HashMap::new();
+            let mut seen = HashSet::new();
+            let mut rows = Vec::new();
+            for keyword in keywords {
+                if !seen.insert(keyword.to_ascii_lowercase()) {
+                    continue;
+                }
+                let result = client
+                    .search(&keyword)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|items| select(&keyword, items, None));
                 match result {
-                    Ok(paths) => {
-                        println!("OK {kw}");
-                        print_paths(&paths);
+                    Ok(item) => {
+                        let id = item.lcsc_id().unwrap_or_else(|| item.name().into());
+                        if !queries.contains_key(&id) {
+                            queries.insert(id, keyword);
+                            selected.push(item);
+                        }
                     }
-                    Err(e) => {
-                        failed += 1;
-                        println!("FAIL {kw}: {e}");
-                    }
+                    Err(error) => rows.push(output::export_row(
+                        &keyword,
+                        None,
+                        Err(error.to_string()),
+                        &req,
+                    )),
                 }
             }
-            if failed > 0 { Ok(1) } else { Ok(0) }
+            for (item, result) in export::export_items(&client, &selected, &req) {
+                let id = item.lcsc_id().unwrap_or_else(|| item.name().into());
+                rows.push(output::export_row(
+                    &queries[&id],
+                    Some(&item),
+                    result.map_err(|e| e.to_string()),
+                    &req,
+                ));
+            }
+            Ok(output::exports(rows, &req))
         }
+        Some(Cmd::Bom { command }) => bom::execute(command),
+        Some(Cmd::Library { command }) => library::execute(command),
     }
 }
 
-fn build_req(
-    step: bool,
-    obj: bool,
-    ad: bool,
-    kicad: bool,
-    pads: bool,
-    pads_grid: Option<lceda_core::pads::SchematicGrid>,
-    datasheet: bool,
-    source: bool,
-    ad_embed_3d: bool,
-    kicad_attach_3d: bool,
-    rename_footprint: bool,
-    sch_color: Option<&str>,
-    output: PathBuf,
-    force: bool,
-) -> ExportRequest {
-    let prefs = crate::prefs::load();
-    let scheme = sch_color
-        .map(lceda_core::altium::SchColorScheme::parse)
-        .unwrap_or(prefs.sch_scheme);
-    let mut req = ExportRequest {
-        step,
-        obj,
-        ad,
-        kicad,
-        pads,
-        pads_grid: pads_grid.unwrap_or(prefs.pads_grid),
-        datasheet,
-        source_json: source || ad || kicad || pads,
-        force,
-        out_dir: output,
-        ad_embed_3d,
-        kicad_attach_3d,
-        rename_footprint,
-        merge: false,
-        merge_name: "lceda".into(),
-        sch_colors: scheme.colors(prefs.sch_custom),
-        desc_fields: prefs.desc_fields.clone(),
-        ad_library_dir: None,
-        ad_library_files: Default::default(),
-        kicad_library_files: Default::default(),
-        bound_only: false,
-        sync_bindings: true,
-        ad_bridge: None,
-    };
-    if !req.step && !req.obj && !req.ad && !req.kicad && !req.pads && !req.datasheet && !req.source_json
-    {
-        req.step = true;
-        req.ad = true;
-        req.kicad = true;
-        req.source_json = true;
+/// Ranking is a suggestion. Never substitute another C-number or guess an ambiguous model.
+fn select(keyword: &str, items: Vec<SearchItem>, index: Option<u32>) -> Result<SearchItem> {
+    if models::looks_like_lcsc_token(keyword.trim()) {
+        let id = keyword.trim().to_ascii_uppercase();
+        return items
+            .into_iter()
+            .find(|item| {
+                item.lcsc_id().as_deref() == Some(id.as_str())
+                    && index.is_none_or(|index| item.index == index as usize)
+            })
+            .with_context(|| format!("No exact result for {id}; no substitute was selected"));
     }
-    req
-}
-
-fn print_paths(paths: &DownloadPaths) {
-    if let Some(p) = &paths.folder {
-        println!("DIR: {}", p.display());
+    if let Some(index) = index {
+        return items
+            .into_iter()
+            .find(|item| item.index == index as usize)
+            .with_context(|| format!("Search result index {index} does not exist"));
     }
-    if let Some(p) = &paths.step {
-        println!("STEP: {}", p.display());
-    }
-    if let Some(p) = &paths.obj {
-        println!("OBJ: {}", p.display());
-    }
-    if let Some(p) = &paths.datasheet {
-        println!("PDF: {}", p.display());
-    }
-    if let Some(p) = &paths.symbol_json {
-        println!("Symbol JSON: {}", p.display());
-    }
-    if let Some(p) = &paths.footprint_json {
-        println!("Footprint JSON: {}", p.display());
-    }
-    if let Some(p) = &paths.schlib {
-        println!("SchLib: {}", p.display());
-    }
-    if let Some(p) = &paths.pcblib {
-        println!("PcbLib: {}", p.display());
-    }
-    if let Some(p) = &paths.kicad_sym {
-        println!("KiCad symbol: {}", p.display());
-    }
-    if let Some(p) = &paths.kicad_mod {
-        println!("KiCad footprint: {}", p.display());
-    }
-    if let Some(p) = &paths.pads_c {
-        println!("PADS .c: {}", p.display());
-    }
-    if let Some(p) = &paths.pads_d {
-        println!("PADS .d: {}", p.display());
-    }
-    if let Some(p) = &paths.pads_p {
-        println!("PADS .p: {}", p.display());
+    let mut exact = items.into_iter().filter(|item| {
+        item.name().eq_ignore_ascii_case(keyword.trim())
+            || item.title.eq_ignore_ascii_case(keyword.trim())
+    });
+    let first = exact.next();
+    match (first, exact.next()) {
+        (Some(item), None) => Ok(item),
+        _ => bail!("No unique exact match for {keyword}; run search --json, review candidates, then use an LCSC ID or get --index"),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn single_and_batch_accept_custom_grid_and_reject_invalid_values() {
-        for command in ["get", "batch"] {
-            for mils in ["1", "7", "25", "50", "100", "1000"] {
-                let cli = Cli::try_parse_from(["lceda", command, "input", "--pads", "--pads-grid", mils]).unwrap();
-                let grid = match cli.cmd.unwrap() {
-                    Cmd::Get { pads_grid, .. } | Cmd::Batch { pads_grid, .. } => pads_grid.unwrap(),
-                    _ => panic!("wrong command"),
-                };
-                assert_eq!(grid.mils().to_string(), mils);
-            }
-            for bad in ["0", "-10", "1.5", "NaN", "1001", "4294967306"] {
-                assert!(Cli::try_parse_from(["lceda", command, "input", "--pads", "--pads-grid", bad]).is_err());
-            }
-        }
-    }
-}
+mod tests;

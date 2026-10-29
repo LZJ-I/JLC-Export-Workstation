@@ -382,10 +382,23 @@ pub fn export_items(client: &LcedaClient, items: &[SearchItem], req: &ExportRequ
     if merge_libs && !collected.is_empty() {
         uniquify_collected(&mut collected);
         match write_merged_libraries(req, &collected) {
-            Ok(paths) => for (item, result) in &mut rows {
-                if let Ok(p) = result {
-                    if req.ad && req.ad_library_dir.is_none() && !(req.sync_bindings && item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id))) { p.schlib = paths.schlib.clone(); p.pcblib = paths.pcblib.clone(); }
-                    if req.kicad && !(req.sync_bindings && item.lcsc_id().is_some_and(|id| req.kicad_library_files.contains_key(&id))) { p.kicad_sym = paths.kicad_sym.clone(); p.kicad_mod = paths.kicad_mod.clone(); }
+            Ok(paths) => {
+                let mut successful_parts = collected.iter();
+                for (item, result) in &mut rows {
+                    if let Ok(p) = result {
+                        let part = successful_parts.next().expect("one collected part per successful row");
+                        // A shared library path must not hide a missing symbol or
+                        // footprint for this specific part from automation callers.
+                        if req.ad && req.ad_library_dir.is_none() && !(req.sync_bindings && item.lcsc_id().is_some_and(|id| req.ad_library_files.contains_key(&id))) {
+                            p.schlib = paths.schlib.clone().filter(|_| part.symbol.is_some());
+                            p.pcblib = paths.pcblib.clone().filter(|_| part.footprint.is_some());
+                        }
+                        if req.kicad && !(req.sync_bindings && item.lcsc_id().is_some_and(|id| req.kicad_library_files.contains_key(&id))) {
+                            p.kicad_sym = paths.kicad_sym.clone().filter(|_| part.symbol.is_some());
+                            p.kicad_mod = part.footprint.as_ref().and_then(|fp| paths.kicad_mod.as_ref()
+                                .map(|path| path.with_file_name(format!("{}.kicad_mod", sanitize_filename(&fp.name)))));
+                        }
+                    }
                 }
             },
             Err(e) => {
