@@ -4,7 +4,7 @@
 
 搜索立创器件，查看原理图、封装和 3D 模型，导出 **Altium、KiCad、PADS** 器件库。使用 Rust 编写，提供原生桌面界面，也可通过 CLI 自动处理 BOM。
 
-[下载 v0.10.0](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.0) · [图形界面指南](docs/GUI_GUIDE_ZH.md) · [CLI 接口文档](docs/CLI_API.md) · [Agent 自动化](#agent-自动化)
+[下载 v0.10.1](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.1) · [图形界面指南](docs/GUI_GUIDE_ZH.md) · [CLI 接口文档](docs/CLI_API.md) · [Agent 自动化](#agent-自动化)
 
 ![搜索、3D 预览与器件库导出](docs/demo.gif)
 

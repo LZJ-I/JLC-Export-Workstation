@@ -12,7 +12,7 @@
 
 ## 准备程序与示例
 
-从 [v0.10.0 发布页](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.0) 下载对应平台的 ZIP 并解压。命令中的 `lceda` 使用解压后的程序路径；Linux/macOS 可用 `./lceda`，Windows 可用 `./lceda.exe`。如果选择源码编译：
+从 [v0.10.1 发布页](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.1) 下载对应平台的 ZIP 并解压。命令中的 `lceda` 使用解压后的程序路径。Linux/macOS 可用 `./lceda`，Windows 可用 `./lceda.exe`。也可从源码编译。
 
 ```bash
 cargo build -p lceda

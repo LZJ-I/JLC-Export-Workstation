@@ -151,6 +151,48 @@ mod tests {
     }
 
     #[test]
+    fn writes_smd200l_beziers_into_schlib() {
+        let source = serde_json::json!({ "result": { "dataStr": r#"
+["POLY","e3",[-20,0,-15,0],0,"st1",0]
+["BEZIER","e4",[-15,0,-10,10,-5,0,-5,0],"st1",0]
+["BEZIER","e5",[-5,0,0,-10,5,0,5,0],"st1",0]
+["POLY","e6",[5,0,10,0],0,"st1",0]
+["PIN","e7",1,null,-40,0,20,0]
+["PIN","e11",1,null,30,0,20,180]
+"# } });
+        let name = "SMD200L-24V";
+        let source = crate::easyeda::parse_symbol(&source).unwrap();
+        let symbol = crate::ir::symbol_ir(name, "PTC fuse", source, Default::default());
+        let path = std::env::temp_dir().join(format!("{name}-{}.SchLib", crate::util::unique_id()));
+        write_schlib(&path, &symbol).unwrap();
+        let scene = crate::native_library::preview(
+            &path,
+            crate::native_library::LibraryFormat::Ad,
+            name,
+            1,
+        );
+        std::fs::remove_file(&path).unwrap();
+        let scene = scene.unwrap();
+
+        let [left_pin, right_pin, left_line, upper, lower, right_line] = scene.strokes.as_slice() else {
+            panic!(
+                "expected two pin strokes and four body strokes, got {}",
+                scene.strokes.len()
+            );
+        };
+        assert_eq!(left_line.points.first(), left_pin.points.first());
+        assert_eq!(upper.points.first(), left_line.points.last());
+        assert_eq!(lower.points.first(), upper.points.last());
+        assert_eq!(right_line.points.first(), lower.points.last());
+        assert_eq!(right_pin.points.first(), right_line.points.last());
+        let expected_peak = (40.0 / 9.0) * crate::ir::SYMBOL_UNIT_MM;
+        let upper_peak = upper.points.iter().map(|&(_, y)| y).fold(0.0, f64::max);
+        let lower_peak = lower.points.iter().map(|&(_, y)| -y).fold(0.0, f64::max);
+        assert!((upper_peak - expected_peak).abs() < 0.01, "{upper_peak}");
+        assert!((lower_peak - expected_peak).abs() < 0.01, "{lower_peak}");
+    }
+
+    #[test]
     fn writes_schlib_easyeda_colors() {
         let dir = std::env::temp_dir().join("lceda-test-sch-easyeda");
         let _ = std::fs::create_dir_all(&dir);

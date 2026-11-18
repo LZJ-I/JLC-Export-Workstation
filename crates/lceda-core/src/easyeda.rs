@@ -220,6 +220,11 @@ pub fn parse_symbol(value: &Value) -> Result<EasyedaSymbol> {
                     }
                 }
             }
+            "BEZIER" => {
+                if let Some(points) = row.get(2).and_then(parse_bezier_points) {
+                    symbol.polys.push(points);
+                }
+            }
             "CIRCLE" => {
                 let r = get_f64(row, 4).abs();
                 if r > 1e-6 {
@@ -630,6 +635,38 @@ fn try_circle_shape(shape: &Value) -> Option<(f64, f64, f64)> {
         return None;
     }
     Some((json_f64(&arr[1]), json_f64(&arr[2]), r))
+}
+
+fn parse_bezier_points(shape: &Value) -> Option<Vec<(f64, f64)>> {
+    let coords = shape.as_array()?;
+    // 每段包含起点、两个控制点和终点，相邻段共享端点。
+    if coords.len() < 8 || (coords.len() - 2) % 6 != 0 {
+        return None;
+    }
+    let controls: Vec<_> = coords
+        .chunks_exact(2)
+        .map(|xy| Some((as_number(&xy[0])?, as_number(&xy[1])?)))
+        .collect::<Option<_>>()?;
+    if !controls.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        return None;
+    }
+
+    const STEPS: u32 = 32;
+    let mut points = vec![controls[0]];
+    for segment in controls.windows(4).step_by(3) {
+        for step in 1..STEPS {
+            let t = f64::from(step) / f64::from(STEPS);
+            let u = 1.0 - t;
+            let weights = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+            let (x, y) = segment.iter().zip(weights).fold((0.0, 0.0), |(x, y), (&(px, py), w)| {
+                (x + px * w, y + py * w)
+            });
+            push_pt(&mut points, x, y);
+        }
+        let (x, y) = segment[3];
+        push_pt(&mut points, x, y);
+    }
+    (points.len() >= 2).then_some(points)
 }
 
 fn parse_path_points(shape: &Value) -> Vec<(f64, f64)> {

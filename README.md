@@ -4,7 +4,7 @@
 
 Search LCSC parts, inspect symbols, footprints and 3D models, and export libraries for **Altium, KiCad and PADS**. A native Rust desktop app with a CLI for repeatable BOM workflows.
 
-[Download v0.10.0](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.0) · [Desktop guide](docs/GUI_GUIDE.md) · [CLI reference](docs/CLI_API.md) · [Agent automation](#agent-automation)
+[Download v0.10.1](https://github.com/LZJ-I/JLC-Export-Workstation/releases/tag/v0.10.1) · [Desktop guide](docs/GUI_GUIDE.md) · [CLI reference](docs/CLI_API.md) · [Agent automation](#agent-automation)
 
 ![Search, 3D preview and library export](docs/demo.gif)
 
